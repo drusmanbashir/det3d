@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 import argparse
 
-from det.configs.parser import ConfigMakerDet
-from det.preprocessing.label_bounded import LabelBoundedDetDataGenerator
-from det.preprocessing.object_bounded import resolve_input_folder
+from det3d.configs.parser import ConfigMakerDet
+from det3d.preprocessing.label_bounded import LabelBoundedDetDataGenerator
+from det3d.preprocessing.object_bounded import resolve_input_folder
 from fran.managers import Project
 
 

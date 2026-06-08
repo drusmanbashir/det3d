@@ -3,8 +3,8 @@ from pathlib import Path
 from typing import Optional
 
 import torch
-from det.managers.retinanet import RetinaNetManager
-from det.managers.data import DataManagerDualDet
+from det3d.managers.retinanet import RetinaNetManager
+from det3d.managers.data import DataManagerDualDet
 from fran.callback.debug_epoch_limit import DebugEpochBatchLimit
 from fran.callback.incremental import LRFloorStop
 from fran.callback.wandb.wandb import WandbLogBestCkpt
@@ -116,6 +116,11 @@ class TrainerDet(Trainer):
         self.init_dm_unet(epochs, batch_size, override_dm_checkpoint)
         self.D.prepare_data()
         self.D.setup(stage="fit")
+        headline(
+            "Data module ready.\n"
+            f"  train: {self.D.train_manager}\n"
+            f"  valid: {self.D.valid_manager}"
+        )
 
         cbs, logger, profiler = self.init_cbs(
             cbs=cbs,
@@ -150,7 +155,7 @@ class TrainerDet(Trainer):
     def init_dm(self):
         plan = self.configs["plan_train"]
         batch_size = int(
-            plan.get("batch_size", self.configs["dataset_params"].get("batch_size", 4))
+            plan.get("batch_size", self.configs["dataset_params"].get("batch_size", 64))
         )
         self.configs["dataset_params"]["batch_size"] = batch_size
         cache_rate = self.configs["dataset_params"].get("cache_rate", 0.0)
@@ -176,7 +181,6 @@ class TrainerDet(Trainer):
         else:
             self.D = self.init_dm()
             self.N = self.init_trainer(epochs)
-        headline(f"Data Manager initialized.\n {self.D}")
 
     def init_trainer(self, epochs):
         return RetinaNetManager(
@@ -296,3 +300,58 @@ class TrainerDet(Trainer):
             profiler = None
 
         return cbs, logger, profiler
+
+
+# %%
+if __name__ == "__main__":
+    from det3d.configs.parser import ConfigMakerDet
+    from fran.managers import Project
+    from utilz.helpers import pp
+
+    P = Project("lidc")
+    C = ConfigMakerDet(P)
+    C.setup(1)
+    conf = C.configs
+    pp(conf["plan_train"])
+
+# SECTION:-------------------- TRAINING --------------------------------------------------------------------------------------
+# %%
+    device_id = 0
+    wandb = False
+    wandb = True
+    run_name = None
+    tags = []
+    description = ""
+    conf["dataset_params"]["fold"] = 0
+    lr = None
+    debug_ = False
+    profiler = False
+    cbs = []
+    val_every_n_epochs = 5
+    train_indices = None
+    val_indices = None
+    val_sampling = 1.0
+    epochs = None
+    batch_size = 32
+# SECTION:-------------------- TRAINING --------------------------------------------------------------------------------------
+    Tm = TrainerDet(P.project_title, conf, run_name)
+# %%
+    Tm.setup(
+        train_indices=train_indices,
+        val_indices=val_indices,
+        val_sampling=val_sampling,
+        val_every_n_epochs=val_every_n_epochs,
+        cbs=cbs,
+        debug=debug_,
+        batch_size=batch_size,
+        devices=[device_id],
+        epochs=epochs,
+        profiler=profiler,
+        wandb=wandb,
+        tags=tags,
+        description=description,
+        lr=lr,
+    )
+# %%
+    Tm.fit()
+# %%

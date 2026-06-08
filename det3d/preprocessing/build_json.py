@@ -55,10 +55,9 @@ def split_case_ids_fallback(case_ids, validation_fraction, seed):
     return validation_ids
 
 
-def build_detection_json(
+def build_detection_datalist(
     images_dir,
     lesion_stats_csv,
-    dataset_json,
     train_case_ids=None,
     val_case_ids=None,
     validation_fraction=0.05,
@@ -70,7 +69,6 @@ def build_detection_json(
 ):
     images_dir = Path(images_dir)
     lesion_stats_csv = Path(lesion_stats_csv)
-    dataset_json = Path(dataset_json)
     rows = load_lesion_rows(lesion_stats_csv, dusting_mm=dusting_mm)
     grouped = group_rows_by_case(rows)
 
@@ -86,9 +84,8 @@ def build_detection_json(
 
     payload = {"training": [], "validation": []}
     errors = []
-    cases_total = 0
 
-    for case_id in tqdm(sorted(grouped.keys()), desc="build_detection_json"):
+    for case_id in tqdm(sorted(grouped.keys()), desc="build_detection_datalist"):
         image_path = images_dir / f"{case_id}.nii.gz"
         if not image_path.exists():
             errors.append({"case_id": case_id, "error": f"missing image {image_path}"})
@@ -114,10 +111,43 @@ def build_detection_json(
             if use_project_split and case_id not in train_set and case_id not in val_set:
                 continue
             payload[split].append(entry)
-            cases_total += 1
         except Exception as exc:
             errors.append({"case_id": case_id, "error": str(exc)})
 
+    if len(payload["training"]) == 0 and len(payload["validation"]) == 0:
+        raise RuntimeError(f"detection datalist produced no cases ({len(errors)} errors)")
+    return payload, errors, train_set, val_set
+
+
+def build_detection_json(
+    images_dir,
+    lesion_stats_csv,
+    dataset_json,
+    train_case_ids=None,
+    val_case_ids=None,
+    validation_fraction=0.05,
+    seed=0,
+    foreground_class_id=0,
+    image_path_prefix="",
+    remapping_train=None,
+    dusting_mm=None,
+):
+    images_dir = Path(images_dir)
+    lesion_stats_csv = Path(lesion_stats_csv)
+    dataset_json = Path(dataset_json)
+    payload, errors, train_set, val_set = build_detection_datalist(
+        images_dir=images_dir,
+        lesion_stats_csv=lesion_stats_csv,
+        train_case_ids=train_case_ids,
+        val_case_ids=val_case_ids,
+        validation_fraction=validation_fraction,
+        seed=seed,
+        foreground_class_id=foreground_class_id,
+        image_path_prefix=image_path_prefix,
+        remapping_train=remapping_train,
+        dusting_mm=dusting_mm,
+    )
+    cases_total = len(payload["training"]) + len(payload["validation"])
     dataset_json.parent.mkdir(parents=True, exist_ok=True)
     dataset_json.write_text(json.dumps(payload, indent=4))
     summary = {
@@ -137,6 +167,4 @@ def build_detection_json(
     dataset_json.with_suffix(".summary.json").write_text(
         json.dumps({"summary": summary, "errors": errors}, indent=4)
     )
-    if len(payload["training"]) == 0 and len(payload["validation"]) == 0:
-        raise RuntimeError(f"detection json generation produced no cases ({len(errors)} errors)")
     return summary

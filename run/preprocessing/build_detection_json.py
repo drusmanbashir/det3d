@@ -2,7 +2,7 @@
 import argparse
 import json
 
-from det.preprocessing.run_build import build_from_plan
+from det3d.preprocessing.run_build import build_from_plan
 
 
 def main():

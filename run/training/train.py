@@ -2,9 +2,9 @@
 import argparse
 
 import torch
-from det.configs.parser import ConfigMakerDet
-from det.preprocessing.run_build import build_from_plan
-from det.training.trainer import TrainerDet
+from det3d.configs.parser import ConfigMakerDet
+from det3d.preprocessing.run_build import build_from_plan
+from det3d.training.trainer import TrainerDet
 from fran.managers import Project
 from fran.utils.misc import parse_devices
 

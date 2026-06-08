@@ -2,12 +2,6 @@ from pathlib import Path
 
 import pandas as pd
 import ray
-import torch
-from det.configs.parser import ConfigMakerDet
-from det.preprocessing.object_bounded import _dusting_threshold, resolve_input_folder
-from det.transforms.bbox_stats import DetectionBBoxStatsd
-from det.utils.bbox_sidecar import bbox_sidecar_path, save_detection_sidecar
-from det.utils.folder_names import lbd_det_folder_from_plan
 from fran.preprocessing.helpers import infer_indices_folder
 from fran.preprocessing.labelbounded import LabelBoundedDataGenerator
 from fran.preprocessing.preprocessor import CPUS_PER_ACTOR, store_label_count
@@ -15,6 +9,11 @@ from fran.preprocessing.rayworker_base import MIN_SIZE, RayWorkerBase
 from monai.transforms import ScaleIntensityRanged
 from utilz.fileio import maybe_makedirs
 from utilz.stringz import strip_extension
+
+from det3d.preprocessing.object_bounded import _dusting_threshold
+from det3d.transforms.bbox_stats import DetectionBBoxStatsd
+from det3d.utils.bbox_sidecar import bbox_sidecar_path, save_detection_sidecar
+from det3d.utils.folder_names import lbd_det_folder_from_plan
 
 
 class _LBDDetWorker(RayWorkerBase):
@@ -188,9 +187,7 @@ class LabelBoundedDetDataGenerator(LabelBoundedDataGenerator):
     def _register_existing_pt_files(self):
         existing_img = {p.name for p in (self.output_folder / "images").glob("*.pt")}
         existing_lm = {p.name for p in (self.output_folder / "lms").glob("*.pt")}
-        bbox_stems = {
-            p.stem for p in (self.output_folder / "bboxes").glob("*.json")
-        }
+        bbox_stems = {p.stem for p in (self.output_folder / "bboxes").glob("*.json")}
         self.existing_pt_fnames = {
             fn
             for fn in existing_img.intersection(existing_lm)
@@ -201,9 +198,7 @@ class LabelBoundedDetDataGenerator(LabelBoundedDataGenerator):
             "LBD det case files fully processed in a previous session: ",
             len(self.existing_pt_fnames),
         )
-        case_ids_done = [
-            strip_extension(fn) for fn in self.existing_pt_fnames
-        ]
+        case_ids_done = [strip_extension(fn) for fn in self.existing_pt_fnames]
         self.df.loc[self.df["case_id"].isin(case_ids_done), "pt_processed"] = True
 
     def postprocess(self, overwrite=False, num_processes=8):
@@ -214,3 +209,49 @@ class LabelBoundedDetDataGenerator(LabelBoundedDataGenerator):
 
     def postprocess_artifacts_missing(self):
         return not (self.output_folder / "labels_all.json").exists()
+
+
+
+# SECTION:-------------------- setup--------------------------------------------------------------------------------------
+
+if __name__ == "__main__":
+
+    from det3d.configs.parser import ConfigMakerDet
+    from det3d.preprocessing.object_bounded import resolve_input_folder
+    from det3d.configs.parser import ConfigMakerDet
+    from fran.managers import Project
+
+    project_title = "lidc"
+    plan_id = 1
+    project = Project(project_title=project_title)
+    config_maker = ConfigMakerDet(project)
+    config_maker.setup(plan_id)
+    plan = config_maker.configs["plan_train"]
+    debug_ = False
+    overwrite=False
+# %%
+    input_folder = resolve_input_folder(project, plan, input_folder=None)
+    num_processes = 16
+# %%
+
+    G = LabelBoundedDetDataGenerator(
+        project=project,
+        plan=plan,
+        data_folder=input_folder,
+    )
+
+    G.setup()
+# %%
+    G.run(overwrite=overwrite, num_processes=num_processes)
+# %%
+    cfg = ConfigMakerDet(project=project, plan=plan_id).cfg
+    G = LabelBoundedDetDataGenerator(
+        project=project,
+        plan=cfg,
+        data_folder=data_folder,
+    )
+# %%
+    gen.run(num_processes=16)
+# %%
+
+

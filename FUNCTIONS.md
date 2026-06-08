@@ -11,7 +11,7 @@
 
 ## det/preprocessing
 
-- `object_bounded.py` — `ObjectBoundedDataGenerator` + `_OBJWorker`: fixed_spacing PT in; strict bbox crop (`expand_by=0`); compose `LoadT,Chan,Dev,Stats,N2P,AttachGT,Int`; patch size native — batch pad in `obd_det_collate` → `images/`, `lms/`, `bboxes/*_bboxN.json`
+- `object_bounded.py` — `ObjectBoundedDataGenerator` + `_OBJWorker`: fixed_spacing PT in; strict bbox crop (`expand_by=0`); compose `LoadT,Chan,Dev,Stats,N2P,AttachGT,Int`; patch size native — train `batch_size=1`, no collate/pad → `images/`, `lms/`, `bboxes/*_bboxN.json`
 - `label_bounded.py` — `LabelBoundedDetDataGenerator` + `_LBDDetWorker`: fixed_spacing PT in → label crop/remap → `DetectionBBoxStatsd` → one `images/`, `lms/`, `bboxes/{case}.json` per case; optional HDF5 shards; postprocess writes `labels_all.json` only
 - `bbox_sidecar.py` — `save_detection_sidecar` / `load_detection_sidecar`: RetinaNet-style `{box, label}` JSON sidecars
 

@@ -1,14 +1,15 @@
 import json
 import re
+import resource
+from functools import partial
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import torch
-from det.collate import obd_det_collate
-from functools import partial
-from det.utils.bbox_sidecar import bbox_sidecar_path, load_detection_sidecar
-from det.utils.folder_names import lbd_det_folder_from_plan, obd_folder_from_plan
+from det3d.collate import obd_det_collate
+from det3d.utils.bbox_sidecar import bbox_sidecar_path, load_detection_sidecar
+from det3d.utils.folder_names import lbd_det_folder_from_plan, obd_folder_from_plan
 from fran.managers.data.main import (
     DataManager,
     DataManagerDual,
@@ -16,7 +17,13 @@ from fran.managers.data.main import (
 )
 from fran.run.preproc.archive_preprocessed import ensure_rapid_data_folder
 from fran.transforms.imageio import TorchReader
-from monai.apps.detection.transforms.dictionary import ClipBoxToImaged
+from monai.apps.detection.transforms.dictionary import (
+    ClipBoxToImaged,
+    ConvertBoxToStandardModed,
+    RandFlipBoxd,
+    RandRotateBox90d,
+    RandZoomBoxd,
+)
 from monai.data import DataLoader, MetaTensor
 from fran.transforms.intensitytransforms import RandRandGaussianNoised
 from monai.transforms import (
@@ -26,14 +33,9 @@ from monai.transforms import (
     LoadImaged,
     MapTransform,
     RandAdjustContrastd,
-    RandFlipd,
-    RandRotate90d,
     RandScaleIntensityd,
     RandShiftIntensityd,
-    RandZoomd,
 )
-from monai.transforms.spatial.dictionary import ConvertBoxToPointsd, ConvertPointsToBoxesd
-from monai.transforms.utility.dictionary import ApplyTransformToPointsd
 from fran.preprocessing.helpers import import_h5py
 from utilz.stringz import info_from_filename
 
@@ -96,7 +98,7 @@ class _DetManagerBase(DataManager):
         self,
         project,
         configs: dict,
-        batch_size=4,
+        batch_size=64,
         cache_rate=0.0,
         split="train",
         device="cuda:0",
@@ -140,7 +142,7 @@ class _DetManagerBase(DataManager):
     def set_effective_batch_size(self):
         self.effective_batch_size = self.batch_size
 
-    def _compute_size_divisible(self):
+    def _size_divisible(self):
         plan = self.plan
         return [
             step * 2 * 2 ** max(plan["returned_layers"])
@@ -148,8 +150,11 @@ class _DetManagerBase(DataManager):
         ]
 
     def _set_collate_fn(self):
+        if self.is_eval_split():
+            self.collate_fn = None
+            return
         self.collate_fn = partial(
-            obd_det_collate, size_divisible=self._compute_size_divisible()
+            obd_det_collate, size_divisible=self._size_divisible()
         )
 
     def _compute_dtype(self):
@@ -171,47 +176,98 @@ class _DetManagerBase(DataManager):
             ),
         ]
 
-    def _box_aug_transforms(self):
-        ik, bk, lk, pk = self.image_key, self.box_key, self.label_key, self.point_key
+    def _box_standardize_transform(self):
         return {
-            "BoxToPts": ConvertBoxToPointsd(keys=[bk], point_key=pk),
-            "BoxPtAug": ApplyTransformToPointsd(
-                keys=[pk], refer_keys=ik, affine_lps_to_ras=self.affine_lps_to_ras
+            "StdBox": ConvertBoxToStandardModed(
+                box_keys=[self.box_key], mode=self.plan["gt_box_mode"]
             ),
-            "BoxConv": ConvertPointsToBoxesd(keys=[pk], box_key=bk),
+        }
+
+    def _box_aug_transforms(self):
+        ik, bk, lk = self.image_key, self.box_key, self.label_key
+        box_ref = [ik]
+        return {
+            "F1": RandFlipBoxd(
+                image_keys=[ik],
+                box_keys=[bk],
+                box_ref_image_keys=box_ref,
+                prob=0.5,
+                spatial_axis=0,
+            ),
+            "F2": RandFlipBoxd(
+                image_keys=[ik],
+                box_keys=[bk],
+                box_ref_image_keys=box_ref,
+                prob=0.5,
+                spatial_axis=1,
+            ),
+            "F3": RandFlipBoxd(
+                image_keys=[ik],
+                box_keys=[bk],
+                box_ref_image_keys=box_ref,
+                prob=0.5,
+                spatial_axis=2,
+            ),
+            "Rand90": RandRotateBox90d(
+                image_keys=[ik],
+                box_keys=[bk],
+                box_ref_image_keys=box_ref,
+                prob=0.75,
+                max_k=3,
+                spatial_axes=(0, 1),
+            ),
+            "DetZoom": RandZoomBoxd(
+                image_keys=[ik],
+                box_keys=[bk],
+                box_ref_image_keys=box_ref,
+                prob=0.2,
+                min_zoom=0.7,
+                max_zoom=1.4,
+                padding_mode="constant",
+                keep_size=True,
+            ),
             "BoxClip": ClipBoxToImaged(
                 box_keys=bk,
                 label_keys=[lk],
                 box_ref_image_keys=ik,
-                remove_empty=False,
+                remove_empty=True,
             ),
         }
 
-    def create_dataloader(self):
-        if self.is_train_split():
-            num_workers = int(self.plan.get("num_workers_train", 7))
-        else:
-            num_workers = int(self.plan.get("num_workers_val", 2))
+    def _num_workers(self):
         if self.debug:
+            return 0, False
+        soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft_limit < 1024:
+            return 0, False
+        if self.is_train_split():
+            num_workers = min(4, max(2, self.effective_batch_size // 8))
+        else:
             num_workers = 0
-        persistent_workers = num_workers > 0
-        batch_size = 1 if self.is_eval_split() else self.effective_batch_size
+        return num_workers, False
+
+    def create_dataloader(self):
+        num_workers, persistent_workers = self._num_workers()
+        if self.is_train_split():
+            batch_size = self.effective_batch_size
+            collate_fn = self.collate_fn
+        else:
+            batch_size = 1
+            collate_fn = None
         self.dl = DataLoader(
             self.ds,
             batch_size=batch_size,
             shuffle=self.is_train_split(),
             num_workers=num_workers,
-            collate_fn=self.collate_fn,
+            collate_fn=collate_fn,
             persistent_workers=persistent_workers,
-            pin_memory=not self.debug and torch.cuda.is_available(),
+            pin_memory=False,
         )
 
 
 class DataManagerDetOBD(_DetManagerBase):
-    keys_tr = (
-        "L,E,BoxToPts,F1,F2,F3,Rand90,DetZoom,BoxPtAug,BoxConv,BoxClip,IntensityTfms,Dtype"
-    )
-    keys_val = "L,E,Dtype"
+    keys_tr = "L,E,StdBox,F1,F2,F3,Rand90,DetZoom,BoxClip,IntensityTfms,Dtype"
+    keys_val = "L,E,StdBox,Dtype"
 
     def derive_data_folder(self, plan):
         data_folder = obd_folder_from_plan(self.project, plan)
@@ -305,29 +361,16 @@ class DataManagerDetOBD(_DetManagerBase):
         self.transforms_dict = {
             "L": L,
             "E": EnsureChannelFirstd(keys=data_keys),
-            "F1": RandFlipd(keys=spatial_keys, prob=0.5, spatial_axis=0),
-            "F2": RandFlipd(keys=spatial_keys, prob=0.5, spatial_axis=1),
-            "F3": RandFlipd(keys=spatial_keys, prob=0.5, spatial_axis=2),
-            "Rand90": RandRotate90d(
-                keys=[ik], prob=0.75, max_k=3, spatial_axes=(0, 1)
-            ),
-            "DetZoom": RandZoomd(
-                keys=[ik],
-                prob=0.2,
-                min_zoom=0.7,
-                max_zoom=1.4,
-                padding_mode="constant",
-                keep_size=True,
-            ),
             "IntensityTfms": self._intensity_tfms(ik),
             "Dtype": Compose(
                 [
                     EnsureTyped(keys=[ik], dtype=compute_dtype),
-                    EnsureTyped(keys=[bk], dtype=compute_dtype),
+                    EnsureTyped(keys=[bk], dtype=torch.float32),
                     EnsureTyped(keys=[lk], dtype=torch.long),
                 ]
             ),
         }
+        self.transforms_dict.update(self._box_standardize_transform())
         self.transforms_dict.update(self._box_aug_transforms())
 
     def __repr__(self):
@@ -336,11 +379,9 @@ class DataManagerDetOBD(_DetManagerBase):
 
 
 class DataManagerDetLBD(_DetManagerBase):
-    keys_tr = (
-        "L,E,BoxToPts,F1,F2,F3,Rand90,DetZoom,BoxPtAug,BoxConv,BoxClip,IntensityTfms,Dtype"
-    )
-    keys_val = "L,E,DtypeVal"
-    keys_val_shard = "Ld,Lfull,E,DtypeVal"
+    keys_tr = "L,E,StdBox,F1,F2,F3,Rand90,DetZoom,BoxClip,IntensityTfms,Dtype"
+    keys_val = "L,E,StdBox,DtypeVal"
+    keys_val_shard = "Ld,Lfull,E,StdBox,DtypeVal"
 
     def derive_data_folder(self, plan):
         data_folder = lbd_det_folder_from_plan(self.project, plan)
@@ -369,6 +410,8 @@ class DataManagerDetLBD(_DetManagerBase):
         return self.data_folder / "hdf5_shards" / f"src_{src_tag}" / "manifest.json"
 
     def uses_hdf5_shards(self):
+        if self.is_train_split():
+            return False
         return self.hdf5_manifest_fn.is_file()
 
     def cases_from_project_split(self):
@@ -498,30 +541,23 @@ class DataManagerDetLBD(_DetManagerBase):
                 manifest_fn=str(self.hdf5_manifest_fn),
             ),
             "E": EnsureChannelFirstd(keys=data_keys),
-            "F1": RandFlipd(keys=spatial_keys, prob=0.5, spatial_axis=0),
-            "F2": RandFlipd(keys=spatial_keys, prob=0.5, spatial_axis=1),
-            "F3": RandFlipd(keys=spatial_keys, prob=0.5, spatial_axis=2),
-            "Rand90": RandRotate90d(
-                keys=[ik], prob=0.75, max_k=3, spatial_axes=(0, 1)
-            ),
-            "DetZoom": RandZoomd(
-                keys=[ik],
-                prob=0.2,
-                min_zoom=0.7,
-                max_zoom=1.4,
-                padding_mode="constant",
-                keep_size=True,
-            ),
             "IntensityTfms": self._intensity_tfms(ik),
             "Dtype": Compose(
                 [
                     EnsureTyped(keys=[ik], dtype=compute_dtype),
-                    EnsureTyped(keys=[bk], dtype=compute_dtype),
+                    EnsureTyped(keys=[bk], dtype=torch.float32),
                     EnsureTyped(keys=[lk], dtype=torch.long),
                 ]
             ),
-            "DtypeVal": EnsureTyped(keys=[ik], dtype=compute_dtype),
+            "DtypeVal": Compose(
+                [
+                    EnsureTyped(keys=[ik], dtype=compute_dtype),
+                    EnsureTyped(keys=[bk], dtype=torch.float32),
+                    EnsureTyped(keys=[lk], dtype=torch.long),
+                ]
+            ),
         }
+        self.transforms_dict.update(self._box_standardize_transform())
         self.transforms_dict.update(self._box_aug_transforms())
 
     def set_transforms(self, keys):

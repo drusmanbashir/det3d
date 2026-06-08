@@ -3,9 +3,9 @@ from fran.managers.project import Project
 from fran.preprocessing.preprocessor import resolve_plan_datasources
 from fran.utils.misc import convert_remapping
 
-from det.configs.parser import ConfigMakerDet
-from det.preprocessing.build_json import build_detection_json
-from det.preprocessing.paths import resolve_detection_paths
+from det3d.configs.parser import ConfigMakerDet
+from det3d.preprocessing.build_json import build_detection_json
+from det3d.preprocessing.paths import resolve_detection_paths
 
 
 def build_from_plan(project_title, plan_id):

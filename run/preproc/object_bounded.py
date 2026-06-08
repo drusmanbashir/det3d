@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 import argparse
 
-from det.configs.parser import ConfigMakerDet
-from det.preprocessing.object_bounded import (
+from det3d.configs.parser import ConfigMakerDet
+from det3d.preprocessing.object_bounded import (
     ObjectBoundedDataGenerator,
     resolve_input_folder,
 )

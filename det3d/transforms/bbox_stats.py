@@ -1,5 +1,5 @@
 import torch
-from det.geometry.lmg import DetectionLabelMapGeometryPT
+from det3d.geometry.lmg import DetectionLabelMapGeometryPT
 from monai.transforms import MapTransform
 
 

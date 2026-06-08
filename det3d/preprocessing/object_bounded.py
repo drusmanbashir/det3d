@@ -2,10 +2,10 @@ from pathlib import Path
 
 import pandas as pd
 import ray
-from det.transforms.bbox_stats import AttachDetectionGTd
-from det.transforms.patch_size import NbrhoodsToPatchesOBDD
-from det.utils.bbox_sidecar import bbox_sidecar_path, save_detection_sidecar
-from det.utils.folder_names import obd_folder_from_plan
+from det3d.transforms.bbox_stats import AttachDetectionGTd
+from det3d.transforms.patch_size import NbrhoodsToPatchesOBDD
+from det3d.utils.bbox_sidecar import bbox_sidecar_path, save_detection_sidecar
+from det3d.utils.folder_names import obd_folder_from_plan
 from dot.transforms.transforms import BBoxInfoStatsd2
 from fran.preprocessing.preprocessor import CPUS_PER_ACTOR, Preprocessor
 from fran.preprocessing.rayworker_base import RayWorkerBase
@@ -27,7 +27,7 @@ def _dusting_threshold(plan):
 class _OBJWorker(RayWorkerBase):
     """Object-bounded detection worker: fixed_spacing PT in → strict-bbox patches out.
 
-    expand_by=0; no preproc min/max resize/pad — batch collate zero-pads to max shape.
+    expand_by=0; no preproc min/max resize/pad — train batch_size=1, native patch shape.
     """
 
     def __init__(
@@ -312,7 +312,7 @@ class ObjectBoundedDataGenerator(Preprocessor):
 # %%
 # SECTION:-------------------- --------------------------------------------------------------------------------------
 if __name__ == "__main__":
-    from det.configs.parser import ConfigMakerDet
+    from det3d.configs.parser import ConfigMakerDet
     from fran.managers import Project
 
     project_title = "lidc"

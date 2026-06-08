@@ -3,28 +3,41 @@ import torch.nn.functional as F
 from monai.transforms.utils import compute_divisible_spatial_size
 
 
-def _spatial_shape(t):
+def spatial_shape(t):
     return tuple(int(v) for v in t.shape[-3:])
 
 
-def _pad_to_shape(t, target_shape):
-    shape = _spatial_shape(t)
-    pad_pairs = []
-    for current, target in zip(shape, target_shape):
-        deficit = max(target - current, 0)
-        pad_pairs.append((0, deficit))
+def pad_offsets(current_shape, target_shape):
+    """End-padding only: voxel indices unchanged (offsets are zero)."""
+    return [0, 0, 0]
+
+
+def adjust_boxes_for_pad(box, offsets):
+    """Shift StandardMode xyzxyz boxes when padding adds voxels before content."""
+    box = torch.as_tensor(box, dtype=torch.float32)
+    if box.numel() == 0:
+        return box.reshape(0, 6)
+    if box.ndim == 1:
+        box = box.unsqueeze(0)
+    off = torch.tensor(offsets, dtype=box.dtype)
+    box = box.clone()
+    box[:, :3] += off
+    box[:, 3:6] += off
+    return box
+
+
+def pad_image_to_shape(image, target_shape):
+    shape = spatial_shape(image)
     pad = []
-    for left, right in pad_pairs[::-1]:
-        pad.extend([left, right])
+    for current, target in zip(reversed(shape), reversed(target_shape)):
+        pad.extend([0, max(target - current, 0)])
     if sum(pad) == 0:
-        return t
-    out = F.pad(t, pad, value=0)
-    if hasattr(t, "meta"):
-        out.meta = t.meta
-    return out
+        return torch.as_tensor(image).contiguous()
+    out = F.pad(torch.as_tensor(image), pad, value=0)
+    return out.contiguous()
 
 
-def _as_box_tensor(box):
+def as_box_tensor(box):
     if isinstance(box, list):
         if len(box) == 0:
             return torch.zeros((0, 6), dtype=torch.float32)
@@ -35,10 +48,10 @@ def _as_box_tensor(box):
     box = torch.as_tensor(box, dtype=torch.float32)
     if box.ndim == 1:
         box = box.unsqueeze(0)
-    return box
+    return box.contiguous()
 
 
-def _as_label_tensor(label):
+def as_label_tensor(label):
     if isinstance(label, list):
         if len(label) == 0:
             return torch.zeros((0,), dtype=torch.long)
@@ -50,9 +63,10 @@ def _as_label_tensor(label):
 
 
 def obd_det_collate(batch, size_divisible=None):
+    """Pad each item to batch max spatial size, adjust boxes, stack images."""
     max_shape = [0, 0, 0]
     for item in batch:
-        shape = _spatial_shape(item["image"])
+        shape = spatial_shape(item["image"])
         max_shape = [max(a, b) for a, b in zip(max_shape, shape)]
     target_shape = tuple(max_shape)
     if size_divisible is not None:
@@ -63,15 +77,25 @@ def obd_det_collate(batch, size_divisible=None):
     boxes = []
     labels = []
     for item in batch:
-        images.append(_pad_to_shape(item["image"], target_shape))
-        boxes.append(_as_box_tensor(item["box"]))
-        labels.append(_as_label_tensor(item["label"]))
+        shape = spatial_shape(item["image"])
+        offsets = pad_offsets(shape, target_shape)
+        image = pad_image_to_shape(item["image"], target_shape)
+        box = adjust_boxes_for_pad(item["box"], offsets)
+        images.append(image)
+        boxes.append(box)
+        labels.append(as_label_tensor(item["label"]))
     images_out = torch.stack(images, 0)
-    if hasattr(batch[0]["image"], "meta"):
-        images_out.meta = batch[0]["image"].meta
     return {
         "image": images_out,
         "box": boxes,
         "label": labels,
         "spatial_size": target_shape,
     }
+
+
+def det_stack_collate(batch):
+    """Stack pre-padded items (fixed-pad pipeline)."""
+    images = torch.stack([torch.as_tensor(item["image"]).contiguous() for item in batch], 0)
+    boxes = [as_box_tensor(item["box"]) for item in batch]
+    labels = [as_label_tensor(item["label"]) for item in batch]
+    return {"image": images, "box": boxes, "label": labels}
