@@ -46,7 +46,7 @@ from monai.utils import set_determinism
 project_title = "lidc"
 plan_id = 1
 ds_name = "lidc_all"
-max_epochs = 500
+max_epochs = 300
 verbose = False
 model_path = "/s/agent_rw/tmp/luna16_lidc_all/detector.pt"
 tfevent_path = "/s/agent_rw/tmp/luna16_lidc_all/tfevents"
@@ -322,6 +322,34 @@ def main():
 
         # ------------- Validation for model selection -------------
         if (epoch + 1) % val_interval == 0:
+            detector.train()
+            val_epoch_loss = 0.0
+            val_loss_steps = 0
+            with torch.no_grad():
+                for val_data in val_loader:
+                    val_inputs = [val_data_i["image"].to(device) for val_data_i in val_data]
+                    val_targets = [
+                        dict(
+                            label=val_data_i["label"].to(device),
+                            box=val_data_i["box"].to(device),
+                        )
+                        for val_data_i in val_data
+                    ]
+                    if amp:
+                        with torch.autocast("cuda"):
+                            val_loss_outputs = detector(val_inputs, val_targets)
+                    else:
+                        val_loss_outputs = detector(val_inputs, val_targets)
+                    val_batch_loss = (
+                        w_cls * val_loss_outputs[detector.cls_key]
+                        + val_loss_outputs[detector.box_reg_key]
+                    )
+                    val_epoch_loss += val_batch_loss.item()
+                    val_loss_steps += 1
+            val_epoch_loss /= val_loss_steps
+            print(f"epoch {epoch + 1} avg val loss: {val_epoch_loss:.4f}")
+            tensorboard_writer.add_scalar("avg_val_loss", val_epoch_loss, epoch + 1)
+
             detector.eval()
             val_outputs_all = []
             val_targets_all = []
