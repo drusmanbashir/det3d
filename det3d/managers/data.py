@@ -1,5 +1,4 @@
 import json
-import re
 import resource
 from functools import partial
 from pathlib import Path
@@ -7,9 +6,9 @@ from typing import Optional
 
 import numpy as np
 import torch
-from det3d.collate import obd_det_collate
+from det3d.collate import lbd_det_collate
 from det3d.utils.bbox_sidecar import bbox_sidecar_path, load_detection_sidecar
-from det3d.utils.folder_names import lbd_det_folder_from_plan, obd_folder_from_plan
+from det3d.utils.folder_names import lbd_det_folder_from_plan
 from fran.managers.data.main import (
     DataManager,
     DataManagerDual,
@@ -17,30 +16,30 @@ from fran.managers.data.main import (
 )
 from fran.run.preproc.archive_preprocessed import ensure_rapid_data_folder
 from fran.transforms.imageio import TorchReader
-from monai.apps.detection.transforms.dictionary import (
-    ClipBoxToImaged,
-    ConvertBoxToStandardModed,
-    RandFlipBoxd,
-    RandRotateBox90d,
-    RandZoomBoxd,
-)
+from monai.apps.detection.transforms.dictionary import ClipBoxToImaged
 from monai.data import DataLoader, MetaTensor
 from fran.transforms.intensitytransforms import RandRandGaussianNoised
 from monai.transforms import (
     Compose,
+    DeleteItemsd,
     EnsureChannelFirstd,
     EnsureTyped,
     LoadImaged,
     MapTransform,
     RandAdjustContrastd,
+    RandCropByPosNegLabeld,
+    RandFlipd,
+    RandRotate90d,
+    RandRotated,
     RandScaleIntensityd,
     RandShiftIntensityd,
+    RandZoomd,
+    ScaleIntensityRanged,
 )
+from monai.transforms.spatial.dictionary import ConvertBoxToPointsd, ConvertPointsToBoxesd
+from monai.transforms.utility.dictionary import ApplyTransformToPointsd
 from fran.preprocessing.helpers import import_h5py
 from utilz.stringz import info_from_filename
-
-
-PATCH_FNAME_RE = re.compile(r"^(?P<case_id>.+)_bbox(?P<idx>\d+)\.pt$")
 
 
 def _valid_detection_box(box):
@@ -90,9 +89,10 @@ class _DetManagerBase(DataManager):
     data_keys = ("image",)
     spatial_aug_keys = ("image",)
     image_key = "image"
-    box_key = "box"
+    box_key = "bbox"
     label_key = "label"
     point_key = "points"
+    mask_key = "mask_image"
 
     def __init__(
         self,
@@ -149,12 +149,17 @@ class _DetManagerBase(DataManager):
             for step in plan["conv1_t_stride"]
         ]
 
+    def _patch_size(self):
+        return tuple(int(v) for v in self.plan["patch_size"])
+
     def _set_collate_fn(self):
         if self.is_eval_split():
             self.collate_fn = None
             return
         self.collate_fn = partial(
-            obd_det_collate, size_divisible=self._size_divisible()
+            lbd_det_collate,
+            size_divisible=self._size_divisible(),
+            box_key=self.box_key,
         )
 
     def _compute_dtype(self):
@@ -176,62 +181,70 @@ class _DetManagerBase(DataManager):
             ),
         ]
 
-    def _box_standardize_transform(self):
-        return {
-            "StdBox": ConvertBoxToStandardModed(
-                box_keys=[self.box_key], mode=self.plan["gt_box_mode"]
-            ),
-        }
+    def _norm_transform(self, ik):
+        plan = self.plan
+        return ScaleIntensityRanged(
+            keys=[ik],
+            a_min=float(plan["intensity_a_min"]),
+            a_max=float(plan["intensity_a_max"]),
+            b_min=0.0,
+            b_max=1.0,
+            clip=True,
+        )
 
-    def _box_aug_transforms(self):
-        ik, bk, lk = self.image_key, self.box_key, self.label_key
-        box_ref = [ik]
+    def _train_spatial_transforms(self):
+        ik, bk, lk, pk, mk = (
+            self.image_key,
+            self.box_key,
+            self.label_key,
+            self.point_key,
+            self.mask_key,
+        )
+        patch_size = self._patch_size()
+        affine_lps_to_ras = self.affine_lps_to_ras
         return {
-            "F1": RandFlipBoxd(
-                image_keys=[ik],
-                box_keys=[bk],
-                box_ref_image_keys=box_ref,
-                prob=0.5,
-                spatial_axis=0,
+            "ToPoints": ConvertBoxToPointsd(keys=[bk]),
+            "RandCrop": RandCropByPosNegLabeld(
+                keys=[ik],
+                label_key=mk,
+                spatial_size=patch_size,
+                num_samples=int(self.plan["samples_per_file"]),
+                pos=1,
+                neg=1,
             ),
-            "F2": RandFlipBoxd(
-                image_keys=[ik],
-                box_keys=[bk],
-                box_ref_image_keys=box_ref,
-                prob=0.5,
-                spatial_axis=1,
-            ),
-            "F3": RandFlipBoxd(
-                image_keys=[ik],
-                box_keys=[bk],
-                box_ref_image_keys=box_ref,
-                prob=0.5,
-                spatial_axis=2,
-            ),
-            "Rand90": RandRotateBox90d(
-                image_keys=[ik],
-                box_keys=[bk],
-                box_ref_image_keys=box_ref,
-                prob=0.75,
-                max_k=3,
-                spatial_axes=(0, 1),
-            ),
-            "DetZoom": RandZoomBoxd(
-                image_keys=[ik],
-                box_keys=[bk],
-                box_ref_image_keys=box_ref,
+            "Zoom": RandZoomd(
+                keys=[ik],
                 prob=0.2,
                 min_zoom=0.7,
                 max_zoom=1.4,
                 padding_mode="constant",
                 keep_size=True,
             ),
+            "Flip0": RandFlipd(keys=[ik], prob=0.5, spatial_axis=0),
+            "Flip1": RandFlipd(keys=[ik], prob=0.5, spatial_axis=1),
+            "Flip2": RandFlipd(keys=[ik], prob=0.5, spatial_axis=2),
+            "Rand90": RandRotate90d(keys=[ik], prob=0.75, max_k=3, spatial_axes=(0, 1)),
+            "Rot": RandRotated(
+                keys=[ik],
+                mode="nearest",
+                prob=0.2,
+                range_x=np.pi / 6,
+                range_y=np.pi / 6,
+                range_z=np.pi / 6,
+                keep_size=True,
+                padding_mode="zeros",
+            ),
+            "AffinePts": ApplyTransformToPointsd(
+                keys=[pk], refer_keys=ik, affine_lps_to_ras=affine_lps_to_ras
+            ),
+            "ToBoxes": ConvertPointsToBoxesd(keys=[pk]),
             "BoxClip": ClipBoxToImaged(
                 box_keys=bk,
                 label_keys=[lk],
                 box_ref_image_keys=ik,
                 remove_empty=True,
             ),
+            "DelMask": DeleteItemsd(keys=[mk]),
         }
 
     def _num_workers(self):
@@ -265,125 +278,8 @@ class _DetManagerBase(DataManager):
         )
 
 
-class DataManagerDetOBD(_DetManagerBase):
-    keys_tr = "L,E,StdBox,F1,F2,F3,Rand90,DetZoom,BoxClip,IntensityTfms,Dtype"
-    keys_val = "L,E,StdBox,Dtype"
-
-    def derive_data_folder(self, plan):
-        data_folder = obd_folder_from_plan(self.project, plan)
-        data_folder = ensure_rapid_data_folder(data_folder)
-        if not data_folder.exists():
-            raise FileNotFoundError(f"Data folder {data_folder} does not exist")
-        images_dir = data_folder / "images"
-        lms_dir = data_folder / "lms"
-        bboxes_dir = data_folder / "bboxes"
-        if not images_dir.is_dir() or not lms_dir.is_dir() or not bboxes_dir.is_dir():
-            raise FileNotFoundError(
-                f"Expected images/, lms/, and bboxes/ under {data_folder}"
-            )
-        if len(list(images_dir.glob("*_bbox*.pt"))) == 0:
-            raise FileNotFoundError(f"No object-bounded patches under {images_dir}")
-        if len(list(bboxes_dir.glob("*.pt"))) > 0:
-            raise FileNotFoundError(
-                f"Legacy bbox .pt sidecars under {bboxes_dir}; re-preproc to JSON"
-            )
-        if len(list(bboxes_dir.glob("*.json"))) == 0:
-            raise FileNotFoundError(f"No bbox JSON sidecars under {bboxes_dir}")
-        return data_folder
-
-    def cases_from_project_split(self):
-        ds_tokens = [x.strip() for x in self.plan["datasources"].split(",") if x.strip()]
-        train_cases, valid_cases = self.project.get_train_val_case_ids(
-            self.dataset_params["fold"],
-            ds_tokens,
-            nnz_allowed=self.plan.get("nnz_allowed", False),
-        )
-        self.cases = train_cases if self.is_train_split() else valid_cases
-        patch_case_ids = set()
-        for img_fn in (self.data_folder / "images").glob("*_bbox*.pt"):
-            match = PATCH_FNAME_RE.match(img_fn.name)
-            patch_case_ids.add(match.group("case_id"))
-        self.cases = [case_id for case_id in self.cases if case_id in patch_case_ids]
-        assert len(self.cases) > 0, "There are no cases, aborting!"
-
-    def create_data_dicts(self, case_ids):
-        case_ids = set(case_ids)
-        data = []
-        images_dir = self.data_folder / "images"
-        bboxes_dir = self.data_folder / "bboxes"
-        skipped = 0
-        for img_fn in sorted(images_dir.glob("*_bbox*.pt")):
-            match = PATCH_FNAME_RE.match(img_fn.name)
-            case_id = match.group("case_id")
-            if case_id not in case_ids:
-                continue
-            lm_fn = self.data_folder / "lms" / img_fn.name
-            bbox_fn = bbox_sidecar_path(bboxes_dir, img_fn.stem)
-            if not lm_fn.is_file() or not bbox_fn.is_file():
-                skipped += 1
-                continue
-            boxes, labels = load_detection_sidecar(bbox_fn)
-            box = boxes[0]
-            label = labels[0]
-            if not _valid_detection_box(box):
-                skipped += 1
-                continue
-            data.append(
-                {
-                    "case_id": case_id,
-                    "data_folder": str(self.data_folder),
-                    "image": str(img_fn),
-                    self.box_key: box.reshape(1, -1),
-                    self.label_key: label.reshape(-1),
-                }
-            )
-        if skipped:
-            print(
-                f"DataManagerDetOBD: skipped {skipped} patches "
-                "(missing sidecar or invalid box)"
-            )
-        return data
-
-    def create_transforms(self):
-        ik, bk, lk, pk = self.image_key, self.box_key, self.label_key, self.point_key
-        compute_dtype = self._compute_dtype()
-        data_keys = list(self.data_keys)
-        spatial_keys = list(self.spatial_aug_keys)
-
-        L = LoadImaged(
-            keys=data_keys,
-            image_only=False,
-            ensure_channel_first=False,
-            simple_keys=True,
-        )
-        L.register(TorchReader())
-
-        self.transforms_dict = {
-            "L": L,
-            "E": EnsureChannelFirstd(keys=data_keys),
-            "IntensityTfms": self._intensity_tfms(ik),
-            "Dtype": Compose(
-                [
-                    EnsureTyped(keys=[ik], dtype=compute_dtype),
-                    EnsureTyped(keys=[bk], dtype=torch.float32),
-                    EnsureTyped(keys=[lk], dtype=torch.long),
-                ]
-            ),
-        }
-        self.transforms_dict.update(self._box_standardize_transform())
-        self.transforms_dict.update(self._box_aug_transforms())
-
-    def __repr__(self):
-        n = len(self.data) if hasattr(self, "data") and self.data else 0
-        return f"DataManagerDetOBD(split={self.split}, n={n})"
-
-
-class DataManagerDetLBD(_DetManagerBase):
-    keys_tr = "L,E,StdBox,F1,F2,F3,Rand90,DetZoom,BoxClip,IntensityTfms,Dtype"
-    keys_val = "L,E,StdBox,DtypeVal"
-    keys_val_shard = "Ld,Lfull,E,StdBox,DtypeVal"
-
-    def derive_data_folder(self, plan):
+class _LBDDetMixin:
+    def derive_data_folder(self, plan, require_masks=False):
         data_folder = lbd_det_folder_from_plan(self.project, plan)
         data_folder = ensure_rapid_data_folder(data_folder)
         if not data_folder.exists():
@@ -394,6 +290,12 @@ class DataManagerDetLBD(_DetManagerBase):
             raise FileNotFoundError(
                 f"Expected images/ and bboxes/ under {data_folder}"
             )
+        if require_masks:
+            masks_dir = data_folder / "masks"
+            if not masks_dir.is_dir():
+                raise FileNotFoundError(f"Expected masks/ under {data_folder}")
+            if len(list(masks_dir.glob("*.pt"))) == 0:
+                raise FileNotFoundError(f"No label-bounded masks under {masks_dir}")
         if len(list(images_dir.glob("*.pt"))) == 0:
             raise FileNotFoundError(f"No label-bounded cases under {images_dir}")
         if len(list(bboxes_dir.glob("*.pt"))) > 0:
@@ -448,41 +350,148 @@ class DataManagerDetLBD(_DetManagerBase):
         label_t = torch.stack(valid_labels).reshape(-1)
         return box_t, label_t
 
-    def create_data_dicts(self, case_ids):
+    def _load_case_dicts_from_shards(self, case_ids):
         case_ids = set(str(case_id) for case_id in case_ids)
         data = []
         bboxes_dir = self.data_folder / "bboxes"
         skipped = 0
+        manifest = json.loads(self.hdf5_manifest_fn.read_text())
+        manifest_parent = self.hdf5_manifest_fn.parent
+        for shard_info in manifest["shards"]:
+            shard_path = Path(shard_info["shard"])
+            if not shard_path.is_absolute():
+                shard_path = manifest_parent / shard_path
+            for case_id in shard_info["case_ids"]:
+                case_id = str(case_id)
+                if case_id not in case_ids:
+                    continue
+                bbox_fn = bbox_sidecar_path(bboxes_dir, case_id)
+                if not bbox_fn.is_file():
+                    skipped += 1
+                    continue
+                box_t, label_t = self._load_bbox_sidecar(bbox_fn)
+                if box_t.shape[0] == 0:
+                    skipped += 1
+                    continue
+                data.append(
+                    {
+                        "case_id": case_id,
+                        "data_folder": str(self.data_folder),
+                        "hdf5_shard_path": str(shard_path),
+                        "hdf5_case_path": f"/cases/{case_id}",
+                        self.box_key: box_t,
+                        self.label_key: label_t,
+                    }
+                )
+        return data, skipped
+
+    def set_transforms(self, keys):
+        if self.is_eval_split() and self.uses_hdf5_shards():
+            keys = self.keys_val_shard
+        self.keys = keys
+        super().set_transforms(keys)
+
+
+class DataManagerTrainDet(_LBDDetMixin, _DetManagerBase):
+    data_keys = ("image", "mask_image")
+
+    keys_tr = (
+        "L,E,Norm,ToPoints,RandCrop,Zoom,Flip0,Flip1,Flip2,Rand90,Rot,"
+        "AffinePts,ToBoxes,BoxClip,DelMask,IntensityTfms,Dtype"
+    )
+
+    def derive_data_folder(self, plan):
+        return super().derive_data_folder(plan, require_masks=True)
+
+    def set_effective_batch_size(self):
+        spf = int(self.plan["samples_per_file"])
+        assert self.batch_size % spf == 0, (
+            f"batch_size {self.batch_size} must be divisible by "
+            f"samples_per_file {spf}"
+        )
+        self.effective_batch_size = self.batch_size // spf
+
+    def create_data_dicts(self, case_ids):
+        case_ids = set(str(case_id) for case_id in case_ids)
+        data = []
+        bboxes_dir = self.data_folder / "bboxes"
+        masks_dir = self.data_folder / "masks"
+        skipped = 0
+        images_dir = self.data_folder / "images"
+        for img_fn in sorted(images_dir.glob("*.pt")):
+            case_id = info_from_filename(img_fn.name, full_caseid=True)["case_id"]
+            if case_id not in case_ids:
+                continue
+            bbox_fn = bbox_sidecar_path(bboxes_dir, img_fn.stem)
+            mask_fn = masks_dir / img_fn.name
+            if not bbox_fn.is_file() or not mask_fn.is_file():
+                skipped += 1
+                continue
+            box_t, label_t = self._load_bbox_sidecar(bbox_fn)
+            if box_t.shape[0] == 0:
+                skipped += 1
+                continue
+            data.append(
+                {
+                    "case_id": case_id,
+                    "data_folder": str(self.data_folder),
+                    "image": str(img_fn),
+                    self.mask_key: str(mask_fn),
+                    self.box_key: box_t,
+                    self.label_key: label_t,
+                }
+            )
+        if skipped:
+            print(
+                f"DataManagerTrainDet: skipped {skipped} cases "
+                "(missing sidecar/mask or invalid boxes)"
+            )
+        return data
+
+    def create_transforms(self):
+        ik, bk, lk, mk = self.image_key, self.box_key, self.label_key, self.mask_key
+        compute_dtype = self._compute_dtype()
+        load_keys = list(self.data_keys)
+
+        L = LoadImaged(
+            keys=load_keys,
+            image_only=False,
+            ensure_channel_first=False,
+            simple_keys=True,
+        )
+        L.register(TorchReader())
+
+        self.transforms_dict = {
+            "L": L,
+            "E": EnsureChannelFirstd(keys=load_keys),
+            "Norm": self._norm_transform(ik),
+            "IntensityTfms": self._intensity_tfms(ik),
+            "Dtype": Compose(
+                [
+                    EnsureTyped(keys=[ik], dtype=compute_dtype),
+                    EnsureTyped(keys=[bk], dtype=torch.float32),
+                    EnsureTyped(keys=[lk], dtype=torch.long),
+                ]
+            ),
+        }
+        self.transforms_dict.update(self._train_spatial_transforms())
+
+    def __repr__(self):
+        n = len(self.data) if hasattr(self, "data") and self.data else 0
+        return f"DataManagerTrainDet(split={self.split}, n={n})"
+
+
+class DataManagerDetLBD(_LBDDetMixin, _DetManagerBase):
+    keys_val = "L,E,DtypeVal"
+    keys_val_shard = "Ld,Lfull,E,DtypeVal"
+
+    def create_data_dicts(self, case_ids):
+        case_ids = set(str(case_id) for case_id in case_ids)
+        bboxes_dir = self.data_folder / "bboxes"
+        skipped = 0
 
         if self.uses_hdf5_shards():
-            manifest = json.loads(self.hdf5_manifest_fn.read_text())
-            manifest_parent = self.hdf5_manifest_fn.parent
-            for shard_info in manifest["shards"]:
-                shard_path = Path(shard_info["shard"])
-                if not shard_path.is_absolute():
-                    shard_path = manifest_parent / shard_path
-                for case_id in shard_info["case_ids"]:
-                    case_id = str(case_id)
-                    if case_id not in case_ids:
-                        continue
-                    bbox_fn = bbox_sidecar_path(bboxes_dir, case_id)
-                    if not bbox_fn.is_file():
-                        skipped += 1
-                        continue
-                    box_t, label_t = self._load_bbox_sidecar(bbox_fn)
-                    if box_t.shape[0] == 0:
-                        skipped += 1
-                        continue
-                    data.append(
-                        {
-                            "case_id": case_id,
-                            "data_folder": str(self.data_folder),
-                            "hdf5_shard_path": str(shard_path),
-                            "hdf5_case_path": f"/cases/{case_id}",
-                            self.box_key: box_t,
-                            self.label_key: label_t,
-                        }
-                    )
+            data, skipped = self._load_case_dicts_from_shards(case_ids)
             if skipped:
                 print(
                     f"DataManagerDetLBD: skipped {skipped} shard cases "
@@ -490,6 +499,7 @@ class DataManagerDetLBD(_DetManagerBase):
                 )
             return data
 
+        data = []
         images_dir = self.data_folder / "images"
         for img_fn in sorted(images_dir.glob("*.pt")):
             case_id = info_from_filename(img_fn.name, full_caseid=True)["case_id"]
@@ -522,11 +532,10 @@ class DataManagerDetLBD(_DetManagerBase):
     def create_transforms(self):
         ik, bk, lk = self.image_key, self.box_key, self.label_key
         compute_dtype = self._compute_dtype()
-        data_keys = list(self.data_keys)
-        spatial_keys = list(self.spatial_aug_keys)
+        load_keys = list(self.data_keys)
 
         L = LoadImaged(
-            keys=data_keys,
+            keys=load_keys,
             image_only=False,
             ensure_channel_first=False,
             simple_keys=True,
@@ -535,20 +544,12 @@ class DataManagerDetLBD(_DetManagerBase):
 
         self.transforms_dict = {
             "L": L,
-            "Lfull": LoadHDF5CaseFulld(keys=data_keys),
+            "Lfull": LoadHDF5CaseFulld(keys=load_keys),
             "Ld": LoadHDF5ShardIndexd(
                 keys=["case_id"],
                 manifest_fn=str(self.hdf5_manifest_fn),
             ),
-            "E": EnsureChannelFirstd(keys=data_keys),
-            "IntensityTfms": self._intensity_tfms(ik),
-            "Dtype": Compose(
-                [
-                    EnsureTyped(keys=[ik], dtype=compute_dtype),
-                    EnsureTyped(keys=[bk], dtype=torch.float32),
-                    EnsureTyped(keys=[lk], dtype=torch.long),
-                ]
-            ),
+            "E": EnsureChannelFirstd(keys=load_keys),
             "DtypeVal": Compose(
                 [
                     EnsureTyped(keys=[ik], dtype=compute_dtype),
@@ -557,14 +558,6 @@ class DataManagerDetLBD(_DetManagerBase):
                 ]
             ),
         }
-        self.transforms_dict.update(self._box_standardize_transform())
-        self.transforms_dict.update(self._box_aug_transforms())
-
-    def set_transforms(self, keys):
-        if self.is_eval_split() and self.uses_hdf5_shards():
-            keys = self.keys_val_shard
-        self.keys = keys
-        super().set_transforms(keys)
 
     def __repr__(self):
         n = len(self.data) if hasattr(self, "data") and self.data else 0
@@ -573,31 +566,27 @@ class DataManagerDetLBD(_DetManagerBase):
 
 class DataManagerDualDet(DataManagerDual):
     def _build_managers(self):
-        self.train_manager = DataManagerDetOBD(
+        lbd_folder = lbd_det_folder_from_plan(self.project, self.configs["plan_train"])
+        common = dict(
             project=self.project,
             configs=self.configs,
             batch_size=self.batch_size,
             cache_rate=self.cache_rate,
-            split="train",
             device=self.device,
             ds_type=self.ds_type,
-            keys=DataManagerDetOBD.keys_tr,
-            data_folder=self.data_folder,
+            data_folder=lbd_folder,
             debug=self.debug,
         )
-        lbd_folder = lbd_det_folder_from_plan(self.project, self.configs["plan_train"])
+        self.train_manager = DataManagerTrainDet(
+            **common,
+            split="train",
+            keys=DataManagerTrainDet.keys_tr,
+        )
         self.valid_manager = DataManagerDetLBD(
-            project=self.project,
-            configs=self.configs,
-            batch_size=self.batch_size,
-            cache_rate=self.cache_rate,
+            **common,
             split="valid",
-            device=self.device,
-            ds_type=self.ds_type,
             keys=DataManagerDetLBD.keys_val,
-            data_folder=lbd_folder,
             val_sampling=self.val_sampling,
-            debug=self.debug,
         )
 
     def __repr__(self):
@@ -606,5 +595,118 @@ class DataManagerDualDet(DataManagerDual):
         )
 
 
-# Backward-compatible alias
-DataManagerDet = DataManagerDetOBD
+DataManagerDet = DataManagerTrainDet
+# %%
+if __name__ == "__main__":
+    import warnings
+
+    import torch
+    from det3d.configs.parser import ConfigMakerDet
+    from fran.managers.project import Project
+    from utilz.imageviewers import ImageBBoxViewer, ImageMaskViewer
+
+    warnings.filterwarnings("ignore", "TypedStorage is deprecated.*")
+    torch.set_float32_matmul_precision("medium")
+
+
+# SECTION:-------------------- LIDC det plan1 (LBD train + val) --------------------
+    # plan 1 → .../lbd/spc_070_070_125_lbl1_ex000 (labelbounded.py preproc)
+    batch_size = 4
+    ds_type = None
+
+    proj_lidc = Project(project_title="lidc")
+    CL = ConfigMakerDet(proj_lidc)
+    CL.setup(1)
+    config_det = CL.configs
+    config_det["dataset_params"]["cache_rate"] = 0.0
+
+# %%
+    DM = DataManagerDualDet(
+        project_title=proj_lidc.project_title,
+        configs=config_det,
+        batch_size=batch_size,
+        ds_type=ds_type,
+        debug=True,
+    )
+
+    # bbox_fns = list(G.data_folder.glob("bboxes/*.json"))
+    # fn =bbox_fns[0]
+    # dici = load_dict(fn)
+# %%
+    plan =config_det['plan_train']
+    data_folder = lbd_det_folder_from_plan(DM.project, plan)
+    DM.prepare_data()
+    DM.setup("fit")
+
+# %%
+    tmt = DM.train_manager
+    tmv = DM.valid_manager
+    tmt.data_folder
+    tmt.cases
+    tmv.cases
+    dat = tmt.data[0]
+    img_fn = dat["image"]
+    im = torch.load(img_fn, weights_only=False)
+    ImageMaskViewer([im, im], "im")
+
+# %%
+    DataManagerTrainDet.keys_tr
+    td = tmt.transforms_dict
+    td.keys()
+    bk = tmt.box_key
+
+# %%
+    dici0 = dat
+    dici = td["L"](dici0)
+    dici["image"].shape
+    dici["image"].meta
+    dici[bk]
+    ImageBBoxViewer(dici["image"], dici[bk])
+# %%
+    dici = td["E"](dici)
+    dici = td["Norm"](dici)
+    dici = td["ToPoints"](dici)
+    dici.keys()
+    dici["points"]
+    dici = td["RandCrop"](dici)
+
+# %%
+    n = 0
+    dici = dici[n]
+    dici["image"].shape
+    dici[bk]
+    ImageBBoxViewer(dici["image"], dici[bk])
+    dici = td["Zoom"](dici)
+    dici = td["Flip0"](dici)
+    dici = td["Flip1"](dici)
+    dici = td["Flip2"](dici)
+    dici = td["Rand90"](dici)
+    dici = td["Rot"](dici)
+    dici = td["AffinePts"](dici)
+    dici = td["ToBoxes"](dici)
+    dici["box"]
+    dici = td["BoxClip"](dici)
+    dici[bk]
+    ImageBBoxViewer(dici["image"], dici[bk])
+    dici = td["DelMask"](dici)
+    dici = td["IntensityTfms"](dici)
+    dici = td["Dtype"](dici)
+
+# %%
+    b = DM.train_ds[0]
+    b["image"].shape
+    b[bk].shape
+    b["label"].shape
+
+# %%
+    dl = DM.train_dataloader()
+    batch = next(iter(dl))
+    batch["image"].shape
+    batch[bk][0].shape
+    ImageBBoxViewer(batch["image"][0], batch[bk][0])
+
+# %%
+    bv = DM.valid_ds[0]
+    bv["image"].shape
+    bv[bk].shape
+
