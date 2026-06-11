@@ -15,7 +15,6 @@ from utilz.stringz import ast_literal_eval
 
 DET_PLAN_LIST_KEYS = (
     "patch_size",
-    "val_patch_size",
     "fg_labels",
     "returned_layers",
     "conv1_t_stride",

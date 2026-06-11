@@ -1,43 +1,24 @@
+from utilz.imageviewers import ImageBBoxViewer, ImageMaskBboxViewer
 import json
 import resource
 from functools import partial
 from pathlib import Path
 from typing import Optional
-
 import numpy as np
 import torch
 from det3d.collate import lbd_det_collate
 from det3d.utils.bbox_sidecar import bbox_sidecar_path, load_detection_sidecar
 from det3d.utils.folder_names import lbd_det_folder_from_plan
-from fran.managers.data.main import (
-    DataManager,
-    DataManagerDual,
-    LoadHDF5ShardIndexd,
-)
-from fran.run.preproc.archive_preprocessed import ensure_rapid_data_folder
-from fran.transforms.imageio import TorchReader
-from monai.apps.detection.transforms.dictionary import ClipBoxToImaged
+from monai.apps.detection.transforms.dictionary import AffineBoxToWorldCoordinated, ClipBoxToImaged
 from monai.data import DataLoader, MetaTensor
-from fran.transforms.intensitytransforms import RandRandGaussianNoised
-from monai.transforms import (
-    Compose,
-    DeleteItemsd,
-    EnsureChannelFirstd,
-    EnsureTyped,
-    LoadImaged,
-    MapTransform,
-    RandAdjustContrastd,
-    RandCropByPosNegLabeld,
-    RandFlipd,
-    RandRotate90d,
-    RandRotated,
-    RandScaleIntensityd,
-    RandShiftIntensityd,
-    RandZoomd,
-    ScaleIntensityRanged,
-)
+from monai.transforms import Compose, DeleteItemsd, EnsureChannelFirstd, EnsureTyped, LoadImaged, MapTransform, RandAdjustContrastd, RandCropByPosNegLabeld, RandFlipd, RandRotate90d, RandRotated, RandScaleIntensityd, RandShiftIntensityd, RandZoomd, ScaleIntensityRanged
 from monai.transforms.spatial.dictionary import ConvertBoxToPointsd, ConvertPointsToBoxesd
 from monai.transforms.utility.dictionary import ApplyTransformToPointsd
+import torch
+from fran.managers.data.main import DataManager, DataManagerDual, LoadHDF5ShardIndexd
+from fran.run.preproc.archive_preprocessed import ensure_rapid_data_folder
+from fran.transforms.imageio import TorchReader
+from fran.transforms.intensitytransforms import RandRandGaussianNoised
 from fran.preprocessing.helpers import import_h5py
 from utilz.stringz import info_from_filename
 
@@ -92,7 +73,7 @@ class _DetManagerBase(DataManager):
     box_key = "bbox"
     label_key = "label"
     point_key = "points"
-    mask_key = "mask_image"
+    mask_key = "mask"
 
     def __init__(
         self,
@@ -128,7 +109,8 @@ class _DetManagerBase(DataManager):
             debug=debug,
         )
         self.amp = True
-        self.affine_lps_to_ras = bool(self.plan.get("affine_lps_to_ras", True))
+        # TorchReader PT affines are already in stored image space; not ITK LPS.
+        self.affine_lps_to_ras = False
 
     def maybe_fix_remapping_dtype(self):
         pass
@@ -203,6 +185,11 @@ class _DetManagerBase(DataManager):
         patch_size = self._patch_size()
         affine_lps_to_ras = self.affine_lps_to_ras
         return {
+            "BoxToWorld": AffineBoxToWorldCoordinated(
+                box_keys=[bk],
+                box_ref_image_keys=ik,
+                affine_lps_to_ras=affine_lps_to_ras,
+            ),
             "ToPoints": ConvertBoxToPointsd(keys=[bk]),
             "RandCrop": RandCropByPosNegLabeld(
                 keys=[ik],
@@ -237,7 +224,7 @@ class _DetManagerBase(DataManager):
             "AffinePts": ApplyTransformToPointsd(
                 keys=[pk], refer_keys=ik, affine_lps_to_ras=affine_lps_to_ras
             ),
-            "ToBoxes": ConvertPointsToBoxesd(keys=[pk]),
+            "ToBoxes": ConvertPointsToBoxesd(keys=[pk], box_key=bk),
             "BoxClip": ClipBoxToImaged(
                 box_keys=bk,
                 label_keys=[lk],
@@ -393,10 +380,10 @@ class _LBDDetMixin:
 
 
 class DataManagerTrainDet(_LBDDetMixin, _DetManagerBase):
-    data_keys = ("image", "mask_image")
+    data_keys = ("image", "mask")
 
     keys_tr = (
-        "L,E,Norm,ToPoints,RandCrop,Zoom,Flip0,Flip1,Flip2,Rand90,Rot,"
+        "L,E,Norm,BoxToWorld,ToPoints,RandCrop,Zoom,Flip0,Flip1,Flip2,Rand90,Rot,"
         "AffinePts,ToBoxes,BoxClip,DelMask,IntensityTfms,Dtype"
     )
 
@@ -482,8 +469,11 @@ class DataManagerTrainDet(_LBDDetMixin, _DetManagerBase):
 
 
 class DataManagerDetLBD(_LBDDetMixin, _DetManagerBase):
-    keys_val = "L,E,DtypeVal"
-    keys_val_shard = "Ld,Lfull,E,DtypeVal"
+    keys_val = "L,E,Norm,DtypeVal"
+    keys_val_shard = "Ld,Lfull,E,Norm,DtypeVal"
+
+    def uses_hdf5_shards(self):
+        return False
 
     def create_data_dicts(self, case_ids):
         case_ids = set(str(case_id) for case_id in case_ids)
@@ -550,6 +540,7 @@ class DataManagerDetLBD(_LBDDetMixin, _DetManagerBase):
                 manifest_fn=str(self.hdf5_manifest_fn),
             ),
             "E": EnsureChannelFirstd(keys=load_keys),
+            "Norm": self._norm_transform(ik),
             "DtypeVal": Compose(
                 [
                     EnsureTyped(keys=[ik], dtype=compute_dtype),
@@ -561,7 +552,7 @@ class DataManagerDetLBD(_LBDDetMixin, _DetManagerBase):
 
     def __repr__(self):
         n = len(self.data) if hasattr(self, "data") and self.data else 0
-        return f"DataManagerDetLBD(split={self.split}, n={n}, shards={self.uses_hdf5_shards()})"
+        return f"DataManagerDetLBD(split={self.split}, n={n})"
 
 
 class DataManagerDualDet(DataManagerDual):
@@ -597,10 +588,13 @@ class DataManagerDualDet(DataManagerDual):
 
 DataManagerDet = DataManagerTrainDet
 # %%
+#SECTION:-------------------- setup--------------------------------------------------------------------------------------
 if __name__ == "__main__":
     import warnings
-
-    import torch
+    from det3d.configs.parser import ConfigMakerDet
+    from fran.managers.project import Project
+    from utilz.imageviewers import ImageBBoxViewer, ImageMaskViewer
+    import warnings
     from det3d.configs.parser import ConfigMakerDet
     from fran.managers.project import Project
     from utilz.imageviewers import ImageBBoxViewer, ImageMaskViewer
@@ -608,8 +602,11 @@ if __name__ == "__main__":
     warnings.filterwarnings("ignore", "TypedStorage is deprecated.*")
     torch.set_float32_matmul_precision("medium")
 
+    def bbv(dici):
+        ImageBBoxViewer(dici["image"], dici[bk])
 
 # SECTION:-------------------- LIDC det plan1 (LBD train + val) --------------------
+
     # plan 1 → .../lbd/spc_070_070_125_lbl1_ex000 (labelbounded.py preproc)
     batch_size = 4
     ds_type = None
@@ -644,10 +641,8 @@ if __name__ == "__main__":
     tmt.data_folder
     tmt.cases
     tmv.cases
-    dat = tmt.data[0]
-    img_fn = dat["image"]
-    im = torch.load(img_fn, weights_only=False)
-    ImageMaskViewer([im, im], "im")
+    dat = tmt.data[2]
+    # ImageMaskViewer([im, im], "im")
 
 # %%
     DataManagerTrainDet.keys_tr
@@ -660,11 +655,19 @@ if __name__ == "__main__":
     dici = td["L"](dici0)
     dici["image"].shape
     dici["image"].meta
-    dici[bk]
-    ImageBBoxViewer(dici["image"], dici[bk])
+    img = dici["image"]
+    lm = dici["mask"]
+    ImageMaskBboxViewer(img, lm, dici[bk])
+
 # %%
+
     dici = td["E"](dici)
     dici = td["Norm"](dici)
+    print(dici['bbox'])
+    
+# %%
+    dici = td["BoxToWorld"](dici)
+    print(dici['bbox'])
     dici = td["ToPoints"](dici)
     dici.keys()
     dici["points"]
@@ -672,22 +675,29 @@ if __name__ == "__main__":
 
 # %%
     n = 0
-    dici = dici[n]
-    dici["image"].shape
+    dici2 = dici[n]
+# %%
+
+
+    dici2 = td["Zoom"](dici2)
+    dici2 = td["Flip0"](dici2)
+    dici2 = td["Flip1"](dici2)
+    dici2 = td["Flip2"](dici2)
+    dici2 = td["Rand90"](dici2)
+    dici2 = td["Rot"](dici2)
+    print(dici2.keys())
+    dici2 = td["AffinePts"](dici2)
+    print(dici2.keys())
+    dici2 = td["ToBoxes"](dici2)
+    print(dici2['bbox'])
+
+# %%
+    bbv(dici2)
+# %%
+    tmt.point_key
+# %%
+    dici = td["BoxClip"](dici2)
     dici[bk]
-    ImageBBoxViewer(dici["image"], dici[bk])
-    dici = td["Zoom"](dici)
-    dici = td["Flip0"](dici)
-    dici = td["Flip1"](dici)
-    dici = td["Flip2"](dici)
-    dici = td["Rand90"](dici)
-    dici = td["Rot"](dici)
-    dici = td["AffinePts"](dici)
-    dici = td["ToBoxes"](dici)
-    dici["box"]
-    dici = td["BoxClip"](dici)
-    dici[bk]
-    ImageBBoxViewer(dici["image"], dici[bk])
     dici = td["DelMask"](dici)
     dici = td["IntensityTfms"](dici)
     dici = td["Dtype"](dici)
@@ -699,14 +709,32 @@ if __name__ == "__main__":
     b["label"].shape
 
 # %%
-    dl = DM.train_dataloader()
+    tmv.setup()
+    tmv.prepare_data()
+    dl = DM.val_dataloader()
     batch = next(iter(dl))
     batch["image"].shape
+    batch['bbox'].shape
+    bbox = batch['bbox'][0]
+    img = batch["image"][0]
+    ImageBBoxViewer(img, bbox)
+    bbv(batch)
+    batch['image'].shape
+    img = batch["image"][0]
+    n= 1
+    ImageBBoxViewer(batch["image"][n], batch[bk][n])
+    img.shape
+   
+    batch['bbox'][3]
     batch[bk][0].shape
+
     ImageBBoxViewer(batch["image"][0], batch[bk][0])
 
 # %%
     bv = DM.valid_ds[0]
     bv["image"].shape
     bv[bk].shape
+
+
+
 

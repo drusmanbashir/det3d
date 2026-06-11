@@ -1,5 +1,6 @@
 import gc
 
+import numpy as np
 import torch
 from det3d.detection.retinanet_train import forward_train_batched
 from det3d.evaluation.coco import compute_coco_metrics
@@ -14,6 +15,8 @@ from monai.apps.detection.networks.retinanet_network import (
 )
 from monai.apps.detection.utils.anchor_utils import AnchorGeneratorWithAnchorShape
 from monai.networks.nets import resnet
+
+VAL_PATCH_SIZE = [512, 512, 208]
 
 
 class RetinaNetManager(LightningModule):
@@ -75,7 +78,7 @@ class RetinaNetManager(LightningModule):
             pool_size=20,
             min_neg=16,
         )
-        self.detector.set_target_keys(box_key="box", label_key="label")
+        self.detector.set_target_keys(box_key="bbox", label_key="label")
         self.detector.set_box_selector_parameters(
             score_thresh=float(plan["score_thresh"]),
             topk_candidates_per_level=1000,
@@ -83,7 +86,7 @@ class RetinaNetManager(LightningModule):
             detections_per_img=100,
         )
         self.detector.set_sliding_window_inferer(
-            roi_size=plan["patch_size"],
+            roi_size=VAL_PATCH_SIZE,
             overlap=0.25,
             sw_batch_size=1,
             mode="constant",
@@ -97,19 +100,21 @@ class RetinaNetManager(LightningModule):
         return image
 
     def _targets_from_batch(self, batch):
-        boxes = batch["box"]
-        labels = batch["label"]
+        box_key = self.detector.target_box_key
+        label_key = self.detector.target_label_key
+        boxes = batch[box_key]
+        labels = batch[label_key]
         if isinstance(boxes, list):
             return [
                 {
-                    "label": torch.as_tensor(label, device=self.device).reshape(-1),
-                    "box": torch.as_tensor(box, device=self.device).reshape(-1, 6),
+                    label_key: torch.as_tensor(label, device=self.device).reshape(-1),
+                    box_key: torch.as_tensor(box, device=self.device).reshape(-1, 6),
                 }
                 for label, box in zip(labels, boxes)
             ]
         box = torch.as_tensor(boxes, device=self.device).reshape(-1, 6)
         label = torch.as_tensor(labels, device=self.device).reshape(-1)
-        return [{"label": label, "box": box}]
+        return [{label_key: label, box_key: box}]
 
     def training_step(self, batch, batch_idx):
         self.detector.train()
@@ -138,8 +143,9 @@ class RetinaNetManager(LightningModule):
             val_inputs = [images[0]]
         else:
             val_inputs = [images]
+        use_inferer = val_inputs[0][0, ...].numel() >= int(np.prod(VAL_PATCH_SIZE))
         with torch.no_grad():
-            val_outputs = self.detector(val_inputs, use_inferer=True)
+            val_outputs = self.detector(val_inputs, use_inferer=use_inferer)
         self.val_outputs_all.extend(val_outputs)
         self.val_targets_all.extend(val_targets)
 
