@@ -1,0 +1,4 @@
+{
+    "model_path": "/s/agent_rw/tmp/luna16_lidc_all/detector.pt",
+    "tfevent_path": "/s/agent_rw/tmp/luna16_lidc_all/tfevents"
+}

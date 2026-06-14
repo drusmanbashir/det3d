@@ -21,6 +21,6 @@ python run/training/train.py --project test --plan 1 --epochs 1 --devices 0
 ## Layout
 
 - `det/preprocessing/build_json.py` — lesion_stats → MONAI datalist JSON
-- `det/managers/data.py` — `DataManagerDetOBD` / `DataManagerDetLBD` / `DataManagerDualDet` (OBD train patches + LBD val volumes; cases.db + `bboxes/`)
+- `det/managers/data.py` — `DataManagerDet` / `DataManagerDualDet` (LBD volumes from `labelbounded.py`; RandCrop train pipeline + `bboxes/`)
 - `det/managers/retinanet.py` — `RetinaNetManager` LightningModule
-- `det/training/trainer.py` — `TrainerDet` orchestrator
+- `det/trainers/trainer.py` — `TrainerDet` orchestrator

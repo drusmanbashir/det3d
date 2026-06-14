@@ -2,14 +2,14 @@
 import argparse
 
 from det3d.configs.parser import ConfigMakerDet
-from det3d.preprocessing.label_bounded import LabelBoundedDetDataGenerator
+from det3d.preprocessing.labelbounded import LabelBoundedDetDataGenerator
 from det3d.preprocessing.object_bounded import resolve_input_folder
 from fran.managers import Project
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Label-bounded detection preprocessing to images/lms/bboxes/*.json per case"
+        description="Label-bounded detection preprocessing to images/masks/bboxes/*.json per case"
     )
     parser.add_argument("--project", required=True, dest="project_title")
     parser.add_argument("--plan", required=True, type=int)

@@ -1,0 +1,31 @@
+---
+description: det3d managers/data classes must mirror upstream fran managers/data
+globs: det3d/managers/data/**
+alwaysApply: false
+---
+
+# Mirror fran `managers/data`
+
+Upstream source of truth: `fran/fran/managers/data/`.
+
+Every class in `det3d/managers/data/` must mirror a class upstream, with **`Det` inserted immediately after `DataManager`** in the class name.
+
+Examples:
+- `DataManager` → `DataManagerDet`
+- `DataManagerSource` → `DataManagerDetSource`
+- `PatchStreamDataset` → `PatchStreamDatasetDet`
+
+Keep the same file layout as upstream except where excluded below (`main.py`, `batch_tfms.py`, `run_through.py`, `incremental.py`, `fromfolder.py`, `nifti.py`, `valid_patch_stream.py`).
+
+Detection-specific behavior (boxes, `GpuTail`, det collate, det folders) belongs in the mirrored leaf/base classes only. Do not fork upstream orchestration semantics (`plan["mode"]`, HDF5 shard train `Ld,Rtr,L2`, batch-tfms split) unless det requirements explicitly differ.
+
+Det has **no triple datamodule** and **no dual-SSD staging orchestrator** — do not add `triple.py` / `dualssd.py` or wire `DataManagerTriple*` / `DataManagerDualSSD*` into `TrainerDet`.
+
+## Exclusions
+
+Upstream classes excluded from the mirror requirement:
+
+- `triple.py` and all classes therein — det uses `DataManagerDualDet` only
+- `dualssd.py` and all classes therein (`DataManagerDualSSD`, `DataManager*DualSSD*`, etc.) — no SSD staging orchestrator in det; HDF5 shard **load** stays on `DataManagerDetSource` via `Ld,Rtr,L2`
+
+When adding an exclusion, record the upstream class name and reason here.

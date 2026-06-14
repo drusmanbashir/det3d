@@ -62,7 +62,42 @@ def as_label_tensor(label):
     return torch.as_tensor(label, dtype=torch.long).reshape(-1)
 
 
-def obd_det_collate(batch, size_divisible=None):
+def attach_targets(batch, box_key="bbox", label_key="label"):
+    batch["targets"] = [
+        {box_key: batch[box_key][i], label_key: batch[label_key][i]}
+        for i in range(len(batch[box_key]))
+    ]
+    return batch
+
+
+def det_val_collate(batch, box_key="bbox", label_key="label"):
+    """Val batch: stack images, keep per-item bbox/label lists, attach MONAI targets."""
+    images = []
+    boxes = []
+    labels = []
+    for item in batch:
+        images.append(torch.as_tensor(item["image"]).contiguous())
+        if box_key in item:
+            box = as_box_tensor(item[box_key])
+        else:
+            box = torch.zeros((0, 6), dtype=torch.float32)
+        boxes.append(box)
+        labels.append(as_label_tensor(item[label_key]))
+    out = {
+        "image": torch.stack(images, 0),
+        box_key: boxes,
+        label_key: labels,
+    }
+    return attach_targets(out, box_key, label_key)
+
+
+def obd_det_collate(
+    batch,
+    size_divisible=None,
+    box_key="bbox",
+    point_key="points",
+    mask_key="mask",
+):
     """Pad each item to batch max spatial size, adjust boxes, stack images."""
     max_shape = [0, 0, 0]
     for item in batch:
@@ -76,26 +111,69 @@ def obd_det_collate(batch, size_divisible=None):
     images = []
     boxes = []
     labels = []
+    points = []
+    masks = []
     for item in batch:
         shape = spatial_shape(item["image"])
         offsets = pad_offsets(shape, target_shape)
         image = pad_image_to_shape(item["image"], target_shape)
-        box = adjust_boxes_for_pad(item["box"], offsets)
+        if box_key in item:
+            box = adjust_boxes_for_pad(item[box_key], offsets)
+        else:
+            box = torch.zeros((0, 6), dtype=torch.float32)
         images.append(image)
         boxes.append(box)
         labels.append(as_label_tensor(item["label"]))
+        if point_key in item:
+            points.append(torch.as_tensor(item[point_key]).contiguous())
+        if mask_key in item:
+            masks.append(pad_image_to_shape(item[mask_key], target_shape))
     images_out = torch.stack(images, 0)
-    return {
+    out = {
         "image": images_out,
-        "box": boxes,
+        box_key: boxes,
         "label": labels,
         "spatial_size": target_shape,
     }
+    if points:
+        out[point_key] = points
+    if masks:
+        out[mask_key] = masks
+    return attach_targets(out, box_key, "label")
 
 
-def det_stack_collate(batch):
+def _flatten_dict_samples(batch):
+    flat = []
+    for item in batch:
+        if isinstance(item, list):
+            flat.extend(_flatten_dict_samples(item))
+        else:
+            flat.append(item)
+    return flat
+
+
+def lbd_det_collate(
+    batch,
+    size_divisible=None,
+    box_key="bbox",
+    point_key="points",
+    mask_key="mask",
+):
+    """Flatten RandCrop / shard multi-sample lists, then pad/stack for batched training."""
+    flat = _flatten_dict_samples(batch)
+    return obd_det_collate(
+        flat,
+        size_divisible=size_divisible,
+        box_key=box_key,
+        point_key=point_key,
+        mask_key=mask_key,
+    )
+
+
+def det_stack_collate(batch, box_key="bbox"):
     """Stack pre-padded items (fixed-pad pipeline)."""
     images = torch.stack([torch.as_tensor(item["image"]).contiguous() for item in batch], 0)
-    boxes = [as_box_tensor(item["box"]) for item in batch]
+    boxes = [as_box_tensor(item[box_key]) for item in batch]
     labels = [as_label_tensor(item["label"]) for item in batch]
-    return {"image": images, "box": boxes, "label": labels}
+    out = {"image": images, box_key: boxes, "label": labels}
+    return attach_targets(out, box_key, "label")

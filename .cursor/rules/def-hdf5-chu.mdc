@@ -1,0 +1,18 @@
+---
+alwaysApply: true
+---
+
+def _hdf5_chunks_for(self, shape, key, src_dims):
+        if key == "mask":
+            return super()._hdf5_chunks_for(shape, "lm", src_dims)
+        if key == "bbox":
+            shape = tuple(int(v) for v in shape)
+            if shape[0] == 0:
+                return None
+            return (min(shape[0], 64), shape[1])
+        if key == "label":
+            shape = tuple(int(v) for v in shape)
+            if shape[0] == 0:
+                return None
+            return (min(shape[0], 64),)
+        return super()._hdf5_chunks_for(shape, key, src_dims)

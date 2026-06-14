@@ -2,21 +2,18 @@ import gc
 
 import numpy as np
 import torch
-from det3d.detection.retinanet_train import forward_train_batched
+from det3d.detection.retinanet_detector2 import RetinaNetDetector2
 from det3d.evaluation.coco import compute_coco_metrics
 from det3d.transforms.warmup_scheduler import GradualWarmupScheduler
-from fran.configs.helpers import is_excel_None
 from fran.managers.project import Project
 from lightning.pytorch import LightningModule
-from monai.apps.detection.networks.retinanet_detector import RetinaNetDetector
+from utilz.stringz import ast_literal_eval
 from monai.apps.detection.networks.retinanet_network import (
     RetinaNet,
     resnet_fpn_feature_extractor,
 )
 from monai.apps.detection.utils.anchor_utils import AnchorGeneratorWithAnchorShape
 from monai.networks.nets import resnet
-
-VAL_PATCH_SIZE = [512, 512, 208]
 
 
 class RetinaNetManager(LightningModule):
@@ -32,7 +29,10 @@ class RetinaNetManager(LightningModule):
         self.class_names = [self.plan.get("class_name", "nodule")]
         self.val_outputs_all = []
         self.val_targets_all = []
-        self.scheduler_warmup = None
+        val_patch_size = self.plan.get("val_patch_size", [512, 512, 208])
+        if isinstance(val_patch_size, str):
+            val_patch_size = ast_literal_eval(val_patch_size)
+        self.val_patch_size = [int(v) for v in val_patch_size]
         plan = self.plan
         anchor_generator = AnchorGeneratorWithAnchorShape(
             feature_map_scales=[2 ** level for level in range(len(plan["returned_layers"]) + 1)],
@@ -68,7 +68,7 @@ class RetinaNetManager(LightningModule):
                 size_divisible=size_divisible,
             )
         )
-        self.detector = RetinaNetDetector(
+        self.detector = RetinaNetDetector2(
             network=net, anchor_generator=anchor_generator, debug=False
         )
         self.detector.set_atss_matcher(num_candidates=4, center_in_gt=False)
@@ -86,50 +86,42 @@ class RetinaNetManager(LightningModule):
             detections_per_img=100,
         )
         self.detector.set_sliding_window_inferer(
-            roi_size=VAL_PATCH_SIZE,
+            roi_size=self.val_patch_size,
             overlap=0.25,
             sw_batch_size=1,
             mode="constant",
             device="cpu",
         )
+        self.scheduler_warmup = None
 
-    def _image_batch_tensor(self, batch):
-        image = batch["image"].to(self.device)
-        if image.dim() == 4:
-            image = image.unsqueeze(0)
-        return image
-
-    def _targets_from_batch(self, batch):
-        box_key = self.detector.target_box_key
-        label_key = self.detector.target_label_key
-        boxes = batch[box_key]
-        labels = batch[label_key]
-        if isinstance(boxes, list):
-            return [
-                {
-                    label_key: torch.as_tensor(label, device=self.device).reshape(-1),
-                    box_key: torch.as_tensor(box, device=self.device).reshape(-1, 6),
-                }
-                for label, box in zip(labels, boxes)
-            ]
-        box = torch.as_tensor(boxes, device=self.device).reshape(-1, 6)
-        label = torch.as_tensor(labels, device=self.device).reshape(-1)
-        return [{label_key: label, box_key: box}]
+    def train_total_loss(self, outputs):
+        cls_loss = outputs[self.detector.cls_key]
+        box_loss = outputs[self.detector.box_reg_key]
+        total = self.w_cls * cls_loss + box_loss
+        return total, cls_loss, box_loss
 
     def training_step(self, batch, batch_idx):
         self.detector.train()
-        images = self._image_batch_tensor(batch)
-        targets = self._targets_from_batch(batch)
-        outputs = forward_train_batched(self.detector, images, targets)
-        loss = self.w_cls * outputs[self.detector.cls_key] + outputs[self.detector.box_reg_key]
+        outputs = self.detector(batch["image"], batch["targets"])
+        loss, cls_loss, box_loss = self.train_total_loss(outputs)
         self.log("train0_loss", loss, prog_bar=True, sync_dist=self.sync_dist)
-        self.log("train0_cls_loss", outputs[self.detector.cls_key], sync_dist=self.sync_dist)
-        self.log(
-            "train0_box_reg_loss",
-            outputs[self.detector.box_reg_key],
-            sync_dist=self.sync_dist,
-        )
+        self.log("train0_cls_loss", cls_loss, sync_dist=self.sync_dist)
+        self.log("train0_box_reg_loss", box_loss, sync_dist=self.sync_dist)
         return loss
+
+    def val_inputs(self, batch):
+        images = batch["image"]
+        return [images[i].contiguous() for i in range(images.shape[0])]
+
+    def val_use_inferer(self, val_inputs):
+        patch_voxels = int(np.prod(self.val_patch_size))
+        return not all(item[0, ...].numel() < patch_voxels for item in val_inputs)
+
+    def val_forward(self, val_inputs, use_inferer=None):
+        if use_inferer is None:
+            use_inferer = self.val_use_inferer(val_inputs)
+        with torch.no_grad():
+            return self.detector(val_inputs, use_inferer=use_inferer)
 
     def on_validation_epoch_start(self):
         self.val_outputs_all = []
@@ -137,21 +129,12 @@ class RetinaNetManager(LightningModule):
 
     def validation_step(self, batch, batch_idx):
         self.detector.eval()
-        images = batch["image"].to(self.device)
-        val_targets = self._targets_from_batch(batch)
-        if images.dim() == 5:
-            val_inputs = [images[0]]
-        else:
-            val_inputs = [images]
-        use_inferer = val_inputs[0][0, ...].numel() >= int(np.prod(VAL_PATCH_SIZE))
-        with torch.no_grad():
-            val_outputs = self.detector(val_inputs, use_inferer=use_inferer)
+        val_inputs = self.val_inputs(batch)
+        val_outputs = self.val_forward(val_inputs)
         self.val_outputs_all.extend(val_outputs)
-        self.val_targets_all.extend(val_targets)
+        self.val_targets_all.extend(batch["targets"])
 
     def on_validation_epoch_end(self):
-        if len(self.val_outputs_all) == 0:
-            return
         metrics = compute_coco_metrics(
             self.detector,
             self.val_outputs_all,
@@ -182,10 +165,17 @@ class RetinaNetManager(LightningModule):
         return optimizer
 
     def on_fit_start(self):
-        self.detector.to(self.device)
+        device = next(self.detector.parameters()).device
+        self.detector.to(device)
+        self.detector.set_sliding_window_inferer(
+            roi_size=self.val_patch_size,
+            overlap=0.25,
+            sw_batch_size=1,
+            mode="constant",
+            device=str(device),
+        )
 
     def on_train_epoch_start(self):
-        if self.scheduler_warmup is not None:
-            self.scheduler_warmup.step()
+        self.scheduler_warmup.step()
         lr = self.optimizers().param_groups[0]["lr"]
         self.log("lr", lr, prog_bar=False)

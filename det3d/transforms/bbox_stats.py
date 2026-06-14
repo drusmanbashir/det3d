@@ -43,14 +43,20 @@ class DetectionBBoxStatsd(MapTransform):
         )
         L.dust(self.dusting_threshold)
         rec = L.to_voxel_detection_records(
-            self.gt_box_mode,
+            "xyzxyz",
             foreground_class_id=self.foreground_class_id,
             remapping_train=self.remapping_train,
         )
         d["LMG"] = L
         d["nbrhoods"] = L.nbrhoods
-        d["detection_box"] = rec["box"]
-        d["detection_label"] = rec["label"]
+        boxes = rec["box"]
+        labels = rec["label"]
+        if len(boxes) == 0:
+            d["bbox"] = torch.zeros((0, 6), dtype=torch.float32)
+            d["label"] = torch.zeros((0,), dtype=torch.long)
+        else:
+            d["bbox"] = torch.stack(boxes)
+            d["label"] = torch.tensor(labels, dtype=torch.long)
         return d
 
 

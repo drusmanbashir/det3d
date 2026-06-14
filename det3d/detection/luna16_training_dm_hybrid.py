@@ -407,4 +407,26 @@ if __name__ == "__main__":
 
     print(f"train completed, best_metric: {best_val_epoch_metric:.4f} " f"at epoch: {best_val_epoch}")
     tensorboard_writer.close()
+
+# %%
+    input_images = 
+    targets = None
+    use_inferer = False
+# %%  # T:block_start|RetinaNetDetector2.forward
+#SECTION:-------------------- forward--------------------------------------------------------------------------------------  # T:block_meta|RetinaNetDetector2.forward
+    if detector.training and isinstance(input_images, Tensor):  # T:self_ref|if self.training and isinstance(input_images, Tensor):
+        pass  # T:early_return|    return forward_train_batched(self, input_images, targets)
+    forward_result = super().forward(input_images, targets, use_inferer=use_inferer)  # T:return|return super().forward(input_images, targets, use_inferer=use_inferer)
+    # end PythonMethodScratch  # T:block_end|RetinaNetDetector2.forward
+
+# %%
+    input_images = input_images
+    targets = targets
+    use_inferer = use_inferer
+# %%  # T:block_start|RetinaNetDetector2.forward
+#SECTION:-------------------- forward--------------------------------------------------------------------------------------  # T:block_meta|RetinaNetDetector2.forward
+    if detector.training and isinstance(input_images, Tensor):  # T:self_ref|if self.training and isinstance(input_images, Tensor):
+        pass  # T:early_return|    return forward_train_batched(self, input_images, targets)
+    forward_result = super().forward(input_images, targets, use_inferer=use_inferer)  # T:return|return super().forward(input_images, targets, use_inferer=use_inferer)
+    # end PythonMethodScratch  # T:block_end|RetinaNetDetector2.forward
 # %%

@@ -4,7 +4,7 @@ import argparse
 import torch
 from det3d.configs.parser import ConfigMakerDet
 from det3d.preprocessing.run_build import build_from_plan
-from det3d.training.trainer import TrainerDet
+from det3d.trainers.trainerdet import TrainerDet
 from fran.managers import Project
 from fran.utils.misc import parse_devices
 
@@ -25,6 +25,12 @@ def main():
     parser.add_argument("--debug", type=str2bool, default=False)
     parser.add_argument("--skip-json-build", type=str2bool, default=False)
     parser.add_argument("--val-every-n-epochs", type=int, default=None)
+    parser.add_argument(
+        "--batch-tfms",
+        type=str2bool,
+        default=True,
+        help="Use DataManagerDualDetBTfms (GPU spatial tail via on_after_batch_transfer)",
+    )
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -51,6 +57,7 @@ def main():
         wandb=args.wandb,
         debug=args.debug,
         val_every_n_epochs=args.val_every_n_epochs,
+        batch_tfms=args.batch_tfms,
     )
     trainer.fit()
 
