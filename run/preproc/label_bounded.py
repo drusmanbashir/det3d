@@ -18,6 +18,7 @@ def main():
     parser.add_argument("--num-processes", type=int, default=1)
     parser.add_argument("--case-ids", default="", help="comma-separated case filter for smoke")
     parser.add_argument("--input-folder", default="", help="optional input data folder override")
+    parser.add_argument("--overwrite-hdf5-shards", action="store_true")
     args = parser.parse_args()
 
     project = Project(project_title=args.project_title)
@@ -41,7 +42,11 @@ def main():
         generator.df = generator.df[generator.df["case_id"].isin(case_ids)].reset_index(
             drop=True
         )
-    generator.run(overwrite=args.overwrite, num_processes=args.num_processes)
+    generator.run(
+        overwrite=args.overwrite,
+        num_processes=args.num_processes,
+        overwrite_hdf5_shards=args.overwrite_hdf5_shards,
+    )
 
 
 if __name__ == "__main__":

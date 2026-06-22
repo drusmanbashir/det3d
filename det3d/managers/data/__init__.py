@@ -18,9 +18,12 @@ from det3d.managers.data.main import (
     DataManagerDetWhole,
     DataManagerDualDet,
     DataManagerMultiDet,
+    BboxCenterCropSlicesd,
+    CropDetPatchd,
     LoadHDF5DetCaseFulld,
     LoadHDF5DetCropd,
     LoadHDF5DetShardIndexd,
+    PadDetPatchd,
 )
 from det3d.managers.data.nifti import DataManagerNiftiDet
 from det3d.managers.data.run_through import DataManagerRTDet, DataManagerRTDetBTfms
@@ -101,5 +104,8 @@ __all__ = [
     "LoadHDF5DetCaseFulld",
     "LoadHDF5DetCropd",
     "LoadHDF5DetShardIndexd",
+    "BboxCenterCropSlicesd",
+    "CropDetPatchd",
+    "PadDetPatchd",
     "PatchStreamDatasetDet",
 ]

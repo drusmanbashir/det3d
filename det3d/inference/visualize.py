@@ -11,7 +11,7 @@ from utilz.stringz import strip_extension
 
 
 def list_sidecar_files(pred_dir):
-    return sorted(Path(pred_dir).glob("*.json"))
+    return sorted(p for p in Path(pred_dir).glob("*.json") if not p.name.endswith(".mrk.json"))
 
 
 def sidecar_file_at_index(pred_dir, index):
@@ -34,7 +34,7 @@ def list_prediction_sidecars(run_p, project=None):
         params = load_params(run_p)
         project = infer_project(params)
     fldr = project.predictions_folder / run_p
-    return sorted(fldr.glob("*.json"))
+    return sorted(p for p in fldr.glob("*.json") if not p.name.endswith(".mrk.json"))
 
 
 def sidecar_at_index(run_p, index, project=None):

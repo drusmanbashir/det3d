@@ -24,6 +24,26 @@ def mask_fg_bg_flat_indices(mask):
     return fg, bg
 
 
+def volume_fg_bg_flat_indices(volume, bg_subsample=5):
+    """RandCrop pools from a 3D/4D volume; bg kept every Nth index (fran subsample_bg=5)."""
+    fg, bg = mask_fg_bg_flat_indices(volume)
+    if bg_subsample is not None and int(bg_subsample) > 1:
+        bg = bg[:: int(bg_subsample)]
+    return fg, bg
+
+
+def volume_fg_flat_indices(volume):
+    fg, _ = mask_fg_bg_flat_indices(volume)
+    return fg
+
+
+def volume_bg_flat_indices(volume, bg_subsample=5):
+    _, bg = mask_fg_bg_flat_indices(volume)
+    if bg_subsample is not None and int(bg_subsample) > 1:
+        bg = bg[:: int(bg_subsample)]
+    return bg
+
+
 def monai_crop_center_to_slices(center, roi_size, spatial_shape):
     """Slice tuple matching MONAI SpatialCrop(roi_center, roi_size)."""
     roi_size = fall_back_tuple(roi_size, spatial_shape)

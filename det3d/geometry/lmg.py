@@ -17,12 +17,7 @@ def voxel_start_size_to_gt_box(bbox, gt_box_mode):
 
 
 class DetectionLabelMapGeometryPT(LabelMapGeometryPT):
-    def to_voxel_detection_records(
-        self,
-        gt_box_mode,
-        foreground_class_id=0,
-        remapping_train=None,
-    ):
+    def to_voxel_detection_records(self, gt_box_mode):
         boxes = []
         labels = []
         for _, row in self.nbrhoods.iterrows():
@@ -32,8 +27,5 @@ class DetectionLabelMapGeometryPT(LabelMapGeometryPT):
                     dtype=torch.float32,
                 )
             )
-            if remapping_train is None:
-                labels.append(foreground_class_id)
-            else:
-                labels.append(remapping_train[int(row["label_org"])])
+            labels.append(int(row["label_org"]))
         return {"box": boxes, "label": labels}

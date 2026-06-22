@@ -2,14 +2,24 @@ import json
 import resource
 from functools import partial
 from pathlib import Path
+from utilz.imageviewers import ImageBBoxViewer
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 import torch
-from det3d.collate import det_val_collate, lbd_det_collate
+from det3d.managers.data.collate import det_val_collate, lbd_det_collate
+from det3d.managers.data.valid_patch_stream import (
+    PatchStreamDatasetDet,
+    patch_stream_collate_fn,
+)
+from det3d.transforms.crop_indices import (
+    monai_crop_center_to_slices,
+    volume_bg_flat_indices,
+    volume_fg_flat_indices,
+)
+from fran.managers.data.valid_patch_stream import _pad_tensor_to_patch_size
 from det3d.utils.bbox_sidecar import bbox_sidecar_path, load_detection_sidecar, valid_detection_box
-from det3d.utils.folder_names import lbd_det_folder_from_plan
 from fran.configs.helpers import is_excel_None
 from fran.managers.data.main import (
     DataManager,
@@ -47,20 +57,25 @@ from monai.transforms import (
 )
 from monai.transforms.spatial.dictionary import ConvertBoxToPointsd, ConvertPointsToBoxesd
 from monai.transforms.utility.dictionary import ApplyTransformToPointsd
+from fran.utils.folder_names import FolderNames
 from utilz.stringz import info_from_filename
 
 
 class LoadHDF5DetShardIndexd(MapTransform):
-    """Resolve case -> HDF5 shard; load mask-derived fg/bg flat indices."""
+    """Load RandCrop index pools from HDF5 (retinanet: fg+bg mask; retinaunet: lm_fg + bg)."""
 
     def __init__(
         self,
         keys,
         manifest_fn: str,
+        fg_indices_key: str = "fg_indices",
+        bg_indices_key: str = "bg_indices",
         allow_missing_keys: bool = False,
     ):
         super().__init__(keys, allow_missing_keys)
         self.manifest_fn = Path(manifest_fn)
+        self.fg_indices_key = fg_indices_key
+        self.bg_indices_key = bg_indices_key
         self._manifest_cache = {}
 
     def _cached_manifest(self):
@@ -89,16 +104,6 @@ class LoadHDF5DetShardIndexd(MapTransform):
         self._manifest_cache[manifest_key] = cached
         return cached
 
-    @staticmethod
-    def _read_flat_indices(case_grp):
-        if "fg_indices" in case_grp:
-            fg_key, bg_key = "fg_indices", "bg_indices"
-        else:
-            fg_key, bg_key = "lm_fg_indices", "lm_bg_indices"
-        fg = np.asarray(case_grp[fg_key][:], dtype=np.int64).reshape(-1)
-        bg = np.asarray(case_grp[bg_key][:], dtype=np.int64).reshape(-1)
-        return fg, bg
-
     def __call__(self, data):
         d = dict(data)
         case_id = str(d["case_id"])
@@ -108,13 +113,159 @@ class LoadHDF5DetShardIndexd(MapTransform):
         case_path = f"/cases/{case_id}"
         with h5py.File(shard_path, "r") as h5f:
             case_grp = h5f[case_path]
-            fg, bg = self._read_flat_indices(case_grp)
+            fg = np.asarray(case_grp[self.fg_indices_key][:], dtype=np.int64).reshape(-1)
+            bg = np.asarray(case_grp[self.bg_indices_key][:], dtype=np.int64).reshape(-1)
             src_dims = tuple(int(v) for v in case_grp["mask"].shape)
         d["hdf5_shard_path"] = str(shard_path)
         d["hdf5_case_path"] = case_path
         d["src_dims"] = src_dims
         d["fg_indices"] = fg
         d["bg_indices"] = bg
+        return d
+
+
+class DetRandCropIndicesd(MapTransform):
+    """RandCrop pools: fg from lm, bg from mask (shared bg_indices with retinanet)."""
+
+    def __init__(
+        self,
+        fg_volume_key="lm",
+        bg_volume_key="mask",
+        fg_indices_key="fg_indices",
+        bg_indices_key="bg_indices",
+        src_dims_key="src_dims",
+        bg_subsample=5,
+        allow_missing_keys=False,
+    ):
+        super().__init__([fg_volume_key, bg_volume_key], allow_missing_keys)
+        self.fg_volume_key = fg_volume_key
+        self.bg_volume_key = bg_volume_key
+        self.fg_indices_key = fg_indices_key
+        self.bg_indices_key = bg_indices_key
+        self.src_dims_key = src_dims_key
+        self.bg_subsample = bg_subsample
+
+    def __call__(self, data):
+        d = dict(data)
+        lm = d[self.fg_volume_key]
+        spatial = tuple(int(v) for v in lm.shape[-3:])
+        d[self.src_dims_key] = spatial
+        d[self.fg_indices_key] = volume_fg_flat_indices(lm)
+        d[self.bg_indices_key] = volume_bg_flat_indices(
+            d[self.bg_volume_key], bg_subsample=self.bg_subsample
+        )
+        return d
+
+
+class CropDetPatchd(MapTransform):
+    """Crop in-memory det patch tensors using RandCropByFlatIndicesd metadata."""
+
+    def __init__(
+        self,
+        keys,
+        box_key="bbox",
+        crop_slices_key="crop_slices",
+        crop_start_key="crop_start",
+        allow_missing_keys=False,
+    ):
+        super().__init__(keys, allow_missing_keys)
+        self.box_key = box_key
+        self.crop_slices_key = crop_slices_key
+        self.crop_start_key = crop_start_key
+
+    def __call__(self, data):
+        d = dict(data)
+        crop_slices = tuple(d[self.crop_slices_key])
+        crop_start = tuple(int(v) for v in d[self.crop_start_key])
+        meta_updates = {
+            "crop_start": crop_start,
+            "crop_end": d.get("crop_end"),
+            "sampled_flat_index": d.get("sampled_flat_index"),
+            "sample_is_fg": d.get("sample_is_fg"),
+        }
+        for key in self.key_iterator(d):
+            val = d[key]
+            meta = dict(val.meta) if isinstance(val, MetaTensor) else {}
+            meta.update(meta_updates)
+            if val.ndim == 4:
+                cropped = val[(slice(None), *crop_slices)]
+            elif val.ndim == 3:
+                cropped = val[crop_slices]
+            else:
+                raise ValueError(f"expected 3D or 4D tensor for {key}, got {val.shape}")
+            if isinstance(val, MetaTensor):
+                d[key] = MetaTensor(cropped.contiguous(), meta=meta)
+            else:
+                d[key] = cropped.contiguous()
+        box = torch.as_tensor(d[self.box_key], dtype=torch.float32)
+        if box.numel() > 0:
+            start = torch.tensor(crop_start, dtype=box.dtype)
+            box = box.clone()
+            box[:, :3] -= start
+            box[:, 3:] -= start
+            d[self.box_key] = box
+        return d
+
+
+class BboxCenterCropSlicesd(MapTransform):
+    """Deterministic val crop: center on first bbox, MONAI allow_smaller slice math."""
+
+    def __init__(
+        self,
+        box_key="bbox",
+        image_key="image",
+        roi_size=(128, 128, 64),
+        allow_missing_keys=False,
+    ):
+        super().__init__([box_key], allow_missing_keys)
+        self.box_key = box_key
+        self.image_key = image_key
+        self.roi_size = tuple(int(v) for v in roi_size)
+
+    def __call__(self, data):
+        d = dict(data)
+        img = d[self.image_key]
+        spatial_shape = tuple(int(v) for v in img.shape[-3:])
+        box = torch.as_tensor(d[self.box_key], dtype=torch.float32)
+        if box.ndim == 1:
+            box = box.reshape(1, 6)
+        b0 = box[0]
+        center = tuple(
+            int(round((b0[i].item() + b0[i + 3].item()) / 2)) for i in range(3)
+        )
+        slices, crop_start, crop_end = monai_crop_center_to_slices(
+            center, self.roi_size, spatial_shape
+        )
+        d["crop_center"] = center
+        d["crop_slices"] = slices
+        d["crop_start"] = crop_start
+        d["crop_end"] = crop_end
+        d["validation_impl"] = "bbox_anchor"
+        return d
+
+
+class PadDetPatchd(MapTransform):
+    """End-pad cropped patch tensors to fixed patch_size (boxes unchanged)."""
+
+    def __init__(
+        self,
+        keys,
+        patch_size,
+        pad_value=0,
+        allow_missing_keys=False,
+    ):
+        super().__init__(keys, allow_missing_keys)
+        self.patch_size = tuple(int(v) for v in patch_size)
+        self.pad_value = pad_value
+
+    def __call__(self, data):
+        d = dict(data)
+        for key in self.key_iterator(d):
+            d[key], _ = _pad_tensor_to_patch_size(
+                tensor=d[key],
+                patch_size=self.patch_size,
+                pad_value=self.pad_value,
+            )
         return d
 
 
@@ -143,14 +294,14 @@ class LoadHDF5DetCropd(MapTransform):
         crop_slices = tuple(d[self.crop_slices_key])
         crop_start = tuple(int(v) for v in d[self.crop_start_key])
         h5py = import_h5py()
+        h5_keys = tuple(dict.fromkeys(("image", "mask", *self.keys)))
         with h5py.File(shard_path, "r") as h5f:
             case_grp = h5f[case_path]
-            image = np.asarray(case_grp["image"][crop_slices])
-            mask = np.asarray(case_grp["mask"][crop_slices])
-        if image.ndim == 3:
-            image = image[np.newaxis, ...]
-        if mask.ndim == 3:
-            mask = mask[np.newaxis, ...]
+            loaded = {
+                key: np.asarray(case_grp[key][crop_slices])
+                for key in h5_keys
+                if key in case_grp
+            }
         meta = {
             "filename_or_obj": f"{shard_path}:{case_path}",
             "case_id": d.get("case_id"),
@@ -160,8 +311,10 @@ class LoadHDF5DetCropd(MapTransform):
             "sample_is_fg": d.get("sample_is_fg"),
             "original_channel_dim": 0,
         }
-        d["image"] = MetaTensor(torch.as_tensor(image), meta=dict(meta))
-        d["mask"] = MetaTensor(torch.as_tensor(mask), meta=dict(meta))
+        for key, arr in loaded.items():
+            if arr.ndim == 3:
+                arr = arr[np.newaxis, ...]
+            d[key] = MetaTensor(torch.as_tensor(arr), meta=dict(meta))
         box = torch.as_tensor(d[self.box_key], dtype=torch.float32)
         if box.numel() > 0:
             start = torch.tensor(crop_start, dtype=box.dtype)
@@ -210,6 +363,7 @@ class DataManagerDet(DataManager):
     label_key = "label"
     point_key = "points"
     mask_key = "mask"
+    lm_key = "lm"
     keys_tr_batch = None
     keys_val_batch = None
 
@@ -268,40 +422,77 @@ class DataManagerDet(DataManager):
         pass
 
     def set_preprocessing_params(self):
+        from utilz.fileio import load_dict
+
+        global_properties = load_dict(self.project.global_properties_filename)
         self.dataset_params = self.configs["dataset_params"]
+        self.dataset_params["intensity_clip_range"] = global_properties[
+            "intensity_clip_range"
+        ]
+        self.dataset_params["mean_fg"] = global_properties["mean_fg"]
+        self.dataset_params["std_fg"] = global_properties["std_fg"]
         transform_factors = self.configs.get("transform_factors")
         if transform_factors:
             self._assimilate_tfm_factors(transform_factors)
+        self.dataset_params.setdefault("valid_impl", "bbox_anchor")
+
+    def _valid_impl(self):
+        return self.dataset_params["valid_impl"]
 
     def set_effective_batch_size(self):
         self.effective_batch_size = self.batch_size
 
     def _size_divisible(self):
-        plan = self.plan
-        return [
-            step * 2 * 2 ** max(plan["returned_layers"])
-            for step in plan["conv1_t_stride"]
-        ]
+        from det3d.architectures.create_detector import size_divisible_from_conf
+
+        return size_divisible_from_conf(self.configs)
 
     def _patch_size(self):
         return tuple(int(v) for v in self.plan["patch_size"])
 
+    def uses_lm_seg(self):
+        from det3d.architectures.create_detector import arch_from_conf
+
+        return arch_from_conf(self.configs) == "retinaunet"
+
+    def _rand_crop_patch_size(self):
+        if self.uses_lm_seg():
+            from det3d.detection.nndet_train import forward_patch_size_from_configs
+
+            ps = forward_patch_size_from_configs(self.configs)
+            if ps is not None:
+                return tuple(int(v) for v in ps)
+        return self._patch_size()
+
     def _set_collate_fn(self):
         if self.is_eval_split():
-            self.collate_fn = partial(
-                det_val_collate,
-                box_key=self.box_key,
-                label_key=self.label_key,
-            )
+            if self.uses_lm_seg():
+                self.collate_fn = partial(
+                    lbd_det_collate,
+                    size_divisible=self._size_divisible(),
+                    box_key=self.box_key,
+                    lm_key=self.lm_key,
+                )
+                return
+            collate_kwargs = {
+                "box_key": self.box_key,
+                "label_key": self.label_key,
+            }
+            self.collate_fn = partial(det_val_collate, **collate_kwargs)
             return
-        self.collate_fn = partial(
-            lbd_det_collate,
-            size_divisible=self._size_divisible(),
-            box_key=self.box_key,
-        )
+        collate_kwargs = {
+            "size_divisible": self._size_divisible(),
+            "box_key": self.box_key,
+        }
+        if self.uses_lm_seg():
+            collate_kwargs["lm_key"] = self.lm_key
+        self.collate_fn = partial(lbd_det_collate, **collate_kwargs)
+
+    def override_batch_size_valid_split(self, split="valid"):
+        pass
 
     def _compute_dtype(self):
-        return torch.float16 if self.amp else torch.float32
+        return torch.float32
 
     def _num_workers(self):
         if self.debug:
@@ -312,7 +503,7 @@ class DataManagerDet(DataManager):
         if self.is_train_split():
             num_workers = min(4, max(2, self.effective_batch_size // 8))
         else:
-            num_workers = min(4, max(2, int(self.plan.get("num_workers_val", 2))))
+            num_workers = min(4, max(2, int(self.configs["dataset_params"].get("num_workers_val", 2))))
         return num_workers, False
 
     def create_dataloader(self):
@@ -339,7 +530,7 @@ class DataManagerDet(DataManager):
         self.dl = DataLoader(self.ds, **dl_kwargs)
 
     def derive_data_folder(self, plan):
-        data_folder = lbd_det_folder_from_plan(self.project, plan)
+        data_folder = Path(FolderNames(self.project, plan).folders["data_folder_lbd"])
         data_folder = ensure_rapid_data_folder(data_folder)
         if not data_folder.exists():
             raise FileNotFoundError(f"Data folder {data_folder} does not exist")
@@ -393,7 +584,7 @@ class DataManagerDet(DataManager):
         ]
 
     def _load_bbox_sidecar(self, bbox_fn):
-        boxes, labels = load_detection_sidecar(bbox_fn)
+        boxes, labels, _instances = load_detection_sidecar(bbox_fn)
         valid_boxes = []
         valid_labels = []
         for box, label in zip(boxes, labels):
@@ -406,7 +597,7 @@ class DataManagerDet(DataManager):
         else:
             box_t = torch.stack(valid_boxes)
             label_t = torch.stack(valid_labels).reshape(-1)
-        return box_t, label_t
+        return box_t, label_t, _instances
 
     @property
     def hdf5_manifest_fn(self):
@@ -439,17 +630,16 @@ class DataManagerDet(DataManager):
                 if not bbox_fn.is_file():
                     skipped += 1
                     continue
-                box_t, label_t = self._load_bbox_sidecar(bbox_fn)
-                data.append(
-                    {
-                        "case_id": case_id,
-                        "data_folder": str(self.data_folder),
-                        "hdf5_shard_path": str(shard_path),
-                        "hdf5_case_path": f"/cases/{case_id}",
-                        self.box_key: box_t,
-                        self.label_key: label_t,
-                    }
-                )
+                box_t, label_t, _instances = self._load_bbox_sidecar(bbox_fn)
+                row = {
+                    "case_id": case_id,
+                    "data_folder": str(self.data_folder),
+                    "hdf5_shard_path": str(shard_path),
+                    "hdf5_case_path": f"/cases/{case_id}",
+                    self.box_key: box_t,
+                    self.label_key: label_t,
+                }
+                data.append(row)
         return data, skipped
 
     def _require_shard_manifest(self, data_folder):
@@ -476,8 +666,6 @@ class DataManagerDet(DataManager):
 
 
 class DataManagerDetSource(DataManagerDet, DataManagerSource):
-    data_keys = ("image", "mask")
-
     keys_tr = (
         "Ld,Rtr,L2,E,Norm,BoxToWorld,ToPoints,Zoom,Flip0,Flip1,Flip2,Rand90,Rot,"
         "AffinePts,ToBoxes,BoxClip,DelMask,IntensityTfms,Dtype"
@@ -520,18 +708,31 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
         return data
 
     def create_transforms(self):
-        ik, bk, lk, mk, pk = (
+        ik, bk, lk, mk, pk, lmk = (
             self.image_key,
             self.box_key,
             self.label_key,
             self.mask_key,
             self.point_key,
+            self.lm_key,
         )
-        load_keys = list(self.data_keys)
+        load_keys = [ik, mk]
+        use_lm = self.uses_lm_seg()
+        if use_lm:
+            load_keys.append(lmk)
+            fg_indices_key = "lm_fg_indices"
+        else:
+            fg_indices_key = "fg_indices"
+        spatial_aug_keys = [ik]
+        if use_lm:
+            spatial_aug_keys.append(lmk)
+        zoom_mode = ["bilinear", "nearest"] if use_lm else "bilinear"
+        rot_mode = ["linear", "nearest"] if use_lm else "linear"
         patch_size = self._patch_size()
         plan = self.plan
         compute_dtype = self._compute_dtype()
         affine_lps_to_ras = self.affine_lps_to_ras
+        clip = self.dataset_params["intensity_clip_range"]
 
         IntensityTfms = [
             RandScaleIntensityd(
@@ -552,6 +753,8 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
             "Ld": LoadHDF5DetShardIndexd(
                 keys=["case_id"],
                 manifest_fn=str(self.hdf5_manifest_fn),
+                fg_indices_key=fg_indices_key,
+                bg_indices_key="bg_indices",
             ),
             "Rtr": RandCropByFlatIndicesd(
                 keys=[ik],
@@ -566,8 +769,8 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
             "E": EnsureChannelFirstd(keys=load_keys),
             "Norm": ScaleIntensityRanged(
                 keys=[ik],
-                a_min=float(plan["intensity_a_min"]),
-                a_max=float(plan["intensity_a_max"]),
+                a_min=float(clip[0]),
+                a_max=float(clip[1]),
                 b_min=0.0,
                 b_max=1.0,
                 clip=True,
@@ -579,20 +782,23 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
             ),
             "ToPoints": ConvertBoxToPointsd(keys=[bk]),
             "Zoom": RandZoomd(
-                keys=[ik],
+                keys=spatial_aug_keys,
                 prob=0.2,
                 min_zoom=0.7,
                 max_zoom=1.4,
                 padding_mode="constant",
                 keep_size=True,
+                mode=zoom_mode,
             ),
-            "Flip0": RandFlipd(keys=[ik], prob=0.5, spatial_axis=0),
-            "Flip1": RandFlipd(keys=[ik], prob=0.5, spatial_axis=1),
-            "Flip2": RandFlipd(keys=[ik], prob=0.5, spatial_axis=2),
-            "Rand90": RandRotate90d(keys=[ik], prob=0.75, max_k=3, spatial_axes=(0, 1)),
+            "Flip0": RandFlipd(keys=spatial_aug_keys, prob=0.5, spatial_axis=0),
+            "Flip1": RandFlipd(keys=spatial_aug_keys, prob=0.5, spatial_axis=1),
+            "Flip2": RandFlipd(keys=spatial_aug_keys, prob=0.5, spatial_axis=2),
+            "Rand90": RandRotate90d(
+                keys=spatial_aug_keys, prob=0.75, max_k=3, spatial_axes=(0, 1)
+            ),
             "Rot": RandRotated(
-                keys=[ik],
-                mode="nearest",
+                keys=spatial_aug_keys,
+                mode=rot_mode,
                 prob=0.2,
                 range_x=np.pi / 6,
                 range_y=np.pi / 6,
@@ -615,6 +821,11 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
             "Dtype": Compose(
                 [
                     EnsureTyped(keys=[ik], dtype=compute_dtype),
+                    *(
+                        [EnsureTyped(keys=[lmk], dtype=torch.long)]
+                        if use_lm
+                        else []
+                    ),
                     EnsureTyped(keys=[bk], dtype=torch.float32),
                     EnsureTyped(keys=[lk], dtype=torch.long),
                 ]
@@ -633,6 +844,8 @@ class DataManagerDetWhole(DataManagerDet, DataManagerWhole):
 
 class DataManagerDetLBD(DataManagerDetSource, DataManagerLBD):
     keys_val = "L,E,Norm,DtypeVal"
+    keys_val_seg = "L,E,BoxClip,Norm,DtypeVal"
+    keys_val_bbox = "L,E,Norm,BboxCrop,CropPatch,PadPatch,BoxClip,DtypeVal"
     keys_val_batch = None
 
     def __repr__(self):
@@ -649,7 +862,76 @@ class DataManagerDetLBD(DataManagerDetSource, DataManagerLBD):
         provided_keys = kwargs["keys"] if "keys" in kwargs else None
         super().__init__(project, configs, batch_size, cache_rate, **kwargs)
         if provided_keys is None and self.is_eval_split():
-            self.keys = self.keys_val
+            if self._valid_impl() == "patch_stream":
+                self.keys = self.keys_val_seg if self.uses_lm_seg() else self.keys_val
+            else:
+                self.keys = self.keys_val_bbox
+        self.override_batch_size_valid_split(split=self.split)
+
+    def override_batch_size_valid_split(self, split="valid"):
+        if (
+            split == "valid"
+            and not self.is_train_all_split()
+            and self._valid_impl() == "patch_stream"
+        ):
+            self.batch_size = 1
+            self.effective_batch_size = 1
+            lm_key = self.lm_key if self.uses_lm_seg() else None
+            self.collate_fn = patch_stream_collate_fn(lm_key)
+
+    def create_dataset(self):
+        if self.is_train_all_split():
+            return DataManagerDetSource.create_dataset(self)
+        if self.is_eval_split():
+            if not hasattr(self, "data") or len(self.data) == 0:
+                print("No data. DS is not being created at this point.")
+                return 0
+            if self._valid_impl() == "patch_stream":
+                case_ds = self._create_modal_ds()
+                patch_size = self._rand_crop_patch_size()
+                lm_key = self.lm_key if self.uses_lm_seg() else None
+                self.ds = PatchStreamDatasetDet(
+                    case_dataset=case_ds,
+                    patch_size=patch_size,
+                    lm_key=lm_key,
+                )
+                return
+            self.ds = self._create_modal_ds()
+            return
+        DataManagerDet.create_dataset(self)
+
+    def create_dataloader(self):
+        if not self.is_eval_split():
+            return DataManagerDet.create_dataloader(self)
+        if isinstance(self.ds, PatchStreamDatasetDet):
+            self.dl = DataLoader(
+                self.ds,
+                batch_size=1,
+                num_workers=0,
+                collate_fn=self.collate_fn,
+                persistent_workers=False,
+                pin_memory=not self.debug,
+                shuffle=False,
+            )
+            return
+        num_workers, persistent_workers = self._num_workers()
+        pin_memory = torch.cuda.is_available() and not self.debug
+        if num_workers > 0:
+            persistent_workers = True
+        dl_kwargs = dict(
+            batch_size=self.effective_batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            collate_fn=self.collate_fn,
+            persistent_workers=persistent_workers,
+            pin_memory=pin_memory,
+        )
+        if num_workers > 0:
+            dl_kwargs["prefetch_factor"] = 2
+        self.dl = DataLoader(self.ds, **dl_kwargs)
+
+    def create_valid_dataloader(self):
+        self.create_dataloader()
 
     def cases_from_project_split(self):
         if self.is_eval_split():
@@ -673,16 +955,21 @@ class DataManagerDetLBD(DataManagerDetSource, DataManagerLBD):
             if not bbox_fn.is_file():
                 skipped += 1
                 continue
-            box_t, label_t = self._load_bbox_sidecar(bbox_fn)
-            data.append(
-                {
-                    "case_id": case_id,
-                    "data_folder": str(self.data_folder),
-                    "image": str(img_fn),
-                    self.box_key: box_t,
-                    self.label_key: label_t,
-                }
-            )
+            box_t, label_t, _instances = self._load_bbox_sidecar(bbox_fn)
+            row = {
+                "case_id": case_id,
+                "data_folder": str(self.data_folder),
+                "image": str(img_fn),
+                self.box_key: box_t,
+                self.label_key: label_t,
+            }
+            if self.uses_lm_seg():
+                lm_fn = self.data_folder / "lms" / img_fn.name
+                if not lm_fn.is_file():
+                    skipped += 1
+                    continue
+                row[self.lm_key] = str(lm_fn)
+            data.append(row)
         if skipped:
             print(
                 f"DataManagerDetLBD: skipped {skipped} cases "
@@ -693,10 +980,19 @@ class DataManagerDetLBD(DataManagerDetSource, DataManagerLBD):
     def create_transforms(self):
         if self.is_train_all_split():
             return DataManagerDetSource.create_transforms(self)
-        ik, bk, lk = self.image_key, self.box_key, self.label_key
-        load_keys = [self.image_key]
+        ik, bk, lk, mk, lmk = (
+            self.image_key,
+            self.box_key,
+            self.label_key,
+            self.mask_key,
+            self.lm_key,
+        )
+        use_lm = self.uses_lm_seg()
+        load_keys = [ik]
+        if use_lm:
+            load_keys.append(lmk)
         compute_dtype = self._compute_dtype()
-        plan = self.plan
+        clip = self.dataset_params["intensity_clip_range"]
 
         L = LoadImaged(
             keys=load_keys,
@@ -706,25 +1002,51 @@ class DataManagerDetLBD(DataManagerDetSource, DataManagerLBD):
         )
         L.register(TorchReader())
 
+        dtype_val = [
+            EnsureTyped(keys=[ik], dtype=compute_dtype),
+            EnsureTyped(keys=[bk], dtype=torch.float32),
+            EnsureTyped(keys=[lk], dtype=torch.long),
+        ]
+        if use_lm:
+            dtype_val.insert(1, EnsureTyped(keys=[lmk], dtype=torch.long))
+
         self.transforms_dict = {
             "L": L,
             "E": EnsureChannelFirstd(keys=load_keys),
             "Norm": ScaleIntensityRanged(
                 keys=[ik],
-                a_min=float(plan["intensity_a_min"]),
-                a_max=float(plan["intensity_a_max"]),
+                a_min=float(clip[0]),
+                a_max=float(clip[1]),
                 b_min=0.0,
                 b_max=1.0,
                 clip=True,
             ),
-            "DtypeVal": Compose(
-                [
-                    EnsureTyped(keys=[ik], dtype=compute_dtype),
-                    EnsureTyped(keys=[bk], dtype=torch.float32),
-                    EnsureTyped(keys=[lk], dtype=torch.long),
-                ]
-            ),
+            "DtypeVal": Compose(dtype_val),
         }
+        box_clip = ClipBoxToImaged(
+            box_keys=bk,
+            label_keys=[lk],
+            box_ref_image_keys=ik,
+            remove_empty=True,
+        )
+        if self.is_eval_split() and self._valid_impl() == "bbox_anchor":
+            patch_size = self._rand_crop_patch_size()
+            crop_keys = [ik]
+            if use_lm:
+                crop_keys.append(lmk)
+            self.transforms_dict["BboxCrop"] = BboxCenterCropSlicesd(
+                box_key=bk,
+                image_key=ik,
+                roi_size=patch_size,
+            )
+            self.transforms_dict["CropPatch"] = CropDetPatchd(keys=crop_keys, box_key=bk)
+            self.transforms_dict["PadPatch"] = PadDetPatchd(
+                keys=crop_keys,
+                patch_size=patch_size,
+            )
+            self.transforms_dict["BoxClip"] = box_clip
+        elif use_lm:
+            self.transforms_dict["BoxClip"] = box_clip
 
 
 class DataManagerDetRBD(DataManagerDetLBD, DataManagerRBD):
@@ -773,7 +1095,7 @@ class DataManagerDualDet(DataManagerDual):
         cls_val = self.manager_class_valid or cls_val
         self._assert_det_manager_class(cls_tr)
         self._assert_det_manager_class(cls_val)
-        lbd_folder = lbd_det_folder_from_plan(self.project, self.configs["plan_train"])
+        lbd_folder = FolderNames(self.project, self.configs["plan_train"]).lbd_folder
         from utilz.cprint import cprint
 
         cprint(f"train manager class: {cls_tr.__name__}", color="cyan")
@@ -816,3 +1138,126 @@ class DataManagerDualDet(DataManagerDual):
 
 class DataManagerMultiDet(DataManagerMulti):
     pass
+
+
+# %%
+if __name__ == "__main__":
+#SECTION:--- setup ---
+    from fran.managers import Project
+
+    from det3d.configs.parser import ConfigMakerDet
+    from det3d.managers.data.batch_tfms import DataManagerDualDetBTfms
+
+    project_title = "lidca"
+    plan_id = 2
+    conf_fold = 0
+
+    P = Project(project_title)
+    C = ConfigMakerDet(P)
+    C.setup(plan_id)
+    conf = C.configs
+    conf["dataset_params"]["fold"] = conf_fold
+
+#SECTION:--- dualdet datamanager ---
+# %%
+    batch_size = 2
+    batch_tfms = False
+    debug_ = True
+    train_indices = None
+    val_indices = 10
+    val_sampling = 1.0
+    device = 0
+
+    for key in ("plan_train", "plan_valid", "plan_test"):
+        plan = conf[key]
+        if plan["mode"] in {"det", "lbd"}:
+            plan["mode"] = "lbd"
+
+    DmCls = DataManagerDualDetBTfms if batch_tfms else DataManagerDualDet
+    D = DmCls(
+        project_title=project_title,
+        configs=conf,
+        batch_size=batch_size,
+        cache_rate=conf["dataset_params"]["cache_rate"],
+        device=device,
+        ds_type=conf["dataset_params"]["ds_type"],
+        train_indices=train_indices,
+        val_indices=val_indices,
+        val_sampling=val_sampling,
+        debug=debug_,
+        batch_tfms=batch_tfms,
+    )
+# %%
+
+# %%
+
+# %%  # T:block_start|DataManagerDet.derive_data_folder
+#SECTION:-------------------- derive_data_folder--------------------------------------------------------------------------------------  # T:block_meta|DataManagerDet.derive_data_folder
+    # requires D = DataManagerDet(...) in __main__  # T:requires_alias|D = DataManagerDet(...)
+    data_folder = Path(FolderNames(D.project, plan).folders["data_folder_lbd"])  # T:self_ref|data_folder = Path(FolderNames(self.project, plan).folders["data_folder_lbd"])
+    data_folder = ensure_rapid_data_folder(data_folder)
+    if not data_folder.exists():
+        raise FileNotFoundError(f"Data folder {data_folder} does not exist")
+    images_dir = data_folder / "images"
+    bboxes_dir = data_folder / "bboxes"
+    if not images_dir.is_dir() or not bboxes_dir.is_dir():
+        raise FileNotFoundError(
+            f"Expected images/ and bboxes/ under {data_folder}"
+        )
+    if len(list(images_dir.glob("*.pt"))) == 0:
+        raise FileNotFoundError(f"No label-bounded cases under {images_dir}")
+    if len(list(bboxes_dir.glob("*.pt"))) > 0:
+        raise FileNotFoundError(
+            f"Legacy bbox .pt sidecars under {bboxes_dir}; re-preproc to JSON"
+        )
+    if len(list(bboxes_dir.glob("*.json"))) == 0:
+        raise FileNotFoundError(f"No bbox JSON sidecars under {bboxes_dir}")
+    csv_fn = data_folder / "dataset_details.csv"
+    if not csv_fn.is_file():
+        raise FileNotFoundError(f"Missing dataset_details.csv under {data_folder}")
+    derive_data_folder_result = data_folder  # T:return|return data_folder
+    # end PythonMethodScratch  # T:block_end|DataManagerDet.derive_data_folder
+
+#SECTION:--- prepare_data ---
+# %%
+    D.prepare_data()
+
+#SECTION:--- setup fit ---
+# %%
+    D.setup(stage="fit")
+    tmt = D.train_manager
+    tmv = D.valid_manager
+
+#SECTION:--- train dataloader ---
+# %%
+    tmt.setup()
+    train_dl = tmt.dl
+    print(f"train: {tmt}")
+    print(f"train keys: {tmt.keys}")
+    train_batch = next(iter(train_dl))
+    train_batch.keys()
+    train_batch["image"].shape
+
+#SECTION:--- valid dataloader ---
+# %%
+    tmv.setup()
+    val_dl = tmv.dl
+    print(f"valid: {tmv}")
+    print(f"valid keys: {tmv.keys}")
+    print(f"valid_impl: {tmv.dataset_params['valid_impl']}")
+    iteri=iter(val_dl)
+# %%
+    val_batch = next(iteri)
+    val_batch.keys()
+    val_batch['image'].meta
+
+
+    img = val_batch["image"]
+    bbox = val_batch[tmv.box_key]
+# %%
+    ImageBBoxViewer(img[1], bbox)
+    val_batch["image"].shape
+    val_batch.get("validation_impl")
+    val_batch["case_id"]
+
+# %%

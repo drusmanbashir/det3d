@@ -23,6 +23,9 @@ from det3d.detection.generate_transforms import (
     generate_detection_train_transform,
     generate_detection_val_transform,
 )
+
+
+
 from det3d.detection.lidc_datalist import load_lidc_train_val
 from det3d.detection.visualize_image import visualize_one_xy_slice_in_3d_image
 from det3d.detection.warmup_scheduler import GradualWarmupScheduler
@@ -49,7 +52,8 @@ plan_id = 1
 ds_name = "lidc_all"
 max_epochs = 300
 verbose = False
-model_path = "/s/agent_rw/tmp/luna16_lidc_all/detector.pt"
+device_id = 0
+model_path = "/s/agent_rw/tmp/luna16_lidc_all/detector2.pt"
 tfevent_path = "/s/agent_rw/tmp/luna16_lidc_all/tfevents"
 gt_box_mode = "cccwhd"
 lr = 1e-2
@@ -75,8 +79,6 @@ val_num_workers = 2
 # %%
 if __name__ == '__main__':
 #SECTION:-------------------- setup --------------------------------------------------------------------------------------
-# %%
-
     set_determinism(seed=0)
 
     amp = torch.cuda.is_available()
@@ -163,7 +165,8 @@ if __name__ == '__main__':
     )
 
     # 3. build model
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(f"cuda:{device_id}" if torch.cuda.is_available() else "cpu")
+    print(f"device: {device}")
 
     # 1) build anchor generator
     # returned_layers: when target boxes are small, set it smaller
@@ -174,34 +177,38 @@ if __name__ == '__main__':
         base_anchor_shapes=base_anchor_shapes,
     )
 
-    # 2) build network
-    conv1_t_size = [max(7, 2 * s + 1) for s in conv1_t_stride]
-    backbone = resnet.ResNet(
-        block=resnet.ResNetBottleneck,
-        layers=[3, 4, 6, 3],
-        block_inplanes=resnet.get_inplanes(),
-        n_input_channels=n_input_channels,
-        conv1_t_stride=conv1_t_stride,
-        conv1_t_size=conv1_t_size,
-    )
-    feature_extractor = resnet_fpn_feature_extractor(
-        backbone=backbone,
-        spatial_dims=spatial_dims,
-        pretrained_backbone=False,
-        trainable_backbone_layers=None,
-        returned_layers=returned_layers,
-    )
     num_anchors = anchor_generator.num_anchors_per_location()[0]
-    size_divisible = [s * 2 * 2 ** max(returned_layers) for s in feature_extractor.body.conv1.stride]
-    net = torch.jit.script(
-        RetinaNet(
-            spatial_dims=spatial_dims,
-            num_classes=len(fg_labels),
-            num_anchors=num_anchors,
-            feature_extractor=feature_extractor,
-            size_divisible=size_divisible,
+
+    if Path(model_path).is_file():
+        net = torch.jit.load(model_path, map_location=device)
+        print(f"resuming from {model_path}")
+    else:
+        conv1_t_size = [max(7, 2 * s + 1) for s in conv1_t_stride]
+        backbone = resnet.ResNet(
+            block=resnet.ResNetBottleneck,
+            layers=[3, 4, 6, 3],
+            block_inplanes=resnet.get_inplanes(),
+            n_input_channels=n_input_channels,
+            conv1_t_stride=conv1_t_stride,
+            conv1_t_size=conv1_t_size,
         )
-    )
+        feature_extractor = resnet_fpn_feature_extractor(
+            backbone=backbone,
+            spatial_dims=spatial_dims,
+            pretrained_backbone=False,
+            trainable_backbone_layers=None,
+            returned_layers=returned_layers,
+        )
+        size_divisible = [s * 2 * 2 ** max(returned_layers) for s in feature_extractor.body.conv1.stride]
+        net = torch.jit.script(
+            RetinaNet(
+                spatial_dims=spatial_dims,
+                num_classes=len(fg_labels),
+                num_anchors=num_anchors,
+                feature_extractor=feature_extractor,
+                size_divisible=size_divisible,
+            )
+        )
 
     # 3) build detector
     detector = RetinaNetDetector(network=net, anchor_generator=anchor_generator, debug=verbose).to(device)
@@ -442,4 +449,7 @@ if __name__ == '__main__':
         format="[%(asctime)s.%(msecs)03d][%(levelname)5s](%(name)s) - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    main()
+# %%
+    # main()
+
+# %%

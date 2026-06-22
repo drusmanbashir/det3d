@@ -36,7 +36,7 @@ def migrate_detection_sidecar_file(bbox_fn) -> bool:
     return True
 
 
-def save_detection_sidecar(out_fn, boxes, labels, ignore_labels=None):
+def save_detection_sidecar(out_fn, boxes, labels, ignore_labels=None, instances=None):
     if not isinstance(boxes, list):
         boxes = [boxes]
     if not isinstance(labels, list):
@@ -47,6 +47,8 @@ def save_detection_sidecar(out_fn, boxes, labels, ignore_labels=None):
     }
     if ignore_labels is not None:
         payload["ignore_labels"] = [int(x) for x in ignore_labels]
+    if instances is not None:
+        payload["instances"] = instances
     save_json(payload, out_fn)
 
 
@@ -60,7 +62,7 @@ def valid_detection_box(box):
 
 
 def sidecar_bbox_empty(bbox_fn):
-    boxes, _labels = load_detection_sidecar(bbox_fn)
+    boxes, _labels, _instances = load_detection_sidecar(bbox_fn)
     if len(boxes) == 0:
         return True
     for box in boxes:
@@ -82,7 +84,10 @@ def load_detection_sidecar(bbox_fn):
     for box, label in zip(boxes, labels):
         valid_boxes.append(torch.tensor(box, dtype=torch.float32))
         valid_labels.append(torch.tensor(int(label), dtype=torch.long))
-    return valid_boxes, valid_labels
+    instances = normalized.get("instances")
+    if instances is not None:
+        instances = {str(k): int(v) for k, v in instances.items()}
+    return valid_boxes, valid_labels, instances
 
 
 def _boxes_to_list(boxes):

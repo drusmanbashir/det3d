@@ -1,11 +1,13 @@
-from det3d.callback.case_recorder_det import (
-    CaseIDRecorderDet,
-    CaseIDRecorderSnapshotDet,
+from det3d.callback.case_recorder_det import CaseIDRecorderSnapshotDet
+from det3d.callback.wandb_det_grid import (
+    WandbDetImageGridCallback,
+    WandbRetinaUNetImageGridCallback,
     grid_shape_for_case_count,
 )
 
 __all__ = [
-    "CaseIDRecorderDet",
     "CaseIDRecorderSnapshotDet",
+    "WandbDetImageGridCallback",
+    "WandbRetinaUNetImageGridCallback",
     "grid_shape_for_case_count",
 ]

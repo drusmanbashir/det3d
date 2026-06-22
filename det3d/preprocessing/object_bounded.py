@@ -2,10 +2,11 @@ from pathlib import Path
 
 import pandas as pd
 import ray
+from fastcore.basics import listify
+from det3d.preprocessing.helpers import dusting_threshold
 from det3d.transforms.bbox_stats import AttachDetectionGTd
 from det3d.transforms.patch_size import NbrhoodsToPatchesOBDD
 from det3d.utils.bbox_sidecar import bbox_sidecar_path, save_detection_sidecar
-from det3d.utils.folder_names import obd_folder_from_plan
 from dot.transforms.transforms import BBoxInfoStatsd2
 from fran.preprocessing.preprocessor import CPUS_PER_ACTOR, Preprocessor
 from fran.preprocessing.rayworker_base import RayWorkerBase
@@ -15,14 +16,6 @@ from monai.transforms import ScaleIntensityRanged
 from monai.transforms.utility.dictionary import EnsureChannelFirstd, ToDeviced
 from utilz.fileio import maybe_makedirs
 from utilz.stringz import strip_extension
-
-
-def _dusting_threshold(plan):
-    dusting = plan.get("dusting_mm")
-    if dusting is None:
-        dusting = 3.0
-    return float(dusting)
-
 
 class _OBJWorker(RayWorkerBase):
     """Object-bounded detection worker: fixed_spacing PT in → strict-bbox patches out.
@@ -36,23 +29,17 @@ class _OBJWorker(RayWorkerBase):
         plan,
         data_folder,
         output_folder,
-        debug=False,
         dusting_threshold=3.0,
         ignore_labels=None,
-        foreground_class_id=0,
-        remapping_train=None,
     ):
         self.dusting_threshold = dusting_threshold
-        self.ignore_labels = ignore_labels or []
-        self.foreground_class_id = int(foreground_class_id)
-        self.remapping_train = remapping_train
+        self.ignore_labels = [] if ignore_labels is None else listify(ignore_labels)
         RayWorkerBase.__init__(
             self,
             project=project,
             plan=plan,
             data_folder=data_folder,
             output_folder=output_folder,
-            debug=debug,
             tfms_keys="LoadT,Chan,Dev,Stats,N2P,AttachGT,Int",
             remapping_key=None,
         )
@@ -67,13 +54,12 @@ class _OBJWorker(RayWorkerBase):
             "LoadT": self.LoadT,
         }
         plan = self.plan
-        ignore_labels = plan["ignore_labels"]
         self.Stats = BBoxInfoStatsd2(
             image_key=self.image_key,
             lm_key=self.lm_key,
-            dusting_threshold=_dusting_threshold(plan),
+            dusting_threshold=dusting_threshold(plan),
             dusting_method=plan.get("dusting_method", "major_axis"),
-            ignore_labels=ignore_labels,
+            ignore_labels=self.ignore_labels,
         )
         self.N2P = NbrhoodsToPatchesOBDD(
             keys=[self.image_key, self.lm_key],
@@ -86,16 +72,15 @@ class _OBJWorker(RayWorkerBase):
         self.AttachGT = AttachDetectionGTd(
             image_key=self.image_key,
             lm_key=self.lm_key,
-            dusting_threshold=_dusting_threshold(plan),
-            ignore_labels=ignore_labels,
-            foreground_class_id=self.foreground_class_id,
-            remapping_train=self.remapping_train,
+            dusting_threshold=dusting_threshold(plan),
+            ignore_labels=self.ignore_labels,
             gt_box_mode=plan["gt_box_mode"],
         )
+        clip = self.project.global_properties["intensity_clip_range"]
         self.Int = ScaleIntensityRanged(
             keys=[self.image_key],
-            a_min=float(plan["intensity_a_min"]),
-            a_max=float(plan["intensity_a_max"]),
+            a_min=float(clip[0]),
+            a_max=float(clip[1]),
             b_min=0.0,
             b_max=1.0,
             clip=True,
@@ -193,10 +178,8 @@ class ObjectBoundedDataGenerator(Preprocessor):
     def extra_worker_kwargs(self, mean_std_mode="dataset"):
         plan = self.plan
         return {
-            "dusting_threshold": _dusting_threshold(plan),
-            "ignore_labels": plan["ignore_labels"],
-            "foreground_class_id": int(plan.get("foreground_class_id", 0)),
-            "remapping_train": plan.get("remapping_train"),
+            "dusting_threshold": dusting_threshold(plan),
+            "ignore_labels": plan["ignore_labels_cc"],
         }
 
     def should_use_ray(self, num_processes=8):
@@ -210,7 +193,9 @@ class ObjectBoundedDataGenerator(Preprocessor):
         if output_folder is not None:
             self.output_folder = Path(output_folder)
         else:
-            self.output_folder = obd_folder_from_plan(self.project, self.plan)
+            self.output_folder = Path(
+                FolderNames(self.project, self.plan).folders["data_folder_obd"]
+            )
 
     def create_output_folders(self):
         maybe_makedirs(
@@ -349,9 +334,9 @@ if __name__ == "__main__":
         plan=G.plan,
         data_folder=G.data_folder,
         output_folder=G.output_folder,
-        debug=G.debug,
         **worker_kwargs,
     )
+    G.local_worker.setup(debug=G.debug, mean_std_mode=G.mean_std_mode)
     L = G.local_worker
     row = df_pt_run.iloc[0]
     L._process_row(row)

@@ -6,6 +6,7 @@ import numpy as np
 import torch
 from det3d.detection.retinanet_detector2 import RetinaNetDetector2
 from det3d.detection.visualize_image import draw_slice_boxes, pick_slice_index
+from det3d.utils.tensor import to_numpy
 from monai.apps.detection.utils.anchor_utils import AnchorGeneratorWithAnchorShape
 from utilz.stringz import ast_literal_eval
 
@@ -48,7 +49,7 @@ def build_hybrid_detector(plan, model_path, device):
         score_thresh=float(plan["score_thresh"]),
         topk_candidates_per_level=1000,
         nms_thresh=float(plan["nms_thresh"]),
-        detections_per_img=100,
+        detections_per_img=int(plan["detections_per_img"]),
     )
     val_patch_size = val_patch_size_from_plan(plan)
     detector.set_sliding_window_inferer(
@@ -75,17 +76,25 @@ def load_lbd_pt(path):
     return img.float()
 
 
-def normalize_lbd_image(img, plan):
-    a_min = float(plan["intensity_a_min"] if "intensity_a_min" in plan else -1024)
-    a_max = float(plan["intensity_a_max"] if "intensity_a_max" in plan else 300.0)
+def intensity_clip_range(project=None, plan=None):
+    if project is not None:
+        return project.global_properties["intensity_clip_range"]
+    if plan is not None and "intensity_clip_range" in plan:
+        return plan["intensity_clip_range"]
+    return [-1024.0, 300.0]
+
+
+def normalize_lbd_image(img, clip_range):
+    a_min = float(clip_range[0])
+    a_max = float(clip_range[1])
     img = img.clone()
     img = torch.clamp(img, a_min, a_max)
     img = (img - a_min) / (a_max - a_min)
     return img
 
 
-def infer_lbd_volume(detector, img, plan, device):
-    img = normalize_lbd_image(img, plan)
+def infer_lbd_volume(detector, img, plan, device, clip_range):
+    img = normalize_lbd_image(img, clip_range)
     val_patch_size = val_patch_size_from_plan(plan)
     spatial_dims = int(plan["spatial_dims"])
     val_input = img.to(device=device, dtype=torch.float32)
@@ -116,7 +125,7 @@ def volume_numpy_from_input(img):
     if vol.dim() == 4:
         vol = vol[0]
     if isinstance(vol, torch.Tensor):
-        vol = vol.detach().cpu().numpy()
+        vol = to_numpy(vol)
     return np.asarray(vol, dtype=np.float32)
 
 
@@ -129,6 +138,33 @@ def save_lbd_pred_png(img, pred, detector, out_png, score_min=0.0, slice_axis=2)
     out_png.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out_png), png_bgr)
     return out_png
+
+
+def full_volume_bounding_box(img):
+    """#AI Identity crop bbox (BBoxFromPTd layout) for pre-cropped LBD volumes."""
+    sh = tuple(int(v) for v in img.shape)
+    if len(sh) == 4:
+        depth, height, width = sh[1], sh[2], sh[3]
+    elif len(sh) == 3:
+        depth, height, width = sh[0], sh[1], sh[2]
+    else:
+        raise ValueError(f"Expected 3D or 4D LBD image, got shape {sh}")
+    return (
+        slice(0, 100, None),
+        slice(0, depth),
+        slice(0, height),
+        slice(0, width),
+    )
+
+
+def load_lbd_pt_patch_data(pt_paths):
+    """#AI DetPatchInferer input from LBD .pt (full-volume bbox; skip localiser)."""
+    from fran.inference.helpers import apply_bboxes, load_images_pt
+
+    paths = [str(p) for p in pt_paths]
+    data = load_images_pt(paths)
+    bboxes = [full_volume_bounding_box(dat["image"]) for dat in data]
+    return apply_bboxes(data, bboxes)
 
 
 def collect_lbd_pt_paths(input_path=None, folder=None):

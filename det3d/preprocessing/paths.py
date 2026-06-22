@@ -7,14 +7,14 @@ def datasource_folder(plan):
     return DS[ds_name].folder
 
 
-def resolve_detection_paths(plan, project):
+def resolve_detection_paths(plan, project, fold=0):
     ds_folder = datasource_folder(plan)
     images_dir = ds_folder / "images"
     if is_excel_None(plan.get("lesion_stats_csv")):
         lesion_stats_csv = ds_folder / "label_analysis" / "lesion_stats.csv"
     else:
         lesion_stats_csv = Path(plan["lesion_stats_csv"])
-    fold = int(plan.get("fold", 0))
+    fold = int(fold)
     dataset_json = (
         project.project_folder
         / "detection"

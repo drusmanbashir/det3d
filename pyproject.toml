@@ -23,5 +23,15 @@ dependencies = [
   "tqdm",
 ]
 
+[project.optional-dependencies]
+nndetection = [
+"nevergrad",
+"omegaconf",
+"hydra-core",
+"loguru",
+
+]
+
+
 [tool.setuptools.packages.find]
 include = ["det*"]

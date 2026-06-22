@@ -8,7 +8,6 @@ from fran.configs.helpers import is_excel_None
 from fran.data.dataregistry import DS
 from fran.managers import Project
 from fran.preprocessing.preprocessor import resolve_plan_datasources
-from fran.utils.misc import convert_remapping
 
 
 def load_lidc_train_val(
@@ -50,16 +49,11 @@ def load_lidc_train_val(
         datasources = resolve_plan_datasources(plan)
         ds_query = datasources if len(datasources) > 1 else datasources[0]
         train_ids, val_ids = project.get_train_val_case_ids(fold=fold, ds=ds_query)
-        remapping_train = plan.get("remapping_train")
-        if remapping_train is not None and not isinstance(remapping_train, dict):
-            remapping_train = convert_remapping(remapping_train)
         payload, errors, train_set, val_set = build_detection_datalist(
             images_dir=images_dir,
             lesion_stats_csv=lesion_stats_csv,
             train_case_ids=train_ids,
             val_case_ids=val_ids,
-            foreground_class_id=int(plan.get("foreground_class_id", 0)),
-            remapping_train=remapping_train,
             dusting_mm=plan.get("dusting_mm"),
         )
         train_data = payload["training"]

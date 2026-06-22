@@ -19,8 +19,6 @@ class DetectionBBoxStatsd(MapTransform):
         dusting_threshold=3.0,
         dusting_method="major_axis",
         ignore_labels=None,
-        foreground_class_id=0,
-        remapping_train=None,
         gt_box_mode="cccwhd",
     ):
         super().__init__([image_key, lm_key], False)
@@ -28,8 +26,6 @@ class DetectionBBoxStatsd(MapTransform):
         self.lm_key = lm_key
         self.ignore_labels = ignore_labels or []
         self.dusting_threshold = dusting_threshold
-        self.foreground_class_id = foreground_class_id
-        self.remapping_train = remapping_train
         self.gt_box_mode = gt_box_mode
         assert dusting_method in ["major_axis", "bbox_smallest_side"]
 
@@ -42,11 +38,7 @@ class DetectionBBoxStatsd(MapTransform):
             compute_feret=False,
         )
         L.dust(self.dusting_threshold)
-        rec = L.to_voxel_detection_records(
-            "xyzxyz",
-            foreground_class_id=self.foreground_class_id,
-            remapping_train=self.remapping_train,
-        )
+        rec = L.to_voxel_detection_records("xyzxyz")
         d["LMG"] = L
         d["nbrhoods"] = L.nbrhoods
         boxes = rec["box"]
@@ -69,8 +61,6 @@ class AttachDetectionGTd(MapTransform):
         lm_key="lm",
         dusting_threshold=3.0,
         ignore_labels=None,
-        foreground_class_id=0,
-        remapping_train=None,
         gt_box_mode="cccwhd",
     ):
         super().__init__([image_key, lm_key], False)
@@ -78,8 +68,6 @@ class AttachDetectionGTd(MapTransform):
         self.lm_key = lm_key
         self.ignore_labels = ignore_labels or []
         self.dusting_threshold = dusting_threshold
-        self.foreground_class_id = foreground_class_id
-        self.remapping_train = remapping_train
         self.gt_box_mode = gt_box_mode
 
     def __call__(self, data):
@@ -97,11 +85,7 @@ class AttachDetectionGTd(MapTransform):
             matched = L.nbrhoods[L.nbrhoods["label_cc"] == label_cc]
             if len(matched) > 0:
                 L.nbrhoods = matched
-        rec = L.to_voxel_detection_records(
-            self.gt_box_mode,
-            foreground_class_id=self.foreground_class_id,
-            remapping_train=self.remapping_train,
-        )
+        rec = L.to_voxel_detection_records(self.gt_box_mode)
         if len(rec["box"]) == 0:
             return d
         d["box"] = rec["box"]

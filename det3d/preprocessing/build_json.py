@@ -62,9 +62,7 @@ def build_detection_datalist(
     val_case_ids=None,
     validation_fraction=0.05,
     seed=0,
-    foreground_class_id=0,
     image_path_prefix="",
-    remapping_train=None,
     dusting_mm=None,
 ):
     images_dir = Path(images_dir)
@@ -97,11 +95,7 @@ def build_detection_datalist(
             for row in grouped[case_id]:
                 bbox = literal_eval(row["bbox"])
                 boxes.append(voxel_bbox_to_world_box(bbox, image.affine))
-                if remapping_train is None:
-                    labels.append(foreground_class_id)
-                else:
-                    label_org = int(row["label_org"])
-                    labels.append(remapping_train[label_org])
+                labels.append(int(row["label_org"]))
             if len(boxes) == 0:
                 errors.append({"case_id": case_id, "error": "no boxes after filtering"})
                 continue
@@ -127,9 +121,7 @@ def build_detection_json(
     val_case_ids=None,
     validation_fraction=0.05,
     seed=0,
-    foreground_class_id=0,
     image_path_prefix="",
-    remapping_train=None,
     dusting_mm=None,
 ):
     images_dir = Path(images_dir)
@@ -142,9 +134,7 @@ def build_detection_json(
         val_case_ids=val_case_ids,
         validation_fraction=validation_fraction,
         seed=seed,
-        foreground_class_id=foreground_class_id,
         image_path_prefix=image_path_prefix,
-        remapping_train=remapping_train,
         dusting_mm=dusting_mm,
     )
     cases_total = len(payload["training"]) + len(payload["validation"])
@@ -160,7 +150,6 @@ def build_detection_json(
         "errors": len(errors),
         "seed": seed,
         "validation_fraction": validation_fraction,
-        "foreground_class_id": foreground_class_id,
         "train_case_ids": sorted(train_set),
         "validation_case_ids": sorted(val_set),
     }

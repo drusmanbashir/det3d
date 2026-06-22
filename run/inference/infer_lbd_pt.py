@@ -9,6 +9,7 @@ from det3d.inference.hybrid_lbd import (
     build_hybrid_detector,
     collect_lbd_pt_paths,
     infer_lbd_volume,
+    intensity_clip_range,
     load_lbd_pt,
     load_plan_from_project,
     load_plan_json,
@@ -31,6 +32,12 @@ def resolve_out_png(out_dir, pt_path):
 
 def main(args):
     plan = resolve_plan(args)
+    project = None
+    if args.project is not None:
+        from fran.managers import Project
+
+        project = Project(args.project)
+    clip_range = intensity_clip_range(project=project, plan=plan)
     device = torch.device(args.device if args.device is not None else ("cuda" if torch.cuda.is_available() else "cpu"))
     detector = build_hybrid_detector(plan, args.model, device)
     pt_paths = collect_lbd_pt_paths(input_path=args.input, folder=args.folder)
@@ -38,7 +45,7 @@ def main(args):
 
     for pt_path in pt_paths:
         img = load_lbd_pt(pt_path)
-        pred = infer_lbd_volume(detector, img, plan, device)
+        pred = infer_lbd_volume(detector, img, plan, device, clip_range)
         if out_dir is None:
             out_png = pt_path.with_name(f"{pt_path.stem}_pred.png")
         else:
