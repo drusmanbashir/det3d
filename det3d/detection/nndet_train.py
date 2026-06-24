@@ -232,7 +232,7 @@ def plan_architecture_from_det3d(plan_train):
     arch = _plan_arch(plan_train)
     n_fg = len(plan_train["fg_labels"])
     arch["classifier_classes"] = n_fg
-    arch["seg_classes"] = n_fg
+    arch["seg_classes"] = 1
     arch["score_thresh"] = float(plan_train.get("score_thresh", 0.02))
     arch["nms_thresh"] = float(plan_train.get("nms_thresh", 0.22))
     arch["detections_per_img"] = int(plan_train.get("detections_per_img", 25))
@@ -241,19 +241,31 @@ def plan_architecture_from_det3d(plan_train):
     return arch
 
 
+def apply_det3d_overrides_to_nndet_plan(plan, plan_train):
+    plan = deepcopy(plan)
+    fps = plan_train.get("nndet_forward_patch_size")
+    plan["patch_size"] = [int(v) for v in (fps if fps is not None else plan_train["patch_size"])]
+    arch = plan["architecture"]
+    arch["classifier_classes"] = len(plan_train["fg_labels"])
+    arch["seg_classes"] = 1
+    return plan
+
+
 def plan_from_det3d(plan_train, plan_path=None):
     if plan_path is not None:
         ensure_nndet_importable()
         from nndet.io.load import load_pickle
 
-        return load_pickle(plan_path)
-    fps = plan_train.get("nndet_forward_patch_size")
-    patch_size = [int(v) for v in (fps if fps is not None else plan_train["patch_size"])]
-    return {
-        "architecture": plan_architecture_from_det3d(plan_train),
-        "anchors": plan_anchors_from_det3d(plan_train),
-        "patch_size": patch_size,
-    }
+        plan = load_pickle(plan_path)
+    else:
+        fps = plan_train.get("nndet_forward_patch_size")
+        patch_size = [int(v) for v in (fps if fps is not None else plan_train["patch_size"])]
+        plan = {
+            "architecture": plan_architecture_from_det3d(plan_train),
+            "anchors": plan_anchors_from_det3d(plan_train),
+            "patch_size": patch_size,
+        }
+    return apply_det3d_overrides_to_nndet_plan(plan, plan_train)
 
 
 def apply_det3d_plan_to_nndet_model_cfg(model_cfg, plan_train):
@@ -283,13 +295,23 @@ def build_nndet_retinaunet_module(configs, num_train_batches):
     ensure_nndet_importable()
     from nndet.ptmodule.retinaunet.v001 import RetinaUNetV001
 
+    from det3d.configs.parser import resolve_nndet_plan_path
+
     plan_train = configs["plan_train"]
     plan_path = configs["model_params"].get("nndet_plan_path")
+    if plan_path is None:
+        plan_path = resolve_nndet_plan_path(
+            configs["mnemonic"], Path(configs["configurations_dir"])
+        )
+    else:
+        plan_path = Path(plan_path)
+    if not plan_path.is_file():
+        raise FileNotFoundError(plan_path)
     model_cfg, trainer_cfg = load_nndet_train_cfgs()
     model_cfg = apply_det3d_plan_to_nndet_model_cfg(model_cfg, plan_train)
     trainer_cfg["num_train_batches_per_epoch"] = int(num_train_batches)
     trainer_cfg["max_num_epochs"] = int(configs["model_params"].get("max_epochs", 600))
-    plan = plan_from_det3d(plan_train, plan_path=plan_path)
+    plan = plan_from_det3d(plan_train, plan_path=str(plan_path))
     module = RetinaUNetV001(
         model_cfg=model_cfg,
         trainer_cfg=trainer_cfg,

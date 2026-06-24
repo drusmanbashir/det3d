@@ -167,6 +167,90 @@ def _flatten_dict_samples(batch):
     return flat
 
 
+def lbd_det_collate_train(batch):
+    '''
+    expects a list of lists (in case an image is sampled >1) of dicts
+    '''
+
+    imgs = []
+    lms = []
+    masks = []
+    classes = []
+
+    boxes = []
+    points = []
+    fns_imgs = []
+    fns_lms = []
+
+    for itemlist in batch:
+        for item in itemlist:
+            imgs.append(item["image"])
+            fns_imgs.append(item["image"].meta["filename_or_obj"])
+            lms.append(item["lm"])
+            masks.append(item["mask"])
+            classes.append(item["label"])
+            boxes.append(item["bbox"])
+            points.append(item["points"])
+            fns_lms.append(item["lm"].meta["filename_or_obj"])
+
+    images_out = torch.stack(imgs, 0)
+    lms_out = torch.stack(lms, 0)
+    masks_out = torch.stack(masks, 0)
+    if len(imgs) == 1:
+        fns_imgs = fns_imgs[0]
+        fns_lms = fns_lms[0]
+    images_out.meta["filename_or_obj"] = fns_imgs
+    lms_out.meta["filename_or_obj"] = fns_lms
+
+    dici = {
+        "image": images_out,
+        "bbox": boxes,
+        "label": classes,
+        "lm": lms_out,
+        "mask": masks_out,
+        "points": points,
+    }
+    return dici
+
+def lbd_det_collate_val(batch):
+    '''
+    each batch is a list of dicts.
+    '''
+    imgs = []
+    lms = []
+    boxes = []
+    fns_imgs = []
+    fns_lms = []
+
+    classes = []
+    for item in batch:
+        imgs.append(item["image"])
+        fns_imgs.append(item["image"].meta["filename_or_obj"])
+        lms.append(item["lm"])
+        boxes.append(item["bbox"])
+        classes.append(item["label"])
+        fns_lms.append(item["lm"].meta["filename_or_obj"])
+
+    images_out = torch.stack(imgs, 0)
+    lms_out = torch.stack(lms, 0)
+    if len(batch) == 1:
+        fns_imgs = fns_imgs[0]
+        fns_lms = fns_lms[0]
+    images_out.meta["filename_or_obj"] = fns_imgs
+    lms_out.meta["filename_or_obj"] = fns_lms
+
+    dici = {
+        "image": images_out,
+        "bbox": boxes,
+        "label": classes,
+        "lm": lms_out,
+    }
+    if "validation_impl" in batch[0]:
+        dici["validation_impl"] = batch[0]["validation_impl"]
+    return attach_targets(dici, "bbox", "label")
+#
+
+
 def lbd_det_collate(
     batch,
     size_divisible=None,

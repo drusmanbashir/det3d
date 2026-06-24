@@ -31,7 +31,6 @@ class DataManagerDetBTfms(DataManagerDet):
             self.point_key,
             self.mask_key,
         )
-        compute_dtype = self._compute_dtype()
         lm_key = self.lm_key if self.uses_lm_seg() else None
         self.transforms_dict["GpuTail"] = BatchItemCompose(
             build_train_gpu_tail_compose(
@@ -43,8 +42,9 @@ class DataManagerDetBTfms(DataManagerDet):
                 mask_key=mk,
                 lm_key=lm_key,
                 affine_lps_to_ras=self.affine_lps_to_ras,
-                compute_dtype=compute_dtype,
                 intensity_tfms=self.transforms_dict["IntensityTfms"],
+                affine3d=self.configs["affine3d"],
+                patch_size=self.plan["patch_size"],
             ),
             image_key=ik,
             box_key=bk,
@@ -62,7 +62,7 @@ class DataManagerDetBTfms(DataManagerDet):
 
 
 class DataManagerDetSourceBTfms(DataManagerDetSource, DataManagerDetBTfms):
-    keys_tr = "Ld,Rtr,L2,E,Norm,BoxToWorld,ToPoints,AffinePts"
+    keys_tr = "Ld,Rtr,L2,E,Norm,BoxToWorld,ToPoints"
     keys_tr_batch = "GpuTail"
     keys_val = "L,E,Norm,DtypeVal"
     keys_val_batch = None
@@ -80,6 +80,7 @@ class DataManagerDetSourceBTfms(DataManagerDetSource, DataManagerDetBTfms):
         DataManagerDetSource.create_transforms(self)
         if self.uses_train_keys():
             self.install_gpu_tail()
+            self.keys = self.keys_tr
 
 
 class DataManagerDetWholeBTfms(DataManagerDetWhole, DataManagerDetBTfms):
@@ -110,6 +111,8 @@ class DataManagerDetLBDBTfms(DataManagerDetLBD, DataManagerDetSourceBTfms):
         if self.is_train_all_split():
             DataManagerDetSource.create_transforms(self)
             self.install_gpu_tail()
+            if self.uses_train_keys():
+                self.keys = self.keys_tr
             return
         DataManagerDetLBD.create_transforms(self)
 

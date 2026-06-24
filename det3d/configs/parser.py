@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import json
 
 import numpy as np
@@ -87,6 +89,19 @@ def merge_param_dicts(base: dict, overlay: dict) -> dict:
     merged = dict(base)
     merged.update(overlay)
     return merged
+
+
+def nndet_plan_paths_file(configurations_dir: Path) -> Path:
+    return configurations_dir / "nndet_plan_paths.yaml"
+
+
+def resolve_nndet_plan_path(mnemonic: str, configurations_dir: Path) -> Path:
+    from utilz.fileio import load_yaml
+
+    key = Mnemonics.match(mnemonic)
+    paths_file = nndet_plan_paths_file(configurations_dir)
+    paths = load_yaml(paths_file)
+    return Path(paths[key])
 
 
 class PlanAdvisorDet:
@@ -229,6 +244,8 @@ class ConfigMakerDet(ConfigMaker):
                 self.configs[key] = val
         self.configs = parse_excel_dict(self.configs, KEYS_STR_TO_LIST)
         self.advisor = PlanAdvisorDet(project)
+        self.configs["mnemonic"] = configuration_mnemonic_standardized
+        self.configs["configurations_dir"] = str(self.resolve_configuration_filename().parent)
 
     def param_defaults(self) -> dict:
         out = {}

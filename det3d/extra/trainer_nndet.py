@@ -31,6 +31,10 @@ SCRATCH_PATCH_SIZE = None  # DM/shard patch — needs matching preprocessed src_
 NNDET_FORWARD_PATCH_SIZE = [128, 128, 64]  # center-crop loaded patch before nnDet only; lowers VRAM
 SCRATCH_VAL_PATCH_SIZE = None  # e.g. [256, 256, 104] for stage 8; None = plan default
 SCRATCH_INSTANCES_JSON = None  # optional bboxes/*.json with "instances" for stage 3 pre_trafo
+SCRATCH_EXP_ID = "RetinaUNetV001_det3d"
+SCRATCH_TRAIN_MODE = "auto"  # auto | overwrite | resume
+SCRATCH_MAX_EPOCHS = None  # None = trainer_cfg max_num_epochs
+SCRATCH_TRAIN_DIR = None  # None = $det_models/{task}/{exp_id}/fold{N} via scripts.train.init_train_dir
 
 
 def apply_batch_transforms(manager, batch):
@@ -524,6 +528,271 @@ def build_nndet_retinaunet_module(plan, model_cfg, trainer_cfg, num_train_batche
     )
 
 
+def build_scratch_train_cfg(project_title, plan_id, fold, trainer_cfg, exp_id=SCRATCH_EXP_ID):
+    #AI
+    """Minimal OmegaConf for nnDetection scripts.train.init_train_dir."""
+    import os
+
+    from omegaconf import OmegaConf
+
+    task = f"det3d_{project_title}_plan{plan_id}"
+    det_models = os.environ["det_models"]
+    cfg = OmegaConf.create(
+        {
+            "task": task,
+            "host": {"parent_results": det_models},
+            "exp": {"id": exp_id, "fold": int(fold)},
+            "train": {"mode": SCRATCH_TRAIN_MODE},
+            "trainer_cfg": trainer_cfg,
+        }
+    )
+    return cfg
+
+
+def scratch_train_dir_from_cfg(cfg):
+    #AI
+    """Expected output dir (same layout as nnDetection init_train_dir)."""
+    train_dir = (
+        Path(cfg.host.parent_results) / str(cfg.task) / str(cfg.exp.id) / f"fold{cfg.exp.fold}"
+    )
+    return train_dir
+
+
+def resolve_scratch_train_resume(train_dir, train_mode):
+    #AI
+    """auto: resume when model_last.ckpt exists; else overwrite."""
+    train_dir = Path(train_dir)
+    last_ckpt = train_dir / "model_last.ckpt"
+    mode = str(train_mode).lower()
+    if mode == "auto":
+        mode = "resume" if last_ckpt.is_file() else "overwrite"
+    if mode == "resume":
+        if not train_dir.is_dir():
+            raise ValueError(f"{train_dir} is not a valid training dir and thus can not be resumed")
+        if not last_ckpt.is_file():
+            raise FileNotFoundError(f"resume requested but missing {last_ckpt}")
+        return mode, last_ckpt
+    return mode, None
+
+
+def attach_det3d_dataloaders_to_module(module, train_manager, val_manager, forward_patch_size):
+    #AI
+    """Patch RetinaUNetV001 training_step/validation_step for det3d DM batches."""
+    import types
+
+    def training_step(self, batch, batch_idx):
+        batch = apply_batch_transforms(train_manager, batch)
+        nb = det3d_batch_to_nndet(batch, forward_patch_size=forward_patch_size)
+        losses, _ = self.model.train_step(
+            images=nb["data"],
+            targets={
+                "target_boxes": nb["target_boxes"],
+                "target_classes": nb["target_classes"],
+                "target_seg": nb["target_seg"],
+            },
+            evaluation=False,
+            batch_num=batch_idx,
+        )
+        loss = sum(losses.values())
+        out = {"loss": loss, **{key: l.detach().item() for key, l in losses.items()}}
+        return out
+
+    def validation_step(self, batch, batch_idx):
+        batch = apply_batch_transforms(val_manager, batch)
+        nb = det3d_batch_to_nndet(batch, forward_patch_size=forward_patch_size)
+        with torch.no_grad():
+            losses, prediction = self.model.train_step(
+                images=nb["data"],
+                targets={
+                    "target_boxes": nb["target_boxes"],
+                    "target_classes": nb["target_classes"],
+                    "target_seg": nb["target_seg"],
+                },
+                evaluation=True,
+                batch_num=batch_idx,
+            )
+            loss = sum(losses.values())
+            targets = {
+                "target_boxes": nb["target_boxes"],
+                "target_classes": nb["target_classes"],
+                "target_seg": nb["target_seg"],
+            }
+        self.evaluation_step(prediction=prediction, targets=targets)
+        out = {"loss": loss.detach().item(), **{key: l.detach().item() for key, l in losses.items()}}
+        return out
+
+    module.training_step = types.MethodType(training_step, module)
+    module.validation_step = types.MethodType(validation_step, module)
+    return module
+
+
+def make_det3d_nndet_datamodule(train_manager, val_manager):
+    #AI
+    """Build pl.LightningDataModule over det3d train/val managers."""
+    _ensure_nndet_importable()
+    import pytorch_lightning as pl
+
+    class Det3dNndetDataModule(pl.LightningDataModule):
+        def __init__(self, train_manager, val_manager):
+            super().__init__()
+            self.train_manager = train_manager
+            self.val_manager = val_manager
+
+        def train_dataloader(self):
+            return self.train_manager.dl
+
+        def val_dataloader(self):
+            return self.val_manager.dl
+
+    dm = Det3dNndetDataModule(train_manager, val_manager)
+    return dm
+
+
+def _nndet_train_callbacks(train_dir, trainer_cfg):
+    #AI
+    """ModelCheckpoint + LR monitor — same contract as nnDetection scripts/train.py."""
+    from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
+
+    checkpoint_cb = ModelCheckpoint(
+        dirpath=train_dir,
+        filename="model_best",
+        save_last=True,
+        save_top_k=1,
+        monitor=trainer_cfg["monitor_key"],
+        mode=trainer_cfg["monitor_mode"],
+    )
+    checkpoint_cb.CHECKPOINT_NAME_LAST = "model_last"
+    lr_monitor = LearningRateMonitor(logging_interval="epoch")
+    return [checkpoint_cb, lr_monitor]
+
+
+def _build_nndet_pl_trainer(cfg, trainer_cfg, module, callbacks, train_dir, resume_ckpt=None):
+    #AI
+    """pl.Trainer kwargs aligned with nnDetection scripts/train.py (_train)."""
+    import os
+
+    import pytorch_lightning as pl
+
+    pl_major = int(pl.__version__.split(".")[0])
+    trainer_kwargs = {
+        "max_epochs": module.max_epochs,
+        "callbacks": callbacks,
+        "logger": True,
+        "deterministic": trainer_cfg["deterministic"],
+        "benchmark": trainer_cfg["benchmark"],
+        "num_sanity_val_steps": 10,
+        "terminate_on_nan": True,
+        "reload_dataloaders_every_epoch": False,
+    }
+    if resume_ckpt is not None and pl_major < 2:
+        trainer_kwargs["resume_from_checkpoint"] = resume_ckpt
+
+    num_gpus = int(trainer_cfg["gpus"])
+    if pl_major >= 2:
+        devices = list(range(num_gpus)) if num_gpus > 1 else num_gpus
+        trainer_kwargs["accelerator"] = trainer_cfg["accelerator"] or "gpu"
+        trainer_kwargs["devices"] = devices
+        trainer_kwargs["precision"] = trainer_cfg["precision"]
+        if not bool(int(os.getenv("det_verbose", "1"))):
+            trainer_kwargs["enable_progress_bar"] = False
+    else:
+        trainer_kwargs["gpus"] = list(range(num_gpus)) if num_gpus > 1 else num_gpus
+        trainer_kwargs["accelerator"] = trainer_cfg["accelerator"]
+        trainer_kwargs["precision"] = trainer_cfg["precision"]
+        trainer_kwargs["amp_backend"] = trainer_cfg["amp_backend"]
+        trainer_kwargs["amp_level"] = trainer_cfg["amp_level"]
+        trainer_kwargs["progress_bar_refresh_rate"] = (
+            None if bool(int(os.getenv("det_verbose", "1"))) else 0
+        )
+        trainer_kwargs["weights_summary"] = "full"
+        trainer_kwargs["move_metrics_to_cpu"] = False
+        plugins = trainer_cfg.get("plugins", None)
+        if plugins is not None:
+            trainer_kwargs["plugins"] = plugins
+
+    trainer = pl.Trainer(**trainer_kwargs)
+    return trainer
+
+
+def run_nndet_training_loop(
+    module,
+    train_manager,
+    val_manager,
+    trainer_cfg,
+    plan,
+    project_title,
+    plan_id,
+    fold,
+    forward_patch_size=NNDET_FORWARD_PATCH_SIZE,
+    train_dir=None,
+    max_epochs=SCRATCH_MAX_EPOCHS,
+    exp_id=SCRATCH_EXP_ID,
+):
+    #AI
+    """
+    Full epoch training with nnDetection checkpoint layout.
+
+    Wires det3d ``module`` + ``train_manager``/``val_manager`` into
+    ``scripts.train.init_train_dir`` + ``pl.Trainer.fit`` (same as ``nndet_train``).
+    """
+    import os
+
+    import pytorch_lightning as pl
+    from nndet.io.load import load_pickle, save_pickle
+    from scripts.train import init_train_dir
+
+    _ensure_nndet_importable()
+    os.environ.setdefault("det_models", "/s/agent_rw/nndet_models")
+
+    trainer_cfg = deepcopy(trainer_cfg)
+    trainer_cfg["num_train_batches_per_epoch"] = len(train_manager.dl)
+    module.trainer_cfg["num_train_batches_per_epoch"] = len(train_manager.dl)
+    if max_epochs is not None:
+        trainer_cfg["max_num_epochs"] = int(max_epochs)
+        module.trainer_cfg["max_num_epochs"] = int(max_epochs)
+
+    cfg = build_scratch_train_cfg(project_title, plan_id, fold, trainer_cfg, exp_id=exp_id)
+    resolved_dir = Path(train_dir) if train_dir is not None else scratch_train_dir_from_cfg(cfg)
+    train_mode, resume_ckpt = resolve_scratch_train_resume(resolved_dir, cfg.train.mode)
+    cfg.train.mode = train_mode
+    if train_mode == "resume":
+        print(f"resume from {resume_ckpt}")
+    if train_dir is None:
+        train_dir = init_train_dir(cfg)
+    else:
+        train_dir = Path(train_dir)
+        train_dir.mkdir(parents=True, exist_ok=True)
+        os.chdir(str(train_dir))
+
+    plan_path = train_dir / "plan.pkl"
+    if train_mode == "resume" and plan_path.is_file():
+        plan = load_pickle(plan_path)
+    else:
+        save_pickle(plan, plan_path)
+
+    attach_det3d_dataloaders_to_module(
+        module, train_manager, val_manager, forward_patch_size
+    )
+    datamodule = make_det3d_nndet_datamodule(train_manager, val_manager)
+    callbacks = _nndet_train_callbacks(train_dir, trainer_cfg)
+    trainer = _build_nndet_pl_trainer(
+        cfg, trainer_cfg, module, callbacks, train_dir, resume_ckpt=resume_ckpt
+    )
+    pl_major = int(pl.__version__.split(".")[0])
+    if resume_ckpt is not None and pl_major >= 2:
+        trainer.fit(module, datamodule=datamodule, ckpt_path=str(resume_ckpt))
+    else:
+        trainer.fit(module, datamodule=datamodule)
+    result = {
+        "trainer": trainer,
+        "train_dir": train_dir,
+        "module": module,
+        "resume_ckpt": resume_ckpt,
+        "train_mode": train_mode,
+    }
+    return result
+
+
 if __name__ == "__main__":
 #SECTION:-------------------- stage 0 — setup --------------------------------------------------------------------------------------
 # Same as det3d/extra/trainer.py and TrainerDet.fit preamble.
@@ -717,29 +986,36 @@ if __name__ == "__main__":
     # evaluation=True postprocess needs nnDetection GPU NMS build (nms_fn is None otherwise)
     # predictions = net.postprocess_for_inference(...)  # wire after nndet install with CUDA ops
 
-#SECTION:-------------------- stage 9 — manual epoch loop (optional) --------------------------------------------------------------
-# Conceptual equivalent of TrainerDet.fit() / trainer.py Tm.fit().
-# nnDetection native: scripts/train.py → pl.Trainer.fit(module, datamodule).
+#SECTION:-------------------- stage 9 — full training loop (nnDetection PL fit) -------------------
+# Same checkpoint layout as nnDetection/scripts/train.py → nndet_train.
+# Uses module, tmt, tmv, plan, trainer_cfg from stages above.
+# Checkpoints: {train_dir}/model_best.ckpt, model_last.ckpt
+# Set SCRATCH_MAX_EPOCHS=2 for a short smoke run.
+# SCRATCH_TRAIN_MODE=auto resumes from model_last.ckpt when present (default).
 # %%
-    for epoch in range(2):
-        net.train()
-        for batch_idx, batch in enumerate(train_dl):
-            batch = tmt.transforms_batch(batch)
-            nb = det3d_batch_to_nndet(batch)
-            optimizer.zero_grad()
-            step_losses, _ = net.train_step(
-                images=nb["data"],
-                targets={
-                    "target_boxes": nb["target_boxes"],
-                    "target_classes": nb["target_classes"],
-                    "target_seg": nb["target_seg"],
-                },
-                evaluation=False,
-                batch_num=batch_idx,
-            )
-            total = sum(step_losses.values())
-            total.backward()
-            optimizer.step()
-            scheduler.step()
-        print(f"epoch {epoch} last loss {float(total):.4f}")
+    import os
+
+    os.environ.setdefault("det_data", "/r/datasets/nndet_data")
+    os.environ.setdefault("det_models", "/s/agent_rw/nndet_models")
+    _ensure_nndet_importable()
+
+    fit_out = run_nndet_training_loop(
+        module=module,
+        train_manager=tmt,
+        val_manager=tmv,
+        trainer_cfg=trainer_cfg,
+        plan=plan,
+        project_title=project_title,
+        plan_id=plan_id,
+        fold=conf_fold,
+        forward_patch_size=NNDET_FORWARD_PATCH_SIZE,
+        train_dir=SCRATCH_TRAIN_DIR,
+        max_epochs=SCRATCH_MAX_EPOCHS,
+        exp_id=SCRATCH_EXP_ID,
+    )
+    trainer = fit_out["trainer"]
+    train_dir = fit_out["train_dir"]
+    print("train_mode", fit_out["train_mode"], "resume_ckpt", fit_out["resume_ckpt"])
+    print("train_dir", train_dir)
+    print("checkpoints", sorted(train_dir.glob("model_*.ckpt")))
 # %%

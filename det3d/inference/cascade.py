@@ -224,7 +224,9 @@ class DetCascadeInfererRetinaUNet(DetCascadeInferer):
         "Pre,SqL,BoxPts,Off,Reorder,SegScale,Argmax,WrapSeg,FillSeg,Dust,"
         "VoxCopy,FullMeta,World,WorldCopy,Mode,Meta"
     )
-    keys_postproc_safe = "Pre,SqL,BoxPts,Off,Reorder,SegScale,Argmax,WrapSeg,FillSeg,Dust"
+    keys_postproc_safe = (
+        "Pre,SqL,BoxPts,Off,Reorder,SegScale,Argmax,WrapSeg,FillSeg,Dust"
+    )
 
     def setup_patch_inferer(self):
         from det3d.inference.patch import DetPatchInfererRetinaUNet
@@ -344,7 +346,7 @@ class DetCascadeInfererRetinaUNet(DetCascadeInferer):
 
 
 # %%
-# SECTION:-------------------- setup--------------------------------------------------------------------------------------
+# SECTION:-------------------- setup-------------------------------------------------------------------------------------- <CR>
 if __name__ == "__main__":
     from fran.inference.cascade import img_bbox_collated
     from fran.inference.helpers import load_images_nifti
@@ -352,7 +354,6 @@ if __name__ == "__main__":
     from utilz.fileio import load_yaml
     from utilz.helpers import pp
     from utilz.imageviewers import ImageBBoxViewer, ImageMaskViewer
-
 
     fldr = Path("/media/UB/datasets/lidc_all/images")
     imgs = [Path("/media/UB/datasets/lidc_all/images/lidc_0008.nii.gz")]
@@ -382,11 +383,11 @@ if __name__ == "__main__":
 
 # %%
     preds[0].keys()
-    lm =preds[0]['pred_seg'][0]
+    lm = preds[0]["pred_seg"][0]
     # ImageMaskViewer([img, lm],'im')
-    bbo = preds[0]['pred_box_voxel']
-    scores = preds[0]['pred_score']
-    idx=  preds[0]['pred_score'].sort(descending=True)
+    bbo = preds[0]["pred_box_voxel"]
+    scores = preds[0]["pred_score"]
+    idx = preds[0]["pred_score"].sort(descending=True)
 
     scores[idx.indices]
     print(bbo)
@@ -398,7 +399,7 @@ if __name__ == "__main__":
 # %%
 
     # /home/ub/code/det3d/det3d/inference/cascade.py  # T:block_donor|/home/ub/code/det3d/det3d/inference/cascade.py
-# SECTION:-------------------- patch_prediction --------------------------------------------------------------------------------------  # T:block_meta|DetCascadeInfererRetinaUNet.patch_prediction
+# SECTION:-------------------- patch_prediction --------------------------------------------------------------------------------------  # T:block_meta|DetCascadeInfererRetinaUNet.patch_prediction <CR>
     sources = []
     crop_shapes = []
     dat = next(iter(data))  # T:loop_probe|for dat in data:
@@ -436,7 +437,7 @@ if __name__ == "__main__":
     monai[3] = box[1]
     monai[4] = box[4]
     monai[5] = box[5]
-    ImageBBoxViewer(img, box)   
+    ImageBBoxViewer(img, box)
 # %%
     img.meta
     ImageBBoxViewer(img, bo)
@@ -458,14 +459,14 @@ if __name__ == "__main__":
         i
     ]  # T:indent|    batch["crop_spatial_shape"] = crop_shapes[i]
     patch_prediction_result = preds  # T:return|return preds
-# SECTION:-------------------- patch_prediction end --------------------------------------------------------------------------------------  # T:block_meta_end|DetCascadeInfererRetinaUNet.patch_prediction
+# SECTION:-------------------- patch_prediction end --------------------------------------------------------------------------------------  # T:block_meta_end|DetCascadeInfererRetinaUNet.patch_prediction <CR>
     # end PythonMethodScratch  # T:block_end|DetCascadeInfererRetinaUNet.patch_prediction
 
 # %%
     imgs_sublist = imgs
 # %%
     # /home/ub/code/fran/fran/inference/cascade.py  # T:block_donor|/home/ub/code/fran/fran/inference/cascade.py
-# SECTION:-------------------- process_data_sublist --------------------------------------------------------------------------------------  # T:block_meta|DetCascadeInfererRetinaUNet.process_data_sublist
+# SECTION:-------------------- process_data_sublist --------------------------------------------------------------------------------------  # T:block_meta|DetCascadeInfererRetinaUNet.process_data_sublist <CR>
     En.create_and_set_postprocess_transforms()  # T:self_ref|self.create_and_set_postprocess_transforms()
     data = En.load_images(
         imgs_sublist
@@ -504,7 +505,7 @@ if __name__ == "__main__":
 # %%
     En.cuda_clear()  # T:self_ref|self.cuda_clear()
     process_data_sublist_result = output  # T:return|return output
-# SECTION:-------------------- process_data_sublist end --------------------------------------------------------------------------------------  # T:block_meta_end|DetCascadeInfererRetinaUNet.process_data_sublist
+# SECTION:-------------------- process_data_sublist end --------------------------------------------------------------------------------------  # T:block_meta_end|DetCascadeInfererRetinaUNet.process_data_sublist <CR>
     # end PythonMethodScratch  # T:block_end|DetCascadeInfererRetinaUNet.process_data_sublist
 
 # %%
@@ -601,6 +602,4 @@ if __name__ == "__main__":
     dici = tfms["Meta"](dici)
     print(dici["image"].shape)
 
-# %%
-
-
+c %%

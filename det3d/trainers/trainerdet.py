@@ -3,14 +3,15 @@ from torch import Tensor
 from copy import deepcopy
 from pathlib import Path
 from typing import Optional
-from nndet.core.retina import  BaseRetinaNet
+from nndet.core.retina import BaseRetinaNet
 import torch
-from det3d.detection.nndet_train import xyzxyz_exclusive_batch_to_nndet
+from det3d.detection.nndet_train import nndet_batch_to_xyzxyz, xyzxyz_exclusive_batch_to_nndet
 from fran.callback.debug_epoch_limit import DebugEpochBatchLimit
 from fran.callback.incremental import LRFloorStop
 from fran.configs.helpers import normalize_logging_payload
 from fran.managers import Project
 from fran.managers.wandb.wandb import WandbManager
+from fran.preprocessing.helpers import import_h5py
 from fran.trainers.helpers import switch_ckpt_keys
 from fran.trainers.trainer import Trainer, _flatten_dict
 from lightning.fabric import Fabric
@@ -38,13 +39,9 @@ from det3d.managers.detector_factory import resolve_detector_manager
 
 
 class TrainerDet(Trainer):
-    case_id_recorder_cls = None
     wandb_grid_cb_cls = WandbDetImageGridCallback
     monitor_metric_name = "val0_metric"
     _DET_PIPELINE_MODES = frozenset({"det", "lbd"})
-
-    def case_id_recorder_dl_idx(self) -> int:
-        return 0
 
     def wandb_grid_cb_kwargs(self, wandb_grid_epoch_freq: int) -> dict:
         val_patch_size = self.configs["model_params"]["val_patch_size"]
@@ -126,12 +123,10 @@ class TrainerDet(Trainer):
         wandb_grid_epoch_freq: int = 5,
         permanent_checkpoint_every_n_epochs: int = 100,
         batch_tfms: bool = True,
-        case_id_recorder_freq: int = 50,
         nndet_forward_patch_size=None,
     ):
         self.val_every_n_epochs = int(val_every_n_epochs)
         self.max_epochs = int(epochs)
-        self.case_id_recorder_freq = int(case_id_recorder_freq)
         if wandb_grid_epoch_freq is None:
             wandb_grid_epoch_freq = 5
         wandb_grid_epoch_freq = int(wandb_grid_epoch_freq)
@@ -314,26 +309,10 @@ class TrainerDet(Trainer):
         wandb_grid_epoch_freq: int = 5,
     ):
         cbs = []
-        if self.case_id_recorder_cls is not None:
-            cbs.append(
-                self.case_id_recorder_cls(
-                    freq=self.case_id_recorder_freq,
-                    local_folder=str(self.project.log_folder / "case_recorder"),
-                    monitor_dl="both",
-                    dl_idx=self.case_id_recorder_dl_idx(),
-                )
-            )
         if extra_cbs:
             cbs += list(extra_cbs)
         if self.debug:
             cbs += [DebugEpochBatchLimit(n=2)]
-
-        ckpt_dir = (
-            self.project.checkpoints_parent_folder
-            / self.wandb_project_name().upper()
-            / self.run_name
-            / "checkpoints"
-        )
 
         cbs += [
             ModelCheckpoint(
@@ -345,7 +324,7 @@ class TrainerDet(Trainer):
                 filename="{epoch}-{" + self.monitor_metric_name + ":.4f}",
                 enable_version_counter=True,
                 auto_insert_metric_name=True,
-                dirpath=str(ckpt_dir),
+                **self.checkpoint_kwargs,
             ),
             ModelCheckpoint(
                 save_top_k=-1,
@@ -354,7 +333,7 @@ class TrainerDet(Trainer):
                 filename="epoch{epoch:04d}-snapshot",
                 enable_version_counter=False,
                 auto_insert_metric_name=False,
-                dirpath=str(ckpt_dir),
+                **self.checkpoint_kwargs,
             ),
             LearningRateMonitor(logging_interval="epoch"),
         ]
@@ -447,11 +426,6 @@ class TrainerDet(Trainer):
         return fabric, model
 
 
-from det3d.callback.case_recorder_det import CaseIDRecorderSnapshotDet
-
-CaseIDRecorderDetRT = CaseIDRecorderSnapshotDet
-
-
 # %%
 if __name__ == "__main__":
 # SECTION:-------------------- setup<--------------------------------------------------------------------------------------
@@ -462,7 +436,7 @@ if __name__ == "__main__":
     from det3d.configs.parser import ConfigMakerDet
 
     project_title = "lidca"
-    plan_id = 2
+    plan_id = 3
 
     P = Project(project_title)
     C = ConfigMakerDet(P)
@@ -474,14 +448,15 @@ if __name__ == "__main__":
 # %%
     conf["model_params"]["arch"] = "retinanet"
     conf["model_params"]["arch"] = "retinaunet"
-    conf["plan_train"]["patch_size"] = [128, 128, 64]
-    bs = 2
+    print(conf["dataset_params"]["prezoom_scale"])
+    conf["plan_train"]["patch_size"] = [160,160,96]
+    bs = 10
     device_id = 0
     batch_tfms = True
     batch_tfms = False
     wandb = True
     run_name = None
-    run_name = "LIDCA-GYRO"
+    run_name = "LIDCA-DIET"
     tags = []
     description = "TrainerDet lidca retinanet"
     lr = None
@@ -489,9 +464,8 @@ if __name__ == "__main__":
     profiler = False
     compiled = False
     cbs = []
-    wandb_grid_epoch_freq = 10
+    wandb_grid_epoch_freq = 40
     val_every_n_epochs = 5
-    case_id_recorder_freq = max(val_every_n_epochs, val_every_n_epochs * 2)
     train_indices = None
     val_indices = None
     val_sampling = 1.0
@@ -505,7 +479,6 @@ if __name__ == "__main__":
         val_indices=val_indices,
         val_sampling=val_sampling,
         val_every_n_epochs=val_every_n_epochs,
-        case_id_recorder_freq=case_id_recorder_freq,
         cbs=cbs,
         debug=debug_,
         batch_size=bs,
@@ -523,6 +496,8 @@ if __name__ == "__main__":
 # %%
 # SECTION:-------------------- ii --------------------------------------------------------------------------------------
     Tm.fit()
+
+
 # %%
 # SECTION:-------------------- TS--------------------------------------------------------------------------------------
     N = Tm.N
@@ -531,26 +506,29 @@ if __name__ == "__main__":
     tmv = D.valid_manager
 
 # %%
+
+
     tmt.setup()
     tmv.setup()
     train_dl = tmt.dl
     train_iter = iter(train_dl)
 # %%
-    val_dl = tmv.dl
-    val_iter = iter(val_dl)
+    a = tmt.ds[0]
+    a[0].keys()
+    a[0]['validation_impl']
 # %%
-
     train_batch = next(train_iter)
     batch = train_batch
-    img = batch["image"]
+    batch['image'].shape
+    batch['lm'].shape
     box = batch["bbox"]
     img.shape
 
 # %%
+    val_dl = tmv.dl
+    val_iter = iter(val_dl)
     val_batch = next(val_iter)
-    batch = val_batch
-    img = batch["image"]
-    box = batch["bbox"]
+# %%
     ImageBBoxViewer(img, box)
 
 # %%
@@ -561,12 +539,12 @@ if __name__ == "__main__":
     print(batch.keys())
 # %%
 
-    losses, preds, nb = N._step_losses(batch, 0,True)
+    losses, preds, nb = N._step_losses(batch, 0, True)
 # %%
     preds.keys()
     lm = preds["pred_seg"]
     batch_idx = 0
-    ImageMaskViewer([img[0], lm[0,1,:]],'im')
+    ImageMaskViewer([img[0], lm[0, 1, :]], "im")
 # %%
 # SECTION:-------------------- validation_step--------------------------------------------------------------------------------------  # T:block_meta|TrainerDet.validation_step
 # %%
@@ -581,185 +559,163 @@ if __name__ == "__main__":
 
     batch = batch
     R = N
-# %%  # T:block_start|RetinaUNetManager._nndet_targets
-# /home/ub/code/det3d/det3d/managers/retinaunet.py  # T:block_donor|/home/ub/code/det3d/det3d/managers/retinaunet.py
-#SECTION:-------------------- _nndet_targets --------------------------------------------------------------------------------------  # T:block_meta|RetinaUNetManager._nndet_targets
-    # requires R = RetinaUNetManager(...) in __main__  # T:requires_alias|R = RetinaUNetManager(...)
-    from monai.data.box_utils import clip_boxes_to_image  # T:hoisted_import|from monai.data.box_utils import clip_boxes_to_image
-    from monai.data.box_utils import clip_boxes_to_image
-    data = batch["image"]
-    forward_patch_size = R.plan["patch_size"]  # T:self_ref|forward_patch_size = self.plan["patch_size"]
-    label_to_idx = {int(v): i for i, v in enumerate(R.plan["fg_labels"])}  # T:self_ref|label_to_idx = {int(v): i for i, v in enumerate(self.plan["fg_labels"])}
-    target_seg_list = []
-    target_boxes = []
-    target_classes = []
-    i = next(iter(range(data.shape[0])))  # T:loop_probe|for i in range(data.shape[0]):
-    box = batch["bbox"][i]
-    box = box.repeat(2,1)
-    nndet_box = xyzxyz_exclusive_batch_to_nndet(box)  # T:indent|    nndet_box = xyzxyz_exclusive_batch_to_nndet(box)
-    target_boxes.append(nndet_box)  # T:indent|    target_boxes.append(nndet_box)
-    cls = batch["label"][i][: box.shape[0]]  # T:indent|    cls = batch["label"][i][: box.shape[0]]
-    mapped = torch.tensor(  # T:indent|    mapped = torch.tensor(
-        [label_to_idx[int(v.item())] for v in cls],  # T:indent|        [label_to_idx[int(v.item())] for v in cls],
-        dtype=torch.long,  # T:indent|        dtype=torch.long,
-        device=nndet_box.device,  # T:indent|        device=nndet_box.device,
-    )  # T:indent|    )
-    target_classes.append(mapped)  # T:indent|    target_classes.append(mapped)
-    out = {
-        "data": data,
-        "target_boxes": target_boxes,
-        "target_classes": target_classes,
-        "target_seg": torch.stack(target_seg_list, 0),
-    }
-    _nndet_targets_result = out  # T:return|return out
-#SECTION:-------------------- _nndet_targets end --------------------------------------------------------------------------------------  # T:block_meta_end|RetinaUNetManager._nndet_targets
-    # end PythonMethodScratch  # T:block_end|RetinaUNetManager._nndet_targets
-# %%
-# SECTION:-------------------- _step_losses --------------------------------------------------------------------------------------  # T:block_meta|TrainerDet._step_losses
-    nb = N._nndet_targets(batch)  # T:self_ref|nb = self._nndet_targets(batch)
-    device_type = nb["data"].device.type
-# %%
-    with torch.autocast(device_type, enabled=device_type == "cuda" and not evaluation):
-        losses, prediction = (
-            N.net.train_step(  # T:self_ref|    losses, prediction = self.net.train_step(
-                images=nb["data"],
-                targets={
-                    "target_boxes": nb["target_boxes"],
-                    "target_classes": nb["target_classes"],
-                    "target_seg": nb["target_seg"],
-                },
-                evaluation=evaluation,
-                batch_num=batch_idx,
-            )
-        )
-# %%
-    _step_losses_result = (
-        losses,
-        prediction,
-        nb,
-    )  # T:return|return losses, prediction, nb
-# SECTION:-------------------- _step_losses end --------------------------------------------------------------------------------------  # T:block_meta_end|TrainerDet._step_losses
-    # end PythonMethodScratch  # T:block_end|TrainerDet._step_losses
-# %%
 
-    images = nb["data"]
-    targets = {
-        "target_boxes": nb["target_boxes"],
-        "target_classes": nb["target_classes"],
-        "target_seg": nb["target_seg"],
-    }
+# %%
+    batch = batch
+    batch_idx = 0
     evaluation = True
-    batch_num = 0
-    B = N.net
+# %%  # T:block_start|RetinaUNetManager._step_losses
 # %%
-# SECTION:-------------------- train_step --------------------------------------------------------------------------------------  # T:block_meta|TrainerDet.train_step
-    """
-    Perform a single training step (forward pass + loss computation)
+    img = nb['data']
+    boxes = nb['target_boxes']
+    box=  boxes[0]
 
-    Args:
-        images: batch of images
-        targets: labels for training
-            `target_boxes` (List[Tensor]): ground truth bounding boxes
-                (x1, y1, x2, y2, (z1, z2))[X, dim * 2], X= number of ground
-                truth boxes in image
-            `target_classes` (List[Tensor]): ground truth class per box
-                (classes start from 0) [X], X= number of ground truth
-                boxes in image
-            `target_seg`(Tensor): segmentation ground truth
-                (only needed if :param:`segmenter`
-                was provided in init) (classes start from 1, 0 background)
-        evaluation (bool): compute final predictions (includes detection
-            postprocessing)
-        batch_num (int): batch index inside epoch
-
-    Returns:
-        torch.Tensor: final loss for back propagation
-        Dict: predictions for metric calculation
-            'pred_boxes': List[Tensor]: predicted bounding boxes for each
-                image List[[R, dim * 2]]
-            'pred_scores': List[Tensor]: predicted probability for the
-                class List[[R]]
-            'pred_labels': List[Tensor]: predicted class List[[R]]
-            'pred_seg': Tensor: predicted segmentation [N, dims]
-        Dict[str, torch.Tensor]: scalars for logging (e.g. individual
-            loss components)
-    """
-    # import napari
-    # with napari.gui_qt():
-    #     viewer = napari.view_image(images.detach().cpu().numpy())
-    #     viewer.add_labels(seg_targets[:, None].detach().cpu().numpy())
-    target_boxes: List[Tensor] = targets["target_boxes"]
-    target_classes: List[Tensor] = targets["target_classes"]
-    target_seg: Tensor = targets["target_seg"]
-    pred_detection, anchors, pred_seg = B(
-        images
-    )  # T:self_ref|pred_detection, anchors, pred_seg = self(images)
-    labels, matched_gt_boxes = (
-        B.assign_targets_to_anchors(  # T:self_ref|labels, matched_gt_boxes = self.assign_targets_to_anchors(
-            anchors, target_boxes, target_classes
-        )
-    )
-    losses = {}
-    head_losses, pos_idx, neg_idx = (
-        B.head.compute_loss(  # T:self_ref|head_losses, pos_idx, neg_idx = self.head.compute_loss(
-            pred_detection, labels, matched_gt_boxes, anchors
-        )
-    )
-    losses.update(head_losses)
-    if B.segmenter is not None:  # T:self_ref|if self.segmenter is not None:
-        losses.update(
-            B.segmenter.compute_loss(pred_seg, target_seg)
-        )  # T:self_ref|    losses.update(self.segmenter.compute_loss(pred_seg, target_seg))
-    if evaluation:
-        prediction = B.postprocess_for_inference(  # T:self_ref|    prediction = self.postprocess_for_inference(
-            images=images,
-            pred_detection=pred_detection,
-            pred_seg=pred_seg,
-            anchors=anchors,
-        )
-    else:
-        prediction = None
-    # self.save_matched_anchors(images=images, target_boxes=target_boxes,
-    #                             anchors=anchors, pos_idx=pos_idx,
-    #                             neg_idx=neg_idx, seg=seg_targets)
-    train_step_result = losses, prediction  # T:return|return losses, prediction
+    box_viz = nndet_batch_to_xyzxyz(box)
+    im = img[0]
+    ImageBBoxViewer(im, box_viz)
 
 # %%
-# %%  # T:block_start|TrainerDet.postprocess_for_inference
-# /home/ub/code/nnDetection/nndet/core/retina.py  # T:block_donor|/home/ub/code/nnDetection/nndet/core/retina.py
-#SECTION:-------------------- postprocess_for_inference --------------------------------------------------------------------------------------  # T:block_meta|TrainerDet.postprocess_for_inference
-    """
-    Postprocess predictions for inference
-
-    Args:
-        images: input images
-        pred_detection: detection predictions
-        pred_seg: segmentation predictions
-        anchors: anchors
-
-    Returns:
-        Dict: post processed predictions
-            'pred_boxes': List[Tensor]: predicted bounding boxes for each
-                image List[[R, dim * 2]]
-            'pred_scores': List[Tensor]: predicted probability for
-                the class List[[R]]
-            'pred_labels': List[Tensor]: predicted class List[[R]]
-            'pred_seg': Tensor: predicted segmentation [N, C, dims]
-    """
-    image_shapes = [images.shape[2:]] * images.shape[0]
-    boxes, probs, labels = B.postprocess_detections(  # T:self_ref|boxes, probs, labels = self.postprocess_detections(
-        pred_detection=pred_detection,
-        anchors=anchors,
-        image_shapes=image_shapes,
+# /home/ub/code/det3d/det3d/managers/retinaunet.py  # T:block_donor|/home/ub/code/det3d/det3d/managers/retinaunet.py
+#SECTION:-------------------- _step_losses --------------------------------------------------------------------------------------  # T:block_meta|RetinaUNetManager._step_losses
+    # requires R = RetinaUNetManager(...) in __main__  # T:requires_alias|R = RetinaUNetManager(...)
+    nb = R._nndet_targets(batch)  # T:self_ref|nb = self._nndet_targets(batch)
+    nb.keys()
+    losses, prediction = R.net.train_step(  # T:self_ref|losses, prediction = self.net.train_step(
+        images=nb["data"],
+        targets={
+            "target_boxes": nb["target_boxes"],
+            "target_classes": nb["target_classes"],
+            "target_seg": nb["target_seg"],
+        },
+        evaluation=evaluation,
+        batch_num=batch_idx,
     )
-    prediction = {"pred_boxes": boxes, "pred_scores": probs, "pred_labels": labels}
-    if B.segmenter is not None:  # T:self_ref|if self.segmenter is not None:
-        prediction["pred_seg"] = B.segmenter.postprocess_for_inference(pred_seg)["pred_seg"]  # T:self_ref|    prediction["pred_seg"] = self.segmenter.postprocess_for_inference(pred_seg)["pred_seg"]
-    postprocess_for_inference_result = prediction  # T:return|return prediction
-#SECTION:-------------------- postprocess_for_inference end --------------------------------------------------------------------------------------  # T:block_meta_end|TrainerDet.postprocess_for_inference
-    # end PythonMethodScratch  # T:block_end|TrainerDet.postprocess_for_inference
+    _step_losses_result = losses, prediction, nb  # T:return|return losses, prediction, nb
+#SECTION:-------------------- _step_losses end --------------------------------------------------------------------------------------  # T:block_meta_end|RetinaUNetManager._step_losses
+    # end PythonMethodScratch  # T:block_end|RetinaUNetManager._step_losses
+# %%
+    # /home/ub/code/det3d/det3d/managers/retinaunet.py  # T:block_donor|/home/ub/code/det3d/det3d/managers/retinaunet.py
+    tfms="Ld,Rtr,L2,E,Norm,BoxToWorld,ToPoints,Zoom,Flip0,Flip1,Flip2,Rand90,Rot,AffinePts,ToBoxes,BoxClip,DelMask,IntensityTfms,Dtype"
+    tfms = tmt.transforms_dict
+    from fran.managers.data.main import RandCropByFlatIndicesd
+# %%
+    dici0 = tmt.data[0]
+    Ld = tfms["Ld"]
+    data = dici0
+
+    import numpy as np
+    dici = tfms["Ld"](dici0)
+    dici
+# %%
+    R = tfms["Rtr"]
+    dici = R(dici)
+# %%
+    data = dici
+# %%  # T:block_start|RandCropByFlatIndicesd.__call__
+# /home/ub/code/fran/fran/managers/data/main.py  # T:block_donor|/home/ub/code/fran/fran/managers/data/main.py
+#SECTION:-------------------- __call__ --------------------------------------------------------------------------------------  # T:block_meta|RandCropByFlatIndicesd.__call__
+    # requires R = RandCropByFlatIndicesd(...) in __main__  # T:requires_alias|R = RandCropByFlatIndicesd(...)
+    d = dict(data)
+    src_dims = tuple(int(v) for v in d[R.src_dims_key])  # T:self_ref|src_dims = tuple(int(v) for v in d[self.src_dims_key])
+# %%
+    fg = np.asarray(d[R.fg_indices_key], dtype=np.int64).reshape(-1)  # T:self_ref|fg = np.asarray(d[self.fg_indices_key], dtype=np.int64).reshape(-1)
+    bg = np.asarray(d[R.bg_indices_key], dtype=np.int64).reshape(-1)  # T:self_ref|bg = np.asarray(d[self.bg_indices_key], dtype=np.int64).reshape(-1)
+    out = []
+    _ = next(iter(range(R.num_samples)))  # T:loop_probe|for _ in range(self.num_samples):
+    sample = dict(d)  # T:indent|    sample = dict(d)
+    pool, sample_is_fg = R._sample_pool(fg=fg, bg=bg)  # T:self_ref|    pool, sample_is_fg = self._sample_pool(fg=fg, bg=bg)
+    print(sample_is_fg)
+    print(pool.shape)
+    sampled_flat_index = int(pool[R.R.randint(0, pool.size)])  # T:self_ref|    sampled_flat_index = int(pool[self.R.randint(0, pool.size)])
+# %%
+    center = tuple(  # T:indent|    center = tuple(
+        int(v) for v in np.unravel_index(sampled_flat_index, src_dims)  # T:indent|        int(v) for v in np.unravel_index(sampled_flat_index, src_dims)
+    )  # T:indent|    )
+    print(center)
+# %%
+    crop_slices, crop_start, crop_end = R._compute_crop(center, src_dims)  # T:self_ref|    crop_slices, crop_start, crop_end = self._compute_crop(center, src_dims)
+    sample["crop_center"] = center  # T:indent|    sample["crop_center"] = center
+    sample["crop_slices"] = crop_slices  # T:indent|    sample["crop_slices"] = crop_slices
+    sample["crop_start"] = crop_start  # T:indent|    sample["crop_start"] = crop_start
+    sample["crop_end"] = crop_end  # T:indent|    sample["crop_end"] = crop_end
+    sample["sample_is_fg"] = bool(sample_is_fg)  # T:indent|    sample["sample_is_fg"] = bool(sample_is_fg)
+    sample["sampled_flat_index"] = sampled_flat_index  # T:indent|    sample["sampled_flat_index"] = sampled_flat_index
+    out.append(sample)  # T:indent|    out.append(sample)
+    __call___result = out  # T:return|return out
+
+#SECTION:-------------------- __call__ end --------------------------------------------------------------------------------------  # T:block_meta_end|RandCropByFlatIndicesd.__call__
+    # end PythonMethodScratch  # T:block_end|RandCropByFlatIndicesd.__call__
+
+# %%
+    fg = fg
+    bg = bg
+# %%  # T:block_start|RandCropByFlatIndicesd._sample_pool
+# /home/ub/code/fran/fran/managers/data/main.py  # T:block_donor|/home/ub/code/fran/fran/managers/data/main.py
+#SECTION:-------------------- _sample_pool --------------------------------------------------------------------------------------  # T:block_meta|RandCropByFlatIndicesd._sample_pool
+    # requires R = RandCropByFlatIndicesd(...) in __main__  # T:requires_alias|R = RandCropByFlatIndicesd(...)
+    choose_fg = R.R.rand() < R.pos / (R.pos + R.neg)  # T:self_ref|choose_fg = self.R.rand() < self.pos / (self.pos + self.neg)
+    _sample_pool_result = bg, False  # T:return|return bg, False
+#SECTION:-------------------- _sample_pool end --------------------------------------------------------------------------------------  # T:block_meta_end|RandCropByFlatIndicesd._sample_pool
+    # end PythonMethodScratch  # T:block_end|RandCropByFlatIndicesd._sample_pool
+# %%
+    dici = tfms["L2"](dici[0])
+    print(dici['image'].shape)
+    im = dici['image'][0]
+    ImageMaskViewer([im, im],'im')
+
+# %%
+    dici = tfms["E"](dici)
+    print(dici['image'].shape)
+
+    dici = tfms["Norm"](dici)
+    print(dici['image'].shape)
+
+    dici = tfms["BoxToWorld"](dici)
+    print(dici['image'].shape)
+
+    dici = tfms["ToPoints"](dici)
+    print(dici['image'].shape)
+
+    dici = tfms["Zoom"](dici)
+    print(dici['image'].shape)
+
+    dici = tfms["Flip0"](dici)
+    print(dici['image'].shape)
+
+    dici = tfms["Flip1"](dici)
+    print(dici['image'].shape)
+
+    dici = tfms["Flip2"](dici)
+    print(dici['image'].shape)
+
+    dici = tfms["Rand90"](dici)
+    print(dici['image'].shape)
+
+    dici = tfms["Rot"](dici)
+    print(dici['image'].shape)
+
+    dici = tfms["AffinePts"](dici)
+    print(dici['image'].shape)
+
+    dici = tfms["ToBoxes"](dici)
+    print(dici['image'].shape)
+
+    dici = tfms["BoxClip"](dici)
+    print(dici['image'].shape)
+
+    dici = tfms["DelMask"](dici)
+    print(dici['image'].shape)
+
+    dici = tfms["IntensityTfms"](dici)
+    print(dici['image'].shape)
+
+    dici = tfms["Dtype"](dici)
+    print(dici['image'].shape)
+
+
 # %%
 
-# SECTION:--------------------end --------------------------------------------------------------------------------------
 
+
+# %%
 

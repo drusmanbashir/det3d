@@ -44,7 +44,6 @@ if __name__ == "__main__":
     compiled = False
     cbs = []
     val_every_n_epochs = 2
-    case_id_recorder_freq = max(val_every_n_epochs, val_every_n_epochs * 2)
     train_indices = None
     val_indices = None
     val_sampling = 1.0
@@ -64,7 +63,6 @@ if __name__ == "__main__":
         val_indices=val_indices,
         val_sampling=val_sampling,
         val_every_n_epochs=val_every_n_epochs,
-        case_id_recorder_freq=case_id_recorder_freq,
         cbs=cbs,
         debug=debug_,
         batch_size=batch_size,

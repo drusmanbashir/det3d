@@ -16,7 +16,6 @@ from fran.preprocessing.hdf5_shards import (
 from utilz.fileio import maybe_makedirs
 from utilz.stringz import info_from_filename
 
-from det3d.transforms.crop_indices import volume_fg_bg_flat_indices
 from det3d.utils.bbox_sidecar import bbox_sidecar_path, load_detection_sidecar
 
 
@@ -36,7 +35,7 @@ class DetHDF5ShardWorker(HDF5ShardWorker):
             if shape[0] == 0:
                 return None
             return (min(shape[0], 64),)
-        if key in ("fg_indices", "bg_indices", "lm_fg_indices"):
+        if key == "fg_indices":
             shape = tuple(int(v) for v in shape)
             if shape[0] == 0:
                 return None
@@ -75,8 +74,7 @@ class DetHDF5ShardWorker(HDF5ShardWorker):
 
         if not isinstance(indices, dict):
             raise ValueError(f"indices file must be a dict: {indices}")
-        fg, bg = volume_fg_bg_flat_indices(mask)
-        lm_fg = self._to_numpy_cpu(indices["lm_fg_indices"]).reshape(-1)
+        fg = self._to_numpy_cpu(indices["fg_indices"]).reshape(-1)
 
         ds_kwargs = {}
         if compression is not None:
@@ -121,10 +119,6 @@ class DetHDF5ShardWorker(HDF5ShardWorker):
             )
         case_grp.attrs["image_shape"] = list(image.shape)
         self._create_index_dataset(case_grp, "fg_indices", fg, ds_kwargs, src_dims)
-        self._create_index_dataset(case_grp, "bg_indices", bg, ds_kwargs, src_dims)
-        self._create_index_dataset(
-            case_grp, "lm_fg_indices", lm_fg, ds_kwargs, src_dims
-        )
         case_grp.attrs["mask_shape"] = list(mask.shape)
         case_grp.attrs["lm_shape"] = list(lm.shape)
         if "meta" not in indices:

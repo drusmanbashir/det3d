@@ -22,7 +22,8 @@ from det3d.managers.data.main import (
     CropDetPatchd,
     LoadHDF5DetCaseFulld,
     LoadHDF5DetCropd,
-    LoadHDF5DetShardIndexd,
+    LoadHDF5DetShardBBoxd,
+    RandCropByBBoxesd,
     PadDetPatchd,
 )
 from det3d.managers.data.nifti import DataManagerNiftiDet
@@ -103,7 +104,8 @@ __all__ = [
     "DataManagerTrainDetShardBTfms",
     "LoadHDF5DetCaseFulld",
     "LoadHDF5DetCropd",
-    "LoadHDF5DetShardIndexd",
+    "LoadHDF5DetShardBBoxd",
+    "RandCropByBBoxesd",
     "BboxCenterCropSlicesd",
     "CropDetPatchd",
     "PadDetPatchd",

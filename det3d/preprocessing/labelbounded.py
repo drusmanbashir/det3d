@@ -26,11 +26,7 @@ from det3d.preprocessing.dataset_details import write_dataset_details_csv
 from det3d.preprocessing.helpers import dusting_threshold
 from det3d.preprocessing.hdf5_shards_det import DetHDF5ShardGenerator
 from det3d.transforms.bbox_stats import DetectionBBoxStatsd
-from det3d.transforms.crop_indices import (
-    mask_fg_bg_flat_indices,
-    volume_fg_bg_flat_indices,
-    volume_fg_flat_indices,
-)
+from det3d.transforms.crop_indices import volume_fg_flat_indices
 from det3d.transforms.detection import GenerateExtendedBoxMask
 from det3d.utils.bbox_sidecar import (
     bbox_sidecar_path,
@@ -51,10 +47,10 @@ class _LBDDetWorker(_LBDSamplerWorkerBase):
         data_folder,
         output_folder,
         dusting_threshold=3.0,
-        ignore_labels=None,
+        ignore_labels_cc=None,
     ):
         self.dusting_threshold = dusting_threshold
-        self.ignore_labels = [] if ignore_labels is None else listify(ignore_labels)
+        self.ignore_labels_cc = [] if ignore_labels_cc is None else listify(ignore_labels_cc)
         _LBDSamplerWorkerBase.__init__(
             self,
             project=project,
@@ -72,7 +68,7 @@ class _LBDDetWorker(_LBDSamplerWorkerBase):
             image_key=self.image_key,
             lm_key=self.lm_key,
             dusting_threshold=dusting_threshold(plan),
-            ignore_labels=self.ignore_labels,
+            ignore_labels=self.ignore_labels_cc,
             gt_box_mode=plan["gt_box_mode"],
         )
         self.E = StandardizeEmptyBoxd(
@@ -84,6 +80,7 @@ class _LBDDetWorker(_LBDSamplerWorkerBase):
             image_key=self.image_key,
             spatial_size=patch_size,
             whole_box=True,
+            mask_image_key="mask_image"
         )
         self.H = Compose(
             [
@@ -113,19 +110,17 @@ class _LBDDetWorker(_LBDSamplerWorkerBase):
             out_fn,
             boxes,
             labels,
-            ignore_labels=list(self.ignore_labels),
+            ignore_labels=list(self.ignore_labels_cc),
         )
 
-    def save_mask_pt(self, data, image):
-        mask = torch.as_tensor(data["mask_image"], dtype=torch.uint8)
-        if mask.ndim == 3:
-            mask = mask.unsqueeze(0)
+    def save_mask_pt(self, mask, image):
         mask = MetaTensor(mask, meta=dict(image.meta))
-        self.save_pt(mask[0], "masks")
+        self.save_pt(mask, "masks")
 
     def _process_row(self, row: pd.Series):
+
         case_id = row["case_id"]
-        data = self._create_data_dict(row)
+        data = row.to_dict()
         data = self.apply_transforms(data)
         image = data["image"]
         lm = data["lm"]
@@ -137,23 +132,25 @@ class _LBDDetWorker(_LBDSamplerWorkerBase):
                 "ok": False,
                 "err": "image too small after label crop",
             }
+
         fn_name = strip_extension(Path(str(row["image"])).name) + ".pt"
         src_fn = str(row["image"])
         save_meta = dict(image.meta)
         save_meta["filename_or_obj"] = src_fn
         image.meta = save_meta
         lm.meta = save_meta
-        fg, bg = volume_fg_bg_flat_indices(data["mask_image"])
+        mask = torch.as_tensor(data["mask_image"], dtype=torch.uint8)
+        if mask.ndim == 3:
+            mask = mask.unsqueeze(0)
+        fg = volume_fg_flat_indices(mask)
         inds = {
             "fg_indices": fg,
-            "bg_indices": bg,
-            "lm_fg_indices": volume_fg_flat_indices(lm[0]),
             "meta": image.meta,
         }
         self.save_indices(inds, self.indices_subfolder)
         self.save_pt(image[0], "images")
         self.save_pt(lm[0], "lms")
-        self.save_mask_pt(data, image)
+        self.save_mask_pt(mask[0], image)
         self.save_bbox_sidecar(data, fn_name)
         return {
             "case_id": case_id,
@@ -218,7 +215,7 @@ class LabelBoundedDetDataGenerator(LabelBoundedDataGenerator):
         plan = self.plan
         return {
             "dusting_threshold": dusting_threshold(plan),
-            "ignore_labels": plan["ignore_labels_cc"],
+            "ignore_labels_cc": plan["ignore_labels_cc"],
         }
 
     # def set_input_output_folders(self, data_folder, output_folder):
@@ -276,26 +273,26 @@ class LabelBoundedDetDataGenerator(LabelBoundedDataGenerator):
 
 
 # %%
-# SECTION:-------------------- setup-------------------------------------------------------------------------------------- <CR>
+# SECTION:-------------------- setup-------------------------------------------------------------------------------------- <CR> <CR>
 if __name__ == "__main__":
     from det3d.configs.parser import ConfigMakerDet
     from det3d.configs.parser import ConfigMakerDet
     from fran.managers import Project
 
     project_title = "lidca"
-    plan_id = 2
+    plan_id = 3
     project = Project(project_title=project_title)
     config_maker = ConfigMakerDet(project)
     config_maker.setup(plan_id)
     plan = config_maker.configs["plan_train"]
     overwrite = False
-    overwrite_hdf5_shards =False
+    overwrite_hdf5_shards = False
     folders = FolderNames(project=project, plan=plan).folders
     folder_src = folders["data_folder_source"]
     folder_lbd = folders["data_folder_lbd"]
 # %%
-    num_processes = 16
     num_processes = 1
+    num_processes = 16
     G = LabelBoundedDetDataGenerator(
         project=project,
         plan=plan,
@@ -315,64 +312,162 @@ if __name__ == "__main__":
         overwrite_hdf5_shards=overwrite_hdf5_shards,
     )
 # %%
+    G.postprocess()
+# %%
 
-#SECTION:-------------------- LBDWorker--------------------------------------------------------------------------------------
-    debug_ =True
+# SECTION:-------------------- LBDWorker-------------------------------------------------------------------------------------- <CR>
 # %%
     L = LBDDetWorkerLocal(
         project=project,
         plan=plan,
         data_folder=folder_src,
         output_folder=folder_lbd,
+        ignore_labels_cc=plan["ignore_labels_cc"],
     )
-
 
     L.setup(debug=debug_)
 # %%
+    row = G.df.iloc[0]
     L._process_row(G.df.iloc[0])
 # %%  # T:block_start|_LBDDetWorker._process_row
-#SECTION:-------------------- _process_row--------------------------------------------------------------------------------------  # T:block_meta|_LBDDetWorker._process_row
-    # requires L = _LBDDetWorker(...) in __main__  # T:requires_alias|L = _LBDDetWorker(...)
-    for ids,row in G.df.iterrows():
-        case_id = row["case_id"]
-        data = L._create_data_dict(row)  # T:self_ref|data = self._create_data_dict(row)
-        data = L.apply_transforms(data)  # T:self_ref|data = self.apply_transforms(data)
-        data.keys()
-        img = data['image']
-        bbox = data['bbox']
-        lm = data['lm']
-        LMG = data['LMG']
-        data['label']
-        print(LMG.nbrhoods)
-        tr()
-        df = LMG.nbrhoods
-        d = {str(k): int(v) for k, v in zip(df.label_cc, df.label_org)}
-        LMG.li_cc_sitk
-        import SimpleITK as sitk
-        lm2 = sitk.GetArrayFromImage(LMG.li_cc_sitk)
-        lm3 = torch.as_tensor(lm2)
-        lm4 = lm3.permute(2,1,0)
-        lm4 = lm4.long()
-        im2 = img[0]
-        ImageMaskViewer([im2,lm4],'im')
-        lm4.unique()
-        torch.save(lm4,"/s/tmp/lm4.pt")
-        ImageMaskViewer([im2, lm4],'im')
-        LMG.li_cc.GetDirection()
-        LMG.li_cc.GetSpacing()
-        LMG.li_cc.GetOrigin()
 
-        lm.meta
+    tfms_keys="LoadT,Chan,Dev,Crop,Remap,Labels,Indx,Stats,E,L,H",
+    tfms = L.transforms_dict
+
+    dici = row.to_dict()
+
+    L = tfms["LoadT"]
+    dici = L(dici)
+
+    C = tfms["Chan"]
+    dici = C(dici)
+
+    D = tfms["Dev"]
+    dici = D(dici)
+
+    Cr = tfms["Crop"]
+    dici = Cr(dici)
+
+    R = tfms["Remap"]
+    dici = R["lidc"](dici)
+
+    La = tfms["Labels"]
+    dici = La(dici)
+
+    I = tfms["Indx"]
+    dici = I(dici)
+
+    S = tfms["Stats"]
+    dici = S(dici)
+    print(dici.keys())
+    print(dici['bbox'])
+
+    E = tfms["E"]
+    dici = E(dici)
+
+    L2 = tfms["L"]
+    dici = L2(dici)
+    dici["mask_image"]
+    lm = dici["mask_image"]
+    im = dici["image"]
+    ImageMaskViewer([im, lm],'im')
+
 # %%
+    H = tfms["H"]
+    dici = H(dici)
 
-        
 
 
+    dici = row.to_dict()
 
+#%%
+
+    dici = tfms["LoadT"](dici)
+    print(dici['image'].shape)
+    dici.keys()
+
+    dici = tfms["Chan"](dici)
+    print(dici['image'].shape)
+
+    dici = tfms["Dev"](dici)
+    print(dici['image'].shape)
+
+    dici = tfms["Crop"](dici)
+    C = tfms["Crop"]
+    C.keys
+    C.source_key
+
+    dici = C(dici)
+    print(dici['image'].shape)
+    im = dici['image']
+    lm = dici['lm']
+    ImageMaskViewer([im, lm],'im')
+
+    dici = tfms["Remap"](dici)
+    print(dici['image'].shape)
+
+    dici = tfms["Labels"](dici)
+    print(dici['image'].shape)
+
+    dici = tfms["Indx"](dici)
+    print(dici['image'].shape)
+
+    dici = tfms["Stats"](dici)
+    print(dici['image'].shape)
+
+    dici = tfms["E"](dici)
+    print(dici['image'].shape)
+
+    dici = tfms["L"](dici)
+    print(dici['image'].shape)
+
+    dici = tfms["H"](dici)
+    print(dici['image'].shape)
+
+# %%
+#%%
+# SECTION:-------------------- _process_row--------------------------------------------------------------------------------------  # T:block_meta|_LBDDetWorker._process_row <CR>
+    # requires L = LabelBoundedDetDataGenerator(...) in __main__  # T:requires_alias|L = LabelBoundedDetDataGenerator(...)
+    case_id = row["case_id"]
+    data = row.to_dict()
+    data = L.apply_transforms(data)  # T:self_ref|data = self.apply_transforms(data)
+    image = data["image"]
+    lm = data["lm"]
+    assert image.shape == lm.shape, "mismatch in shape"
+    assert image.dim() == 4, "images should be cxhxwxd"
+
+    fn_name = strip_extension(Path(str(row["image"])).name) + ".pt"
+    src_fn = str(row["image"])
+    save_meta = dict(image.meta)
+    save_meta["filename_or_obj"] = src_fn
+    image.meta = save_meta
+    lm.meta = save_meta
+    mask = data["mask_image"]
+    fg, bg = map_binary_to_indices(mask, image=None, image_threshold=0.0)
+    inds = {
+        "fg_indices": fg,
+        "bg_indices": bg,
+        "meta": image.meta,
+    }
+    L.save_indices(
+        inds, L.indices_subfolder
+    )  # T:self_ref|self.save_indices(inds, self.indices_subfolder)
+    L.save_pt(image[0], "images")  # T:self_ref|self.save_pt(image[0], "images")
+    L.save_pt(lm[0], "lms")  # T:self_ref|self.save_pt(lm[0], "lms")
+    L.save_mask_pt(data, image)  # T:self_ref|self.save_mask_pt(data, image)
+    L.save_bbox_sidecar(
+        data, fn_name
+    )  # T:self_ref|self.save_bbox_sidecar(data, fn_name)
+    # return {  # T:early_return|return {
+    #     "case_id": case_id,
+    #     "ok": True,
+    #     "shape": list(image.shape),
+    #     "n_boxes": int(data[L.box_key].shape[0]),  # T:self_ref|    "n_boxes": int(data[self.box_key].shape[0]),
+    # }
 
 # %
 
-    ImageMaskViewer([img, lm],'im')
+    ImageMaskViewer([img, lm], "im")
     ImageBBoxViewer(img, bbox)
 
     image = data["image"]
@@ -386,14 +481,17 @@ if __name__ == "__main__":
     inds = {
         "fg_indices": fg,
         "bg_indices": bg,
-        "lm_fg_indices": data["lm_fg_indices"],
         "meta": image.meta,
     }
-    L.save_indices(inds, L.indices_subfolder)  # T:self_ref|self.save_indices(inds, self.indices_subfolder)
+    L.save_indices(
+        inds, L.indices_subfolder
+    )  # T:self_ref|self.save_indices(inds, self.indices_subfolder)
     L.save_pt(image[0], "images")  # T:self_ref|self.save_pt(image[0], "images")
     L.save_pt(lm[0], "lms")  # T:self_ref|self.save_pt(lm[0], "lms")
     L.save_mask_pt(data, image)  # T:self_ref|self.save_mask_pt(data, image)
-    L.save_bbox_sidecar(data, fn_name)  # T:self_ref|self.save_bbox_sidecar(data, fn_name)
+    L.save_bbox_sidecar(
+        data, fn_name
+    )  # T:self_ref|self.save_bbox_sidecar(data, fn_name)
     pass  # T:early_return|_process_row ok
     # end PythonMethodScratch  # T:block_end|_LBDDetWorker._process_row
 # %%
@@ -408,4 +506,11 @@ if __name__ == "__main__":
     )
 # %%
     gen.run(num_processes=16)
+
+# %%
+    row = None
+# %%  # T:block_start|LabelBoundedDetDataGenerator._process_row
+# /home/ub/code/det3d/det3d/preprocessing/labelbounded.py  # T:block_donor|/home/ub/code/det3d/det3d/preprocessing/labelbounded.py
+# SECTION:-------------------- _process_row end --------------------------------------------------------------------------------------  # T:block_meta_end|LabelBoundedDetDataGenerator._process_row <CR>
+# end PythonMethodScratch  # T:block_end|LabelBoundedDetDataGenerator._process_row
 # %%

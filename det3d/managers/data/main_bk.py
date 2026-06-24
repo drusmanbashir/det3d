@@ -2,7 +2,7 @@ import json
 import resource
 from functools import partial
 from pathlib import Path
-from utilz.imageviewers import ImageBBoxViewer, ImageMaskViewer
+from utilz.imageviewers import ImageBBoxViewer
 from typing import Optional
 
 import numpy as np
@@ -13,11 +13,7 @@ from det3d.managers.data.valid_patch_stream import (
     PatchStreamDatasetDet,
     patch_stream_collate_fn,
 )
-from det3d.transforms.crop_indices import (
-    monai_crop_center_to_slices,
-    sample_crop_center_from_bboxes,
-    volume_fg_flat_indices,
-)
+from det3d.transforms.crop_indices import monai_crop_center_to_slices, volume_fg_flat_indices
 from fran.managers.data.valid_patch_stream import _pad_tensor_to_patch_size
 from det3d.utils.bbox_sidecar import bbox_sidecar_path, load_detection_sidecar, valid_detection_box
 from fran.configs.helpers import is_excel_None
@@ -36,36 +32,44 @@ from fran.managers.data.main import (
 from fran.preprocessing.helpers import import_h5py
 from fran.run.preproc.archive_preprocessed import ensure_rapid_data_folder
 from fran.transforms.imageio import TorchReader
+from fran.transforms.intensitytransforms import RandRandGaussianNoised
 from monai.apps.detection.transforms.dictionary import AffineBoxToWorldCoordinated, ClipBoxToImaged
 from monai.data import DataLoader, Dataset, MetaTensor
 from monai.transforms import (
     Compose,
+    DeleteItemsd,
     EnsureChannelFirstd,
     EnsureTyped,
     LoadImaged,
     MapTransform,
+    RandAdjustContrastd,
+    RandFlipd,
+    RandRotate90d,
+    RandRotated,
+    RandScaleIntensityd,
+    RandShiftIntensityd,
+    RandZoomd,
     ScaleIntensityRanged,
 )
-from monai.transforms.croppad.dictionary import ResizeWithPadOrCropd
-from monai.transforms.spatial.dictionary import ConvertBoxToPointsd, ConvertPointsToBoxesd, RandAffined
+from monai.transforms.spatial.dictionary import ConvertBoxToPointsd, ConvertPointsToBoxesd
 from monai.transforms.utility.dictionary import ApplyTransformToPointsd
 from fran.utils.folder_names import FolderNames
 from utilz.stringz import info_from_filename
 
 
-class LoadHDF5DetShardBBoxd(MapTransform):
-    """Load RandCrop bbox + src_dims from HDF5 shard."""
+class LoadHDF5DetShardIndexd(MapTransform):
+    """Load RandCrop fg index pool from HDF5."""
 
     def __init__(
         self,
         keys,
         manifest_fn: str,
-        box_key: str = "bbox",
+        fg_indices_key: str = "fg_indices",
         allow_missing_keys: bool = False,
     ):
         super().__init__(keys, allow_missing_keys)
         self.manifest_fn = Path(manifest_fn)
-        self.box_key = box_key
+        self.fg_indices_key = fg_indices_key
         self._manifest_cache = {}
 
     def _cached_manifest(self):
@@ -103,12 +107,12 @@ class LoadHDF5DetShardBBoxd(MapTransform):
         case_path = f"/cases/{case_id}"
         with h5py.File(shard_path, "r") as h5f:
             case_grp = h5f[case_path]
-            bbox = np.asarray(case_grp[self.box_key][:], dtype=np.float32)
+            fg = np.asarray(case_grp[self.fg_indices_key][:], dtype=np.int64).reshape(-1)
             src_dims = tuple(int(v) for v in case_grp["mask"].shape)
         d["hdf5_shard_path"] = str(shard_path)
         d["hdf5_case_path"] = case_path
         d["src_dims"] = src_dims
-        d[self.box_key] = bbox
+        d["fg_indices"] = fg
         return d
 
 
@@ -139,57 +143,6 @@ class RandCropByFgIndicesd(RandCropByFlatIndicesd):
             sample["crop_start"] = crop_start
             sample["crop_end"] = crop_end
             sample["sample_is_fg"] = bool(sample_is_fg)
-            sample["sampled_flat_index"] = sampled_flat_index
-            out.append(sample)
-        return out
-
-
-class RandCropByBBoxesd(RandCropByFgIndicesd):
-    """RandCropByFgIndicesd; pos centers where patch intersects bbox (whole_box=False)."""
-
-    def __init__(
-        self,
-        keys,
-        roi_size,
-        pos=1.0,
-        neg=1.0,
-        num_samples=1,
-        box_key="bbox",
-        src_dims_key="src_dims",
-        allow_missing_keys=False,
-    ):
-        RandCropByFgIndicesd.__init__(
-            self,
-            keys=keys,
-            roi_size=roi_size,
-            pos=pos,
-            neg=neg,
-            num_samples=num_samples,
-            fg_indices_key="fg_indices",
-            src_dims_key=src_dims_key,
-            allow_missing_keys=allow_missing_keys,
-        )
-        self.box_key = box_key
-
-    def __call__(self, data):
-        d = dict(data)
-        src_dims = tuple(int(v) for v in d[self.src_dims_key])
-        boxes = np.asarray(d[self.box_key], dtype=np.float32).reshape(-1, 6)
-        out = []
-        for _ in range(self.num_samples):
-            sample = dict(d)
-            choose_fg = self.R.rand() < self.pos / (self.pos + self.neg)
-            sample_is_fg = bool(choose_fg and boxes.shape[0] > 0)
-            center = sample_crop_center_from_bboxes(
-                boxes, self.roi_size, src_dims, sample_is_fg, self.R
-            )
-            sampled_flat_index = int(np.ravel_multi_index(center, src_dims))
-            crop_slices, crop_start, crop_end = self._compute_crop(center, src_dims)
-            sample["crop_center"] = center
-            sample["crop_slices"] = crop_slices
-            sample["crop_start"] = crop_start
-            sample["crop_end"] = crop_end
-            sample["sample_is_fg"] = sample_is_fg
             sample["sampled_flat_index"] = sampled_flat_index
             out.append(sample)
         return out
@@ -470,15 +423,7 @@ class DataManagerDet(DataManager):
     def __str__(self):
         return self.__repr__()
 
-    # def create_dataset(self):
-    #     self.ds = self._create_modal_ds()
 
-    def _create_modal_ds(self):
-        if is_excel_None(self.ds_type):
-            ds = Dataset(data=self.data, transform=self.transforms)
-        else:
-            ds = super()._create_modal_ds()
-        return ds
 
     def maybe_fix_remapping_dtype(self):
         pass
@@ -587,30 +532,30 @@ class DataManagerDet(DataManager):
         if num_workers > 0:
             dl_kwargs["prefetch_factor"] = 2
         self.dl = DataLoader(self.ds, **dl_kwargs)
-
-    def derive_data_folder(self, plan):
-        data_folder = Path(FolderNames(self.project, plan).folders["data_folder_lbd"])
-        data_folder = ensure_rapid_data_folder(data_folder)
-        if not data_folder.exists():
-            raise FileNotFoundError(f"Data folder {data_folder} does not exist")
-        images_dir = data_folder / "images"
-        bboxes_dir = data_folder / "bboxes"
-        if not images_dir.is_dir() or not bboxes_dir.is_dir():
-            raise FileNotFoundError(
-                f"Expected images/ and bboxes/ under {data_folder}"
-            )
-        if len(list(images_dir.glob("*.pt"))) == 0:
-            raise FileNotFoundError(f"No label-bounded cases under {images_dir}")
-        if len(list(bboxes_dir.glob("*.pt"))) > 0:
-            raise FileNotFoundError(
-                f"Legacy bbox .pt sidecars under {bboxes_dir}; re-preproc to JSON"
-            )
-        if len(list(bboxes_dir.glob("*.json"))) == 0:
-            raise FileNotFoundError(f"No bbox JSON sidecars under {bboxes_dir}")
-        csv_fn = data_folder / "dataset_details.csv"
-        if not csv_fn.is_file():
-            raise FileNotFoundError(f"Missing dataset_details.csv under {data_folder}")
-        return data_folder
+    #
+    # def derive_data_folder(self, plan):
+    #     data_folder = Path(FolderNames(self.project, plan).folders["data_folder_lbd"])
+    #     data_folder = ensure_rapid_data_folder(data_folder)
+    #     if not data_folder.exists():
+    #         raise FileNotFoundError(f"Data folder {data_folder} does not exist")
+    #     images_dir = data_folder / "images"
+    #     bboxes_dir = data_folder / "bboxes"
+    #     if not images_dir.is_dir() or not bboxes_dir.is_dir():
+    #         raise FileNotFoundError(
+    #             f"Expected images/ and bboxes/ under {data_folder}"
+    #         )
+    #     if len(list(images_dir.glob("*.pt"))) == 0:
+    #         raise FileNotFoundError(f"No label-bounded cases under {images_dir}")
+    #     if len(list(bboxes_dir.glob("*.pt"))) > 0:
+    #         raise FileNotFoundError(
+    #             f"Legacy bbox .pt sidecars under {bboxes_dir}; re-preproc to JSON"
+    #         )
+    #     if len(list(bboxes_dir.glob("*.json"))) == 0:
+    #         raise FileNotFoundError(f"No bbox JSON sidecars under {bboxes_dir}")
+    #     csv_fn = data_folder / "dataset_details.csv"
+    #     if not csv_fn.is_file():
+    #         raise FileNotFoundError(f"Missing dataset_details.csv under {data_folder}")
+    #     return data_folder
 
     def cases_from_project_split(self):
         ds_tokens = [x.strip() for x in self.plan["datasources"].split(",") if x.strip()]
@@ -726,8 +671,8 @@ class DataManagerDet(DataManager):
 
 class DataManagerDetSource(DataManagerDet, DataManagerSource):
     keys_tr = (
-        "Ld,Rtr,L2,E,Norm,BoxToWorld,ToPoints,Affine,AffinePts,ToBoxes,ResizePC,"
-        "BoxClip,IntensityTfms"
+        "Ld,Rtr,L2,E,Norm,BoxToWorld,ToPoints,Zoom,Flip0,Flip1,Flip2,Rand90,Rot,"
+        "AffinePts,ToBoxes,BoxClip,DelMask,IntensityTfms,Dtype"
     )
 
     def __init__(self, project, configs: dict, batch_size=8, cache_rate=0.0, **kwargs):
@@ -767,7 +712,6 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
         return data
 
     def create_transforms(self):
-        super().create_transforms()
         ik, bk, lk, mk, pk, lmk = (
             self.image_key,
             self.box_key,
@@ -780,74 +724,116 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
         use_lm = self.uses_lm_seg()
         if use_lm:
             load_keys.append(lmk)
-        spatial_aug_keys = [ik, mk]
+        spatial_aug_keys = [ik]
         if use_lm:
             spatial_aug_keys.append(lmk)
-        affine_modes = ["bilinear" if k == ik else "nearest" for k in spatial_aug_keys]
-        plan = self.plan
+        zoom_mode = ["bilinear", "nearest"] if use_lm else "bilinear"
+        rot_mode = ["linear", "nearest"] if use_lm else "linear"
         patch_size = self._patch_size()
-        scale = float(self.dataset_params["prezoom_scale"])
-        patch_size_prezoom = [int(v * scale) for v in patch_size]
+        plan = self.plan
+        compute_dtype = self._compute_dtype()
         affine_lps_to_ras = self.affine_lps_to_ras
         clip = self.dataset_params["intensity_clip_range"]
-        affine3d = self.configs["affine3d"]
 
-        self.transforms_dict["Ld"] = LoadHDF5DetShardBBoxd(
-            keys=["case_id"],
-            manifest_fn=str(self.hdf5_manifest_fn),
-            box_key=bk,
-        )
-        self.transforms_dict["Rtr"] = RandCropByBBoxesd(
-            keys=[ik],
-            roi_size=patch_size_prezoom,
-            num_samples=int(plan["samples_per_file"]),
-            pos=self.dataset_params["fgbg_ratio"],
-            neg=1,
-            box_key=bk,
-            src_dims_key="src_dims",
-        )
-        self.transforms_dict["L2"] = LoadHDF5DetCropd(keys=load_keys, box_key=bk)
-        self.transforms_dict["E"] = EnsureChannelFirstd(keys=load_keys)
-        self.transforms_dict["Affine"] = RandAffined(
-            keys=spatial_aug_keys,
-            mode=affine_modes,
-            prob=affine3d["p"],
-            rotate_range=affine3d["rotate_range"],
-            scale_range=affine3d["scale_range"],
-        )
-        self.transforms_dict["ResizePC"] = ResizeWithPadOrCropd(
-            keys=spatial_aug_keys,
-            spatial_size=patch_size,
-            lazy=False,
-        )
-        self.transforms_dict["Norm"] = ScaleIntensityRanged(
-            keys=[ik],
-            a_min=float(clip[0]),
-            a_max=float(clip[1]),
-            b_min=0.0,
-            b_max=1.0,
-            clip=True,
-        )
-        self.transforms_dict["BoxToWorld"] = AffineBoxToWorldCoordinated(
-            box_keys=[bk],
-            box_ref_image_keys=ik,
-            affine_lps_to_ras=affine_lps_to_ras,
-        )
-        self.transforms_dict["ToPoints"] = ConvertBoxToPointsd(keys=[bk])
-        self.transforms_dict["AffinePts"] = ApplyTransformToPointsd(
-            keys=[pk], refer_keys=ik, affine_lps_to_ras=affine_lps_to_ras
-        )
-        self.transforms_dict["ToBoxes"] = ConvertPointsToBoxesd(keys=[pk], box_key=bk)
-        self.transforms_dict["BoxClip"] = ClipBoxToImaged(
-            box_keys=bk,
-            label_keys=[lk],
-            box_ref_image_keys=ik,
-            remove_empty=True,
-        )
+        IntensityTfms = [
+            RandScaleIntensityd(
+                keys=[ik], factors=self.scale["value"], prob=self.scale["prob"]
+            ),
+            RandRandGaussianNoised(
+                keys=[ik], std_limits=self.noise["value"], prob=self.noise["prob"]
+            ),
+            RandShiftIntensityd(
+                keys=[ik], offsets=self.shift["value"], prob=self.shift["prob"]
+            ),
+            RandAdjustContrastd(
+                keys=[ik], gamma=self.contrast["value"], prob=self.contrast["prob"]
+            ),
+        ]
+
+        self.transforms_dict = {
+            "Ld": LoadHDF5DetShardIndexd(
+                keys=["case_id"],
+                manifest_fn=str(self.hdf5_manifest_fn),
+                fg_indices_key="fg_indices",
+            ),
+            "Rtr": RandCropByFgIndicesd(
+                keys=[ik],
+                roi_size=patch_size,
+                num_samples=int(plan["samples_per_file"]),
+                pos=1,
+                neg=1,
+                fg_indices_key="fg_indices",
+            ),
+            "L2": LoadHDF5DetCropd(keys=load_keys, box_key=bk),
+            "E": EnsureChannelFirstd(keys=load_keys),
+            "Norm": ScaleIntensityRanged(
+                keys=[ik],
+                a_min=float(clip[0]),
+                a_max=float(clip[1]),
+                b_min=0.0,
+                b_max=1.0,
+                clip=True,
+            ),
+            "BoxToWorld": AffineBoxToWorldCoordinated(
+                box_keys=[bk],
+                box_ref_image_keys=ik,
+                affine_lps_to_ras=affine_lps_to_ras,
+            ),
+            "ToPoints": ConvertBoxToPointsd(keys=[bk]),
+            "Zoom": RandZoomd(
+                keys=spatial_aug_keys,
+                prob=0.2,
+                min_zoom=0.7,
+                max_zoom=1.4,
+                padding_mode="constant",
+                keep_size=True,
+                mode=zoom_mode,
+            ),
+            "Flip0": RandFlipd(keys=spatial_aug_keys, prob=0.5, spatial_axis=0),
+            "Flip1": RandFlipd(keys=spatial_aug_keys, prob=0.5, spatial_axis=1),
+            "Flip2": RandFlipd(keys=spatial_aug_keys, prob=0.5, spatial_axis=2),
+            "Rand90": RandRotate90d(
+                keys=spatial_aug_keys, prob=0.75, max_k=3, spatial_axes=(0, 1)
+            ),
+            "Rot": RandRotated(
+                keys=spatial_aug_keys,
+                mode=rot_mode,
+                prob=0.2,
+                range_x=np.pi / 6,
+                range_y=np.pi / 6,
+                range_z=np.pi / 6,
+                keep_size=True,
+                padding_mode="zeros",
+            ),
+            "AffinePts": ApplyTransformToPointsd(
+                keys=[pk], refer_keys=ik, affine_lps_to_ras=affine_lps_to_ras
+            ),
+            "ToBoxes": ConvertPointsToBoxesd(keys=[pk], box_key=bk),
+            "BoxClip": ClipBoxToImaged(
+                box_keys=bk,
+                label_keys=[lk],
+                box_ref_image_keys=ik,
+                remove_empty=True,
+            ),
+            "DelMask": DeleteItemsd(keys=[mk]),
+            "IntensityTfms": IntensityTfms,
+            "Dtype": Compose(
+                [
+                    EnsureTyped(keys=[ik], dtype=compute_dtype),
+                    *(
+                        [EnsureTyped(keys=[lmk], dtype=torch.long)]
+                        if use_lm
+                        else []
+                    ),
+                    EnsureTyped(keys=[bk], dtype=torch.float32),
+                    EnsureTyped(keys=[lk], dtype=torch.long),
+                ]
+            ),
+        }
         ld = self.transforms_dict["Ld"]
-        if type(ld) is not LoadHDF5DetShardBBoxd:
+        if type(ld) is not LoadHDF5DetShardIndexd:
             raise RuntimeError(
-                f"det shard train must use LoadHDF5DetShardBBoxd, got {type(ld)}"
+                f"det shard train must use LoadHDF5DetShardIndexd, got {type(ld)}"
             )
 
 
@@ -1176,7 +1162,7 @@ if __name__ == "__main__":
     batch_size = 2
     batch_tfms = False
     debug_ = True
-    train_indices = 40
+    train_indices = None
     val_indices = 10
     val_sampling = 1.0
     device = 0
@@ -1201,96 +1187,24 @@ if __name__ == "__main__":
         batch_tfms=batch_tfms,
     )
 # %%
+
+# %%
+
+# %%  # T:block_start|DataManagerDet.derive_data_folder
+#SECTION:-------------------- derive_data_folder--------------------------------------------------------------------------------------  # T:block_meta|DataManagerDet.derive_data_folder
+#SECTION:--- prepare_data ---
+# %%
     D.prepare_data()
 
+#SECTION:--- setup fit ---
+# %%
     D.setup(stage="fit")
     tmt = D.train_manager
     tmv = D.valid_manager
+    tmt.data[0]
 
-# %%
-    dat = tmt.ds[0]
-    dat[0].keys()
-    img = dat[0]['image']
-    lm  = dat[0]['lm']
-    ImageMaskViewer([img, lm],'im')
-# %%
-#SECTION:-------------------- ts--------------------------------------------------------------------------------------
 #SECTION:--- train dataloader ---
 # %%
-# %%
-    tfms = tmt.transforms
-    tmt.keys
-    'Ld,Rtr,L2,E,Norm,BoxToWorld,ToPoints,Affine,AffinePts,ToBoxes,ResizePC,BoxClip,IntensityTfms'
-    tfms = tmt.transforms_dict
-#%%
-
-    dici = tmt.data[0]
-    L = tfms["Ld"]
-    dici = L(dici)
-    dici.keys()
-
-    R = tfms["Rtr"]
-    dici = R(dici)
-    dici = dici[0]
-    dici.keys()
-
-
-    L2 = tfms["L2"]
-    dici = L2(dici)
-    dici.keys()
-    dici['image'].shape
-    mask = dici['mask']
-    lm = dici["lm"]
-    im  = dici['image']
-    print(dici["crop_center"])
-
-# %%
-
-    E = tfms["E"]
-    dici = E(dici)
-
-    N = tfms["Norm"]
-    dici = N(dici)
-    dici.keys()
-
-    box = dici['bbox']
-    ImageBBoxViewer(im, box)
-
-    B = tfms["BoxToWorld"] # redundant
-    img = dici['image']
-    dici = B(dici)
-    box = dici['bbox']
-    print(box)
-
-    T = tfms["ToPoints"]
-    dici = T(dici)
-    dici['points']
-
-    Af = tfms["Affine"]
-    dici = Af(dici)
-
-    A = tfms["AffinePts"]
-    dici = A(dici)
-
-    To = tfms["ToBoxes"]
-    dici = To(dici)
-
-    RPC = tfms["ResizePC"]
-    dici = RPC(dici)
-    dici['image'].shape
-
-    dici['bbox']
-# %%
-    Bo = tfms["BoxClip"]
-    dici = Bo(dici)
-    print(dici['bbox'])
-    dici['mask'].shape
-
-    I = tfms["IntensityTfms"]
-    dici = I(dici)
-#%%
-# %%
-    print(dici.keys())
     tmt.setup()
     train_dl = tmt.dl
     print(f"train: {tmt}")

@@ -44,62 +44,33 @@ class RetinaUNetManager(LightningModule):
     def _nndet_targets(self, batch):
         from monai.data.box_utils import clip_boxes_to_image
         data = batch["image"]
-        forward_patch_size = self.plan["patch_size"]
-        spatial = tuple(int(v) for v in data.shape[-3:])
-        crop_sl = None
-        crop_starts = None
-        if any(s > p for s, p in zip(spatial, forward_patch_size)):
-            crop_starts = tuple(
-                max(0, (int(full) - int(ps)) // 2)
-                for full, ps in zip(spatial, forward_patch_size)
-            )
-            crop_sl = tuple(
-                slice(st, st + ps)
-                for st, ps in zip(crop_starts, forward_patch_size)
-            )
-            data = data[(..., *crop_sl)]
-
-        label_to_idx = {int(v): i for i, v in enumerate(self.plan["fg_labels"])}
-        target_seg_list = []
+        label_to_idx = {int(v): i for i, v in enumerate(self.plan["fg_labels"])}  # T:self_ref|label_to_idx = {int(v): i for i, v in enumerate(self.plan["fg_labels"])}
         target_boxes = []
         target_classes = []
-        for i in range(data.shape[0]):
-            lm_vol = batch["lm"][i][0].long()
-            if crop_sl is not None:
-                lm_vol = lm_vol[crop_sl]
-            target_seg_list.append(lm_vol)
+        for i in range(data.shape[0]):  # T:loop|for i in range(data.shape[0]):
             box = batch["bbox"][i]
-            if crop_starts is not None:
-                starts_t = torch.tensor(crop_starts, device=box.device, dtype=box.dtype)
-                shifted = box.clone()
-                for j in range(3):
-                    shifted[:, j] -= starts_t[j]
-                    shifted[:, j + 3] -= starts_t[j]
-                box, _ = clip_boxes_to_image(
-                    shifted, forward_patch_size, remove_empty=True
-                )
+            nndet_box = xyzxyz_exclusive_batch_to_nndet(box)  # T:indent|    nndet_box = xyzxyz_exclusive_batch_to_nndet(box)
+            target_boxes.append(nndet_box)  # T:indent|    target_boxes.append(nndet_box)
+            cls_ = batch["label"][i][: box.shape[0]]  # T:indent|    cls_ = batch["label"][i][: box.shape[0]]
+            mapped = torch.tensor(  # T:indent|    mapped = torch.tensor(
+                [label_to_idx[int(v.item())] for v in cls_],  # T:indent|        [label_to_idx[int(v.item())] for v in cls_],
+                dtype=torch.long,  # T:indent|        dtype=torch.long,
+                device=nndet_box.device,  # T:indent|        device=nndet_box.device,
+            )  # T:indent|    )
+            target_classes.append(mapped)  # T:indent|    target_classes.append(mapped)
 
-            nndet_box = xyzxyz_exclusive_batch_to_nndet(box)
-            target_boxes.append(nndet_box)
-
-            cls = batch["label"][i][: box.shape[0]]
-            mapped = torch.tensor(
-                [label_to_idx[int(v.item())] for v in cls],
-                dtype=torch.long,
-                device=nndet_box.device,
-            )
-            target_classes.append(mapped)
-
+        batch['lm'] = batch['lm'].squeeze(1)
         out = {
             "data": data,
             "target_boxes": target_boxes,
             "target_classes": target_classes,
-            "target_seg": torch.stack(target_seg_list, 0),
+            "target_seg": batch["lm"]
         }
         return out
 
     def _step_losses(self, batch, batch_idx, evaluation=False):
         nb = self._nndet_targets(batch)
+        nb.keys()
         losses, prediction = self.net.train_step(
             images=nb["data"],
             targets={

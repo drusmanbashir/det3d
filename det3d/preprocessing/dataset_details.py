@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 import torch
-from det3d.transforms.crop_indices import mask_fg_bg_flat_indices
+from det3d.transforms.crop_indices import volume_fg_flat_indices
 from det3d.utils.bbox_sidecar import bbox_sidecar_path, sidecar_bbox_empty
 from utilz.stringz import info_from_filename
 
@@ -10,9 +10,12 @@ from utilz.stringz import info_from_filename
 def dataset_details_from_mask_file(mask_fn, bbox_fn):
     mask_fn = Path(mask_fn)
     mask = torch.load(mask_fn, map_location="cpu", weights_only=False)
-    fg, bg = mask_fg_bg_flat_indices(mask)
+    if mask.ndim == 3:
+        mask = mask.unsqueeze(0)  # remove channel dim
+    fg = volume_fg_flat_indices(mask)
     n_fg = int(len(fg))
-    n_bg = int(len(bg))
+    n_voxels = int(mask.numel() if mask.ndim == 3 else mask[0].numel())
+    n_bg = n_voxels - n_fg
     return {
         "case_id": info_from_filename(mask_fn.name, full_caseid=True)["case_id"],
         "fn_name": mask_fn.name,

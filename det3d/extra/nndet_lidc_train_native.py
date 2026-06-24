@@ -11,7 +11,9 @@ import os
 import sys
 from copy import deepcopy
 from pathlib import Path
+from typing import List
 
+from nndet.core.retina import BaseRetinaNet
 import torch
 import yaml
 
@@ -80,6 +82,8 @@ if __name__ == "__main__":
     setup_nndet_env()
 
 # %%
+
+    B = BaseRetinaNet
 #SECTION:--- stage 0 — compose cfg + load plan ---
     from hydra import initialize_config_module
     from nndet.io.load import load_pickle
@@ -135,6 +139,8 @@ if __name__ == "__main__":
     train_batch.keys()
     pp(train_batch["instance_mapping"])
     print(lm.unique())
+    img = train_batch["data"]
+    ImageMaskViewer([img, lm],'im')
 
 # %%
 
@@ -172,9 +178,6 @@ if __name__ == "__main__":
     ImageMaskViewer([img,lm])
 # %%
 
-    step_out = module.training_step(train_batch_gpu, batch_idx=0)
-    print("losses", {k: step_out[k] for k in step_out if k != "loss"})
-    print("total", float(step_out["loss"]))
     bb2 = module.pre_trafo(**train_batch_gpu)
 # %%
     print(bb2.keys())
@@ -187,21 +190,20 @@ if __name__ == "__main__":
     img2.shape
     img2 = img2.to("cpu")
     bbox = bbox[0].to("cpu")
-    bbox[0].shape
-    bbox2 = bbox[0]
-    bbox2[0][0,2,4,1,3,5]
     bbox = bb2["boxes"][0]  # cuda ok for stack; .cpu() before viewer if needed
 # %%
     #nndet uses [x1, y1, x2, y2, z1, z2] convention; ImageBBoxViewer uses [x1, y1, x2, y2, z1, z2]
     #             0  1    2   3  4   5
-# %%
     bbox_viz = torch.stack(
         [bbox[:, 0], bbox[:, 1], bbox[:, 4], bbox[:, 2], bbox[:, 3], bbox[:, 5]], dim=1
     ).cpu()
+    bbox_list = [int(a) for a in bbox_viz[0].tolist()]
+    slcs = (slice(bbox_list[0],bbox_list[3]), slice(bbox_list[1],bbox_list[4]), slice(bbox_list[2],bbox_list[5]))
+
 # %%
+    im2=img[slcs]
+    ImageMaskViewer([im2, im2],'im')
     ImageBBoxViewer(img, bbox_viz)
-
-
     # ImageBBoxViewer(img, bbox)
 
 # %%
@@ -227,4 +229,108 @@ if __name__ == "__main__":
     print("val total", float(val_out["loss"]))
     clear_cuda_scratch()
 
-# end PythonMethodScratch
+# %%
+    batch = train_batch_gpu
+    batch_idx = 0
+# %%  # T:block_start|RetinaUNetV001.training_step
+# /home/ub/code/nnDetection/nndet/ptmodule/retinaunet/base.py  # T:block_donor|/home/ub/code/nnDetection/nndet/ptmodule/retinaunet/base.py
+#SECTION:-------------------- training_step --------------------------------------------------------------------------------------  # T:block_meta|RetinaUNetV001.training_step
+    """
+    Computes a single training step
+    See :class:`BaseRetinaNet` for more information
+    """
+    with torch.no_grad():
+        batch = module.pre_trafo(**batch)  # T:self_ref|    batch = self.pre_trafo(**batch)
+    losses, _ = module.model.train_step(  # T:self_ref|losses, _ = self.model.train_step(
+        images=batch["data"],
+        targets={
+            "target_boxes": batch["boxes"],
+            "target_classes": batch["classes"],
+            "target_seg": batch["target"][:, 0],  # Remove channel dimension
+        },
+        evaluation=False,
+        batch_num=batch_idx,
+    )
+    loss = sum(losses.values())
+    training_step_result = {"loss": loss, **{key: l.detach().item() for key, l in losses.items()}}  # T:return|return {"loss": loss, **{key: l.detach().item() for key, l in losses.items()}}
+
+# %%
+
+    images = bb2['data']
+    targets = {
+        "target_boxes": bb2["boxes"],
+        "target_classes": bb2["classes"],
+        "target_seg": bb2["target"][:, 0],  # Remove channel dimension
+            }
+    evaluation = True
+    batch_num = 0
+# %%
+    from torch import Tensor
+# %%  # T:block_start|BaseRetinaNet.train_step
+    B = module
+# /home/ub/code/nnDetection/nndet/core/retina.py  # T:block_donor|/home/ub/code/nnDetection/nndet/core/retina.py
+#SECTION:-------------------- train_step --------------------------------------------------------------------------------------  # T:block_meta|BaseRetinaNet.train_step
+    # requires B = BaseRetinaNet(...) in __main__  # T:requires_alias|B = BaseRetinaNet(...)
+    """
+    Perform a single training step (forward pass + loss computation)
+
+    Args:
+        images: batch of images
+        targets: labels for training
+            `target_boxes` (List[Tensor]): ground truth bounding boxes
+                (x1, y1, x2, y2, (z1, z2))[X, dim * 2], X= number of ground
+                truth boxes in image
+            `target_classes` (List[Tensor]): ground truth class per box
+                (classes start from 0) [X], X= number of ground truth
+                boxes in image
+            `target_seg`(Tensor): segmentation ground truth
+                (only needed if :param:`segmenter`
+                was provided in init) (classes start from 1, 0 background)
+        evaluation (bool): compute final predictions (includes detection
+            postprocessing)
+        batch_num (int): batch index inside epoch
+
+    Returns:
+        torch.Tensor: final loss for back propagation
+        Dict: predictions for metric calculation
+            'pred_boxes': List[Tensor]: predicted bounding boxes for each
+                image List[[R, dim * 2]]
+            'pred_scores': List[Tensor]: predicted probability for the
+                class List[[R]]
+            'pred_labels': List[Tensor]: predicted class List[[R]]
+            'pred_seg': Tensor: predicted segmentation [N, dims]
+        Dict[str, torch.Tensor]: scalars for logging (e.g. individual
+            loss components)
+    """
+    # import napari
+    # with napari.gui_qt():
+    #     viewer = napari.view_image(images.detach().cpu().numpy())
+    #     viewer.add_labels(seg_targets[:, None].detach().cpu().numpy())
+    target_boxes: List[Tensor] = targets["target_boxes"]
+    target_classes: List[Tensor] = targets["target_classes"]
+    target_seg: Tensor = targets["target_seg"]
+    pred_detection, anchors, pred_seg = B(images)  # T:self_ref|pred_detection, anchors, pred_seg = self(images)
+    labels, matched_gt_boxes = B.assign_targets_to_anchors(  # T:self_ref|labels, matched_gt_boxes = self.assign_targets_to_anchors(
+        anchors, target_boxes, target_classes)
+    losses = {}
+    head_losses, pos_idx, neg_idx = B.head.compute_loss(  # T:self_ref|head_losses, pos_idx, neg_idx = self.head.compute_loss(
+        pred_detection, labels, matched_gt_boxes, anchors)
+    losses.update(head_losses)
+    if B.segmenter is not None:  # T:self_ref|if self.segmenter is not None:
+        losses.update(B.segmenter.compute_loss(pred_seg, target_seg))  # T:self_ref|    losses.update(self.segmenter.compute_loss(pred_seg, target_seg))
+    if evaluation:
+        prediction = B.postprocess_for_inference(  # T:self_ref|    prediction = self.postprocess_for_inference(
+            images=images,
+            pred_detection=pred_detection,
+            pred_seg=pred_seg,
+            anchors=anchors,
+        )
+    else:
+        prediction = None
+    # self.save_matched_anchors(images=images, target_boxes=target_boxes,
+    #                             anchors=anchors, pos_idx=pos_idx,
+    #                             neg_idx=neg_idx, seg=seg_targets)
+    train_step_result = losses, prediction  # T:return|return losses, prediction
+#SECTION:-------------------- train_step end --------------------------------------------------------------------------------------  # T:block_meta_end|BaseRetinaNet.train_step
+    # end PythonMethodScratch  # T:block_end|BaseRetinaNet.train_step
+

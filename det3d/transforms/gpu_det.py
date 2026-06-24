@@ -1,11 +1,11 @@
 from det3d.managers.data.collate import attach_targets
 from monai.transforms.transform import MapTransform
-import numpy as np
 import torch
 from monai.apps.detection.transforms.dictionary import ClipBoxToImaged
 from monai.data import MetaTensor
-from monai.transforms import Compose, DeleteItemsd, EnsureTyped, RandFlipd, RandRotate90d, RandRotated, RandZoomd
-from monai.transforms.spatial.dictionary import ConvertPointsToBoxesd
+from monai.transforms import Compose
+from monai.transforms.croppad.dictionary import ResizeWithPadOrCropd
+from monai.transforms.spatial.dictionary import ConvertPointsToBoxesd, RandAffined
 from monai.transforms.utils import to_affine_nd
 from monai.utils.type_conversion import convert_to_dst_type
 
@@ -148,18 +148,20 @@ class BatchItemCompose:
                 val = d[key]
                 if isinstance(val, list):
                     item[key] = val[i]
+                elif torch.is_tensor(val) and val.shape[0] == n:
+                    item[key] = val[i]
                 else:
                     item[key] = val
             items.append(self.tfms(item))
         d[self.image_key] = torch.stack([it[self.image_key] for it in items], 0)
         d[self.box_key] = [it[self.box_key] for it in items]
         d[self.label_key] = [it[self.label_key] for it in items]
-        if self.lm_key is not None and self.lm_key in d:
-            d[self.lm_key] = [it[self.lm_key] for it in items]
+        if self.mask_key in items[0]:
+            d[self.mask_key] = torch.stack([it[self.mask_key] for it in items], 0)
+        if self.lm_key is not None and self.lm_key in items[0]:
+            d[self.lm_key] = torch.stack([it[self.lm_key] for it in items], 0)
         if self.point_key in d:
             del d[self.point_key]
-        if self.mask_key in d:
-            del d[self.mask_key]
         return attach_targets(d, self.box_key, self.label_key)
 
 
@@ -173,59 +175,29 @@ def build_train_gpu_tail_compose(
     mask_key,
     lm_key=None,
     affine_lps_to_ras,
-    compute_dtype,
     intensity_tfms,
+    affine3d,
+    patch_size,
     spatial_prob=1.0,
 ):
     p = float(spatial_prob)
-    spatial_keys = [image_key]
-    zoom_mode = "bilinear"
-    rot_mode = "linear"
+    spatial_keys = [image_key, mask_key]
+    affine_mode = ["bilinear", "nearest"]
     if lm_key is not None:
         spatial_keys.append(lm_key)
-        zoom_mode = ["bilinear", "nearest"]
-        rot_mode = ["linear", "nearest"]
-    dev_keys = [image_key, point_key, label_key]
-    if lm_key is not None:
-        dev_keys.insert(1, lm_key)
+        affine_mode.append("nearest")
     sync_meta_keys = [image_key, point_key]
     if lm_key is not None:
         sync_meta_keys.insert(1, lm_key)
-    dtype_tfms = [
-        EnsureTyped(keys=[image_key], dtype=compute_dtype),
-        EnsureTyped(keys=[box_key], dtype=torch.float32),
-        EnsureTyped(keys=[label_key], dtype=torch.long),
-    ]
-    if lm_key is not None:
-        dtype_tfms.insert(1, EnsureTyped(keys=[lm_key], dtype=torch.long))
     return Compose(
         [
-            # DetToDeviced(keys=dev_keys, device=device),
             SyncPointsMetaToImaged(point_key=point_key, image_key=image_key),
-            RandZoomd(
+            RandAffined(
                 keys=spatial_keys,
-                prob=0.2 * p,
-                min_zoom=0.7,
-                max_zoom=1.4,
-                padding_mode="constant",
-                keep_size=True,
-                mode=zoom_mode,
-            ),
-            RandFlipd(keys=spatial_keys, prob=0.5 * p, spatial_axis=0),
-            RandFlipd(keys=spatial_keys, prob=0.5 * p, spatial_axis=1),
-            RandFlipd(keys=spatial_keys, prob=0.5 * p, spatial_axis=2),
-            RandRotate90d(
-                keys=spatial_keys, prob=0.75 * p, max_k=3, spatial_axes=(0, 1)
-            ),
-            RandRotated(
-                keys=spatial_keys,
-                mode=rot_mode,
-                prob=0.2 * p,
-                range_x=np.pi / 6,
-                range_y=np.pi / 6,
-                range_z=np.pi / 6,
-                keep_size=True,
-                padding_mode="zeros",
+                mode=affine_mode,
+                prob=float(affine3d["p"]) * p,
+                rotate_range=affine3d["rotate_range"],
+                scale_range=affine3d["scale_range"],
             ),
             SyncMetaAffined(keys=sync_meta_keys),
             GpuApplyTransformToPointsd(
@@ -234,14 +206,17 @@ def build_train_gpu_tail_compose(
                 affine_lps_to_ras=affine_lps_to_ras,
             ),
             ConvertPointsToBoxesd(keys=[point_key], box_key=box_key),
+            ResizeWithPadOrCropd(
+                keys=spatial_keys,
+                spatial_size=tuple(int(v) for v in patch_size),
+                lazy=False,
+            ),
             ClipBoxToImaged(
                 box_keys=box_key,
                 label_keys=[label_key],
                 box_ref_image_keys=image_key,
                 remove_empty=True,
             ),
-            DeleteItemsd(keys=[mask_key]),
             *intensity_tfms,
-            Compose(dtype_tfms),
         ]
     )
