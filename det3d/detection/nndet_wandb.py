@@ -20,6 +20,7 @@ from fran.managers.wandb.wandb import (
     wandb_run_exists,
 )
 from fran.trainers.trainer import _flatten_dict
+import pytorch_lightning as pl
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from utilz.stringz import ast_literal_eval, headline
 
@@ -123,7 +124,6 @@ def install_nndet_pl2_val_hooks(module) -> None:
 
 def patch_nndet_module_pl2(module, *, log_train_det_loss: bool = False) -> None:
     """nnDetection targets PL 1.x; dl env uses Lightning 2.x epoch-end hooks."""
-    import pytorch_lightning as pl
     from nndet.ptmodule.retinaunet.v001 import RetinaUNetV001
 
     pl_major = int(pl.__version__.split(".")[0])
@@ -362,8 +362,6 @@ def build_nndet_pl_trainer_kwargs(
     ckpt_path: Path | None = None,
     check_val_every_n_epoch: int = 1,
 ) -> dict:
-    import pytorch_lightning as pl
-
     pl_major = int(pl.__version__.split(".")[0])
     trainer_kwargs: dict[str, Any] = {
         "max_epochs": int(max_epochs),
@@ -403,8 +401,10 @@ def build_nndet_pl_trainer_kwargs(
 
 def fit_nndet_module(
     module,
-    datamodule,
+    datamodule=None,
     *,
+    train_dataloaders=None,
+    val_dataloaders=None,
     train_dir: Path,
     trainer_cfg: dict,
     task: str,
@@ -427,8 +427,10 @@ def fit_nndet_module(
     after_pl2_patch=None,
 ):
     """Lightning fit with local + W&B checkpoint parity (TrainerDet-style)."""
-    import pytorch_lightning as pl
     from nndet.io.load import save_pickle
+
+    if datamodule is None and train_dataloaders is None:
+        raise ValueError("fit_nndet_module needs datamodule or train_dataloaders")
 
     trainer_cfg = deepcopy(trainer_cfg)
     if max_epochs is not None:
@@ -501,7 +503,15 @@ def fit_nndet_module(
     fit_kwargs = {}
     if ckpt_path is not None and int(pl.__version__.split(".")[0]) >= 2:
         fit_kwargs["ckpt_path"] = str(ckpt_path)
-    trainer.fit(module, datamodule=datamodule, **fit_kwargs)
+    if datamodule is not None:
+        trainer.fit(module, datamodule=datamodule, **fit_kwargs)
+    else:
+        trainer.fit(
+            module,
+            train_dataloaders=train_dataloaders,
+            val_dataloaders=val_dataloaders,
+            **fit_kwargs,
+        )
     return {
         "trainer": trainer,
         "train_dir": train_dir,

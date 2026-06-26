@@ -1,14 +1,12 @@
 """Det3d fast nnDetection path — LBD HDF5 + disk sidecar boxes, no materialize.
 
-Uses ``DataManagerDetLBDBTfms``: item load/crop/norm/box-points on CPU, then
-``GpuTail`` batch tfms (GPU RandAffine + intensity) via ``on_after_batch_transfer``
+Baseline: ``DataManagerDualDet`` — full train item tfms on CPU
+(``Ld,Rtr,L2,E,Norm,F1,F2,Affine,ResizePC,BoxClip,IntensityTfms``).
+
+Optional ``use_gpu_tail=True``: ``DataManagerDualDetBTfms`` — load/crop/norm on CPU,
+``GpuTail`` batch tfms (GPU RandAffine + intensity) via ``on_after_batch_transfer``.
+
 → ``det3d_batch_to_nndet`` → ``RetinaUNetV001`` → ``fit_nndet_module``.
-
-Train item ``keys`` (``DataManagerDetSourceBTfms.keys_tr``):
-
-``Ld,Rtr,L2,E,Norm,BoxToWorld,ToPoints``
-
-Train batch ``keys`` (``keys_tr_batch``): ``GpuTail`` — spatial + intensity on GPU.
 
 Val (``valid_impl``): ``patch_stream`` → ``L,E,BoxClip,Norm,DtypeVal``;
 ``bbox_anchor`` → ``L,E,Norm,BboxCrop,CropPatch,PadPatch,BoxClip,DtypeVal``.
@@ -22,36 +20,40 @@ from copy import deepcopy
 from pathlib import Path
 from typing import List, Optional, Sequence
 
-from det3d.extra.trainer_nndet import (
-    apply_det3d_plan_to_nndet_model_cfg,
-    load_nndet_train_cfgs,
-    plan_from_det3d,
-)
+from nndet.ptmodule.retinaunet import RetinaUNetV001
+
 from fran.managers.project import Project
 from omegaconf import OmegaConf
-from pytorch_lightning import LightningDataModule
 
 from det3d.configs.parser import ConfigMakerDet
 from det3d.detection.nndet_train import (
     build_nndet_retinaunet_module,
     det3d_batch_to_nndet,
-    ensure_nndet_importable,
     forward_patch_size_from_configs,
     maybe_store_batch_grid_preds,
 )
 from det3d.extra.nndet_native_lbd import setup_nndet_env
+from det3d.managers.data import DataManagerDualDet, DataManagerDualDetBTfms
 from det3d.managers.data.batch_tfms import DataManagerDetLBDBTfms
-from det3d.managers.data.main import DataManagerDetLBD, DataManagerDetSource
+from det3d.managers.data.main import DataManagerDetLBD
+from det3d.preprocessing.run_build import build_from_plan
+from utilz.imageviewers import ImageBBoxViewer, ImageMaskBboxViewer
 
 FAST_DM_KEYS_TR = DataManagerDetLBDBTfms.keys_tr
 FAST_DM_KEYS_TR_BATCH = DataManagerDetLBDBTfms.keys_tr_batch
 FAST_DM_KEYS_VAL_SEG = DataManagerDetLBD.keys_val_seg
-from det3d.preprocessing.run_build import build_from_plan
-from utilz.imageviewers import ImageBBoxViewer
 
 DEFAULT_FAST_DET_MODELS = Path("/s/agent_rw/nndet_models_benchmark")
 DEFAULT_FAST_PROJECT = "lidca"
 DEFAULT_FAST_PLAN_ID = 4
+_DET_PIPELINE_MODES = frozenset({"det", "lbd"})
+
+
+def _normalize_plan_modes_lbd(conf: dict) -> None:
+    for key in ("plan_train", "plan_valid", "plan_test"):
+        plan = conf[key]
+        if plan["mode"] in _DET_PIPELINE_MODES:
+            plan["mode"] = "lbd"
 
 
 def resolve_lbd_fg_case_ids(
@@ -81,119 +83,62 @@ def setup_det3d_fast_dm(
     project_title: str = DEFAULT_FAST_PROJECT,
     plan_id: int = DEFAULT_FAST_PLAN_ID,
     *,
+    train_case_ids: List[str] | None = None,
+    val_case_ids: List[str] | None = None,
     case_ids: List[str] | None = None,
     batch_size: int = 1,
+    fold: int = 0,
     debug: bool = False,
-    use_gpu_tail: bool = True,
-) -> DataManagerDetLBD:
-    P = Project(project_title)
-    C = ConfigMakerDet(P)
-    C.setup(plan_id)
-    conf = deepcopy(C.configs)
-    conf["dataset_params"]["fold"] = 0
-    conf["dataset_params"]["batch_size"] = int(batch_size)
-    _, conf = build_from_plan(project_title, plan_id, configs=conf)
-
-    dm_cls = DataManagerDetLBDBTfms if use_gpu_tail else DataManagerDetLBD
-    dm = dm_cls(
-        P,
-        conf,
-        batch_size=int(batch_size),
-        split="train",
-        device="cuda",
-        debug=debug,
-    )
+    use_gpu_tail: bool = False,
+):
+    # AI
+    """TrainerDet-style DualDet datamodule for hybrid fast LBD (GpuTail when use_gpu_tail)."""
     from det3d.managers.data.labels import infer_det_labels_from_data_folder
 
+    if train_case_ids is None:
+        train_case_ids = case_ids
+
+    C = ConfigMakerDet(Project(project_title))
+    C.setup(plan_id)
+    conf = deepcopy(C.configs)
+    conf["dataset_params"]["fold"] = int(fold)
+    conf["dataset_params"]["batch_size"] = int(batch_size)
+    _, conf = build_from_plan(project_title, plan_id, configs=conf)
+    _normalize_plan_modes_lbd(conf)
+
+    dm_cls = DataManagerDualDetBTfms if use_gpu_tail else DataManagerDualDet
+    dm = dm_cls(
+        project_title=project_title,
+        configs=conf,
+        batch_size=int(batch_size),
+        cache_rate=conf["dataset_params"]["cache_rate"],
+        device="cuda",
+        ds_type=conf["dataset_params"]["ds_type"],
+        train_indices=train_case_ids,
+        val_indices=val_case_ids,
+        val_sampling=1.0,
+        debug=debug,
+        batch_tfms=use_gpu_tail,
+    )
     dm.prepare_data()
-    infer_det_labels_from_data_folder(dm, dm.configs)
-    if case_ids is not None:
-        dm.select_cases_from_inds(list(case_ids))
-        dm.data = dm.create_data_dicts(dm.cases)
-    dm.setup()
-    collate_name = getattr(dm.collate_fn, "__name__", repr(dm.collate_fn))
-    print(f"fast LBD train keys: {dm.keys}")
-    if dm.transforms_batch is not None:
+    infer_det_labels_from_data_folder(dm=dm, configs=dm.configs)
+    dm.setup(stage="fit")
+
+    train_m = dm.train_manager
+    collate_name = getattr(train_m.collate_fn, "__name__", repr(train_m.collate_fn))
+    print(
+        f"fast LBD train: {type(train_m).__name__} n={len(train_m.cases)} keys={train_m.keys}"
+    )
+    if train_m.transforms_batch is not None:
         print(f"fast LBD train batch tfms: {FAST_DM_KEYS_TR_BATCH}")
     print(f"fast LBD train collate_fn: {collate_name}")
-    return dm
-
-
-class Det3dFastLbdDataModule(LightningDataModule):
-    """Lightning datamodule: ``DataManagerDetLBDBTfms`` + GpuTail on batch transfer."""
-
-    def __init__(
-        self,
-        train_dm: DataManagerDetLBD,
-        val_dm: DataManagerDetLBD | None = None,
-    ):
-        super().__init__()
-        self.train_dm = train_dm
-        self.val_dm = val_dm
-
-    def setup(self, stage: str | None = None) -> None:
-        if self.train_dm.ds is None:
-            self.train_dm.create_dataset()
-        if self.train_dm.dl is None:
-            self.train_dm.create_dataloader()
-        if self.val_dm is not None:
-            if self.val_dm.ds is None:
-                self.val_dm.create_dataset()
-            if self.val_dm.dl is None:
-                self.val_dm.create_dataloader()
-
-    def _apply_batch_tfms(self, batch, dataloader_idx):
-        if not isinstance(batch, dict) or "image" not in batch:
-            return batch
-        if self.trainer.training:
-            manager = self.train_dm
-        elif self.trainer.validating or self.trainer.sanity_checking:
-            manager = self.val_dm
-        else:
-            return batch
-        if manager is None or manager.transforms_batch is None:
-            return batch
-        return manager.transforms_batch(batch)
-
-    def on_after_batch_transfer(self, batch, dataloader_idx):
-        return self._apply_batch_tfms(batch, dataloader_idx)
-
-    def train_dataloader(self):
-        self.setup()
-        return self.train_dm.dl
-
-    def val_dataloader(self):
-        if self.val_dm is None:
-            return []
-        self.setup()
-        return self.val_dm.dl
-
-
-def setup_det3d_fast_val_dm(
-    train_dm: DataManagerDetLBD,
-    case_ids: List[str] | None = None,
-    *,
-    batch_size: int = 1,
-) -> DataManagerDetLBD:
-    if case_ids is None:
-        case_ids = resolve_lbd_fg_case_ids(
-            train_dm.project, train_dm.configs, split="valid"
-        )
-    val_dm = DataManagerDetLBD(
-        train_dm.project,
-        train_dm.configs,
-        batch_size=int(batch_size),
-        split="valid",
-        debug=False,
+    val_m = dm.valid_manager
+    val_collate = getattr(val_m.collate_fn, "__name__", repr(val_m.collate_fn))
+    print(
+        f"fast LBD val: {type(val_m).__name__} n={len(val_m.cases)} keys={val_m.keys}"
     )
-    val_dm.prepare_data()
-    val_dm.select_cases_from_inds(list(case_ids))
-    val_dm.data = val_dm.create_data_dicts(val_dm.cases)
-    val_dm.setup()
-    collate_name = getattr(val_dm.collate_fn, "__name__", repr(val_dm.collate_fn))
-    print(f"fast LBD val keys: {val_dm.keys}")
-    print(f"fast LBD val collate_fn: {collate_name}")
-    return val_dm
+    print(f"fast LBD val collate_fn: {val_collate}")
+    return dm
 
 
 def _log_nndet_losses(pl_module, losses, prefix):
@@ -300,14 +245,14 @@ def run_det3d_fast_training_loop(
     tags: Optional[Sequence[str]] = None,
     notes: str = "",
     extra_callbacks=None,
-    wandb_grid_epoch_freq: int = 20,
+    wandb_grid_epoch_freq: int = 10,
     val_every_n_epochs: int = 20,
     permanent_checkpoint_every_n_epochs: int = 100,
     val_batches_per_epoch: int | None = None,
     val_case_ids: List[str] | None = None,
     val_enabled: bool = True,
     debug: bool = False,
-    use_gpu_tail: bool = True,
+    use_gpu_tail: bool = False,
 ):
     from scripts.train import init_train_dir
 
@@ -317,26 +262,22 @@ def run_det3d_fast_training_loop(
     )
 
     setup_nndet_env(det_models=det_models)
-    dm = setup_det3d_fast_dm(
+    datamodule = setup_det3d_fast_dm(
         project_title,
         plan_id,
-        case_ids=case_ids,
+        train_case_ids=case_ids,
+        val_case_ids=val_case_ids if val_enabled else None,
         batch_size=batch_size,
         debug=debug,
         use_gpu_tail=use_gpu_tail,
     )
-    val_dm = None
-    if val_enabled:
-        val_dm = setup_det3d_fast_val_dm(dm, val_case_ids, batch_size=batch_size)
-    datamodule = Det3dFastLbdDataModule(dm, val_dm=val_dm)
-    datamodule.setup()
 
     if batches_per_epoch is None:
         batches_per_epoch = len(datamodule.train_dataloader())
-    if val_enabled and val_batches_per_epoch is None and val_dm is not None:
+    if val_enabled and val_batches_per_epoch is None:
         val_batches_per_epoch = len(datamodule.val_dataloader())
 
-    configs = dm.configs
+    configs = datamodule.configs
     fg_labels = configs["plan_train"]["fg_labels"]
     fps = forward_patch_size_from_configs(configs)
     module, plan = build_nndet_retinaunet_module(
@@ -374,14 +315,23 @@ def run_det3d_fast_training_loop(
     if wandb and val_enabled:
         grid_cb = build_nndet_retinaunet_wandb_grid_callback(
             configs,
-            dm.project.log_folder,
+            datamodule.project.log_folder,
             wandb_grid_epoch_freq=int(wandb_grid_epoch_freq),
         )
         callbacks.append(grid_cb)
+        print(
+            f"fast LBD wandb grid callback epoch_freq={wandb_grid_epoch_freq} "
+            f"local={Path(datamodule.project.log_folder) / 'wandb_grid'}",
+            flush=True,
+        )
 
-    res =  fit_nndet_module(
+    train_dl = datamodule.train_dataloader()
+    val_dl = datamodule.val_dataloader() if val_enabled else None
+
+    res = fit_nndet_module(
         module,
-        datamodule,
+        train_dataloaders=train_dl,
+        val_dataloaders=val_dl,
         train_dir=train_dir,
         trainer_cfg=trainer_cfg,
         task="det3d_fast_lbd",
@@ -406,36 +356,7 @@ def run_det3d_fast_training_loop(
         after_pl2_patch=_reapply_fast_patch,
     )
 
-
     return res
-
-def build_nndet_retinaunet_module(configs, num_train_batches):
-    ensure_nndet_importable()
-    from nndet.ptmodule.retinaunet.v001 import RetinaUNetV001
-
-    from det3d.configs.parser import resolve_nndet_plan_path
-
-    plan_train = configs["plan_train"]
-    plan_path = configs["model_params"].get("nndet_plan_path")
-    if plan_path is None:
-        plan_path = resolve_nndet_plan_path(
-            configs["mnemonic"], Path(configs["configurations_dir"])
-        )
-    else:
-        plan_path = Path(plan_path)
-    if not plan_path.is_file():
-        raise FileNotFoundError(plan_path)
-    model_cfg, trainer_cfg = load_nndet_train_cfgs()
-    model_cfg = apply_det3d_plan_to_nndet_model_cfg(model_cfg, plan_train)
-    trainer_cfg["num_train_batches_per_epoch"] = int(num_train_batches)
-    trainer_cfg["max_num_epochs"] = int(configs["model_params"].get("max_epochs", 600))
-    plan = plan_from_det3d(plan_train, plan_path=str(plan_path))
-    module = RetinaUNetV001(
-        model_cfg=model_cfg,
-        trainer_cfg=trainer_cfg,
-        plan=plan,
-    )
-    return module, plan
 
 
 # %%
@@ -443,6 +364,7 @@ if __name__ == "__main__":
 # SECTION:--- setup ---
     import torch
 
+    #RetinaUNetV001
     project_title = DEFAULT_FAST_PROJECT
     plan_id = DEFAULT_FAST_PLAN_ID
     det_models = DEFAULT_FAST_DET_MODELS
@@ -455,80 +377,64 @@ if __name__ == "__main__":
 
 # %%
 # SECTION:--- repl knobs ---
-    repl_n_cases = 8
+    repl_n_cases = 100
+    repl_val_cases = 30
     batch_size = 1
-    device_id = 1
+    device_id = 0
     full_run = False
+    use_gpu_tail = False
 
 # %%
-# SECTION:--- build dm + module ---
+# SECTION:--- build dm + module (mirror run_det3d_fast_training_loop setup) ---
     setup_nndet_env(det_models=det_models)
     repl_train_ids = resolve_lbd_fg_case_ids(
         P, conf, split="train", n_cases=repl_n_cases
     )
     repl_val_ids = resolve_lbd_fg_case_ids(
-        P, conf, split="valid", n_cases=min(4, repl_n_cases)
+        P, conf, split="valid", n_cases=repl_val_cases
     )
     print(f"repl train={len(repl_train_ids)} val={len(repl_val_ids)}")
 
-    dm = setup_det3d_fast_dm(
+    datamodule = setup_det3d_fast_dm(
         project_title,
         plan_id,
-        case_ids=repl_train_ids,
+        train_case_ids=repl_train_ids,
+        val_case_ids=repl_val_ids,
         batch_size=batch_size,
+        use_gpu_tail=use_gpu_tail,
     )
-# %%
-    val_dm = setup_det3d_fast_val_dm(dm, repl_val_ids, batch_size=batch_size)
-    dm = Det3dFastLbdDataModule(dm, val_dm)
-    tm=dm.train_dm
-    dm.setup()
-
-    configs = dm.configs
-    configs = conf
-    fg_labels = [1,2,3]
-    fps = forward_patch_size_from_configs(configs)
-# %
-# SECTION:-------------------- BUILD RetinaUNet--------------------------------------------------------------------------------------
-    ensure_nndet_importable()
-    from nndet.ptmodule.retinaunet.v001 import RetinaUNetV001
-    from det3d.configs.parser import resolve_nndet_plan_path
-    num_train_batches = len(dm.train_dataloader())
-    plan_train = configs["plan_train"]
-    plan_path = resolve_nndet_plan_path(
-            configs["mnemonic"], Path(configs["configurations_dir"])
-        )
-    if not plan_path.is_file():
-        raise FileNotFoundError(plan_path)
-    model_cfg, trainer_cfg = load_nndet_train_cfgs()
-    model_cfg = apply_det3d_plan_to_nndet_model_cfg(model_cfg, plan_train)
-    trainer_cfg["num_train_batches_per_epoch"] = int(num_train_batches)
-    trainer_cfg["max_num_epochs"] = int(configs["model_params"].get("max_epochs", 600))
-    plan = plan_from_det3d(plan_train, plan_path=str(plan_path))
-# %%
-    R = RetinaUNetV001(
-        model_cfg=model_cfg,
-        trainer_cfg=trainer_cfg,
-        plan=plan,
-    )
-
-# %%
+    train_m = datamodule.train_manager
+    configs = datamodule.configs
+    fg_labels = configs["plan_train"]["fg_labels"]
+    patch_size = forward_patch_size_from_configs(configs)
+    batches_per_epoch = len(datamodule.train_dataloader())
     R, nndet_plan = build_nndet_retinaunet_module(
-        configs, num_train_batches=len(dm.train_dataloader())
+        configs, num_train_batches=batches_per_epoch
     )
-    patch_module_for_det3d_fast_batch(
-        R, fg_labels=fg_labels, forward_patch_size=fps
-    )
+    patch_module_for_det3d_fast_batch(R, fg_labels=fg_labels, forward_patch_size=patch_size)
 
+    iteri = iter(datamodule.train_dataloader())
 # %%
 # SECTION:--- inspect batch ---
-    train_dl = dm.train_dataloader()
-    val_dl = dm.val_dataloader()
-    iteri = iter(train_dl)
     train_batch = next(iteri)
+    print(train_batch.keys())
+    print(train_batch["instances"])
+    print(train_batch['lm'].unique())
+    print(train_batch['bbox'][0].shape)
+# %%
+
+    if train_m.transforms_batch is not None:
+        train_batch = train_m.transforms_batch(train_batch)
     train_batch.keys()
-    print(train_batch['image'].min(), train_batch['image'].max(), train_batch['image'].dtype)
     print(
-        train_batch["image"].shape, train_batch["bbox"].shape, train_batch["lm"].shape
+        train_batch["image"].min(),
+        train_batch["image"].max(),
+        train_batch["image"].dtype,
+    )
+    print(
+        train_batch["image"].shape,
+        train_batch["bbox"][0].shape,
+        train_batch["lm"].shape,
     )
 
 # %%
@@ -539,45 +445,25 @@ if __name__ == "__main__":
         k: v.to(device) if torch.is_tensor(v) else v for k, v in train_batch.items()
     }
 # %%
-    batch_dev.keys()
-    print(batch_dev['bbox'])
-    box = batch_dev["bbox"][0]
-    img = batch_dev["image"][0]
-
-    ImageBBoxViewer(img, box)
-    batch_dev["image"].dtype
-    batch_dev["image"].min()
-    batch_dev['points']
-    print(batch_dev.keys())
-    b2 = batch_dev["bbox"][0].clone()
-    train_out = R.training_step(batch_dev, 0)
     batch = batch_dev
-    fg = list(fg_labels)
-    nb = det3d_batch_to_nndet(batch, forward_patch_size=fps, fg_labels=fg)
-    batch = nb
-    batch["target"] = batch["target_seg"]
+    batch_idx = 0
+    print(batch.keys())
+    box = batch["bbox"][0]
+    img = batch["image"]
+    lm = batch["lm"][0]
+    lm.unique()
+# %%
+    ImageBBoxViewer(img, box)
+    ImageMaskBboxViewer(img,lm,box)
+
 
 # %%
-
-#SECTION:-------------------- training_step --------------------------------------------------------------------------------------
-    with torch.no_grad():
-        batch = R.pre_trafo(**batch)
-
-    losses, _ = R.model.train_step(
-        images=batch["data"],
-        targets={
-            "target_boxes": batch["boxes"],
-            "target_classes": batch["classes"],
-            "target_seg": batch["target"][:, 0],
-        },
-        evaluation=False,
-        batch_num=0,
-    )
-    loss = sum(losses.values())
+    train_out = R.training_step(batch_dev, 0)
+    train_out
 
 # %%
 # SECTION:--- single val step ---
-    val_batch = next(iter(val_dl))
+    val_batch = next(iter(datamodule.val_dataloader()))
     val_batch_dev = {
         k: v.to(device) if torch.is_tensor(v) else v for k, v in val_batch.items()
     }
@@ -587,19 +473,16 @@ if __name__ == "__main__":
 
 # %%
 # SECTION:--- full run knobs ---
-    epochs = 500 if full_run else 2
+    epochs = 500 if full_run else 100
     run_name = "DET3D-FAST-LBD-E500-FULL"
     wandb = True
-    wandb_grid_epoch_freq = 20
+    wandb_grid_epoch_freq = 10
     val_every_n_epochs = 20
     permanent_checkpoint_every_n_epochs = 100
     train_mode = "overwrite"
     tags = ["det3d_fast_lbd", "disk_boxes", "nndet_v001"]
     notes = "det3d fast LBD nnDet path"
-    train_ids = train_ids[:50]
-    val_ids = val_ids[:10]
 
-    full_run=True
 # %%
 # SECTION:--- fit ---
     if full_run:
@@ -625,6 +508,7 @@ if __name__ == "__main__":
             val_every_n_epochs=val_every_n_epochs,
             val_batches_per_epoch=None,
             permanent_checkpoint_every_n_epochs=permanent_checkpoint_every_n_epochs,
+            use_gpu_tail=use_gpu_tail,
         )
     else:
         fit_out = run_det3d_fast_training_loop(
@@ -642,10 +526,43 @@ if __name__ == "__main__":
             run_name=None,
             tags=tags,
             notes="repl smoke",
-            wandb_grid_epoch_freq=1,
-            val_every_n_epochs=1,
-            val_batches_per_epoch=2,
-            permanent_checkpoint_every_n_epochs=epochs + 1,
+            wandb_grid_epoch_freq=wandb_grid_epoch_freq,
+            val_every_n_epochs=val_every_n_epochs,
+            val_batches_per_epoch=None,
+            permanent_checkpoint_every_n_epochs=permanent_checkpoint_every_n_epochs,
+            use_gpu_tail=use_gpu_tail,
         )
     fit_out["train_dir"]
+
+    
+# %%  # T:block_start|RetinaUNetV001.training_step
+#SECTION:--------------------  TS--------------------------------------------------------------------------------------
+# /home/ub/code/nnDetection/nndet/ptmodule/retinaunet/base.py  # T:block_donor|/home/ub/code/nnDetection/nndet/ptmodule/retinaunet/base.py
+    batch = batch_dev
+    print(batch.keys())
+#SECTION:-------------------- training_step --------------------------------------------------------------------------------------  # T:block_meta|RetinaUNetV001.training_step
+    # requires R = RetinaUNetV001(...) in __main__  # T:requires_alias|R = RetinaUNetV001(...)
+    """
+    Computes a single training step
+    See :class:`BaseRetinaNet` for more information
+    """
+    with torch.no_grad():
+        batch = R.pre_trafo(**batch)  # T:self_ref|    batch = self.pre_trafo(**batch)
+    losses, _ = R.model.train_step(  # T:self_ref|losses, _ = self.model.train_step(
+        images=batch["data"],
+        targets={
+            "target_boxes": batch["boxes"],
+            "target_classes": batch["classes"],
+            "target_seg": batch["target"][:, 0],  # Remove channel dimension
+        },
+        evaluation=False,
+        batch_num=batch_idx,
+    )
+    loss = sum(losses.values())
+    training_step_result = {"loss": loss, **{key: l.detach().item() for key, l in losses.items()}}  # T:return|return {"loss": loss, **{key: l.detach().item() for key, l in losses.items()}}
+#SECTION:-------------------- training_step end --------------------------------------------------------------------------------------  # T:block_meta_end|RetinaUNetV001.training_step
+    # end PythonMethodScratch  # T:block_end|RetinaUNetV001.training_step
+
+# %%
+
 

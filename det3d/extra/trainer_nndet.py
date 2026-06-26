@@ -648,7 +648,7 @@ def make_det3d_nndet_datamodule(train_manager, val_manager):
     #AI
     """Build pl.LightningDataModule over det3d train/val managers."""
     _ensure_nndet_importable()
-    import pytorch_lightning as pl
+    import lightning.pytorch as pl
 
     class Det3dNndetDataModule(pl.LightningDataModule):
         def __init__(self, train_manager, val_manager):

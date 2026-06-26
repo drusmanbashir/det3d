@@ -321,7 +321,8 @@ def run_native_training_loop(
 
     return fit_nndet_module(
         module,
-        datamodule,
+        train_dataloaders=datamodule.train_dataloader(),
+        val_dataloaders=datamodule.val_dataloader(),
         train_dir=train_dir,
         trainer_cfg=trainer_cfg,
         task=TASK,

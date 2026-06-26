@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Hybrid fast LBD training — LBD HDF5 + disk boxes → GpuTail → nnDet RetinaUNetV001.
 
-Same path as ``LIDCA-FAST-LBD-E500-AUG`` (``run_det3d_fast_training_loop`` in
-``det3d.extra.nndet_det3d_fast_lbd_bk``). Not TrainerDet / not native materialize.
+Same path as ``run_det3d_fast_training_loop`` in ``det3d.extra.hybrid``.
 """
 from __future__ import annotations
 
@@ -13,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from det3d.configs.parser import ConfigMakerDet
-from det3d.extra.nndet_det3d_fast_lbd_bk import (
+from det3d.extra.hybrid import (
     DEFAULT_FAST_DET_MODELS,
     DEFAULT_FAST_PLAN_ID,
     DEFAULT_FAST_PROJECT,
@@ -97,12 +96,9 @@ def main(args) -> None:
     if args.train_equals_val:
         print("train_equals_val: val uses same case list as train", flush=True)
 
-    val_split = "train" if args.train_equals_val else "valid"
-
     fit_out = run_det3d_fast_training_loop(
         case_ids=train_ids,
         val_case_ids=val_ids,
-        val_split=val_split,
         epochs=int(args.epochs),
         batches_per_epoch=args.batches_per_epoch,
         batch_size=int(args.batch_size),
@@ -121,7 +117,7 @@ def main(args) -> None:
         val_batches_per_epoch=args.val_batches_per_epoch,
         val_enabled=val_enabled,
         debug=args.debug,
-        use_gpu_tail=not args.no_gpu_tail,
+        use_gpu_tail=args.gpu_tail,
     )
     print("done", fit_out["train_dir"], flush=True)
 
@@ -191,14 +187,14 @@ if __name__ == "__main__":
     parser.add_argument("--permanent-checkpoint-every-n-epochs", type=int, default=100)
     parser.add_argument("--debug", type=str2bool, default=False)
     parser.add_argument(
-        "--no-gpu-tail",
+        "--gpu-tail",
         action="store_true",
-        help="CPU item augs (DataManagerDetLBD) instead of GpuTail",
+        help="GpuTail batch augs on GPU (default: CPU item tfms baseline)",
     )
     parser.add_argument("--det-models", default=None, help="det_models root (default: agent_rw benchmark)")
     parser.add_argument(
         "--tags",
-        default="hybrid_fast_lbd,det3d_fast_lbd,gpu_tail,disk_boxes",
+        default="hybrid_fast_lbd,det3d_fast_lbd,cpu_item_tfms,disk_boxes",
     )
     parser.add_argument("--notes", default=None)
     args = parser.parse_args()

@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from det3d.configs.parser import ConfigMakerDet
-from det3d.extra.nndet_det3d_fast_lbd_bk import resolve_lbd_fg_case_ids
+from det3d.extra.hybrid import resolve_lbd_fg_case_ids
 from det3d.extra.nndet_native_lbd import (
     DEFAULT_DET_MODELS,
     DEFAULT_LBD_FOLDER,
