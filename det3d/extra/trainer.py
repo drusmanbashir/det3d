@@ -146,7 +146,7 @@ if __name__ == "__main__":
 #SECTION:-------------------- _step_losses--------------------------------------------------------------------------------------  # T:block_meta|RetinaUNetManager._step_losses
     # requires R = RetinaUNetManager(...) in __main__  # T:requires_alias|R = RetinaUNetManager(...)
     R= N
-    nb = R._nndet_targets(batch)  # T:self_ref|nb = self._nndet_targets(batch)
+    nb = R._det3d_batch_to_nndet(batch)
     device_type = nb["data"].device.type
     with torch.autocast(device_type, enabled=device_type == "cuda"):
         losses, prediction = R.net.train_step(  # T:self_ref|    losses, prediction = self.net.train_step(
@@ -177,18 +177,20 @@ if __name__ == "__main__":
     # torch.cuda.empty_cache()
 # %%
 # SECTION:-------------------- RETINANET--------------------------------------------------------------------------------------
-    from det3d.detection.retinanet_train import (
-        build_train_anchors,
-        compute_train_loss,
-        forward_network_head,
-        validate_train_targets,
-    )
+    from det3d.detection.retinanet_train import build_train_anchors, forward_network_head
+    from monai.apps.detection.utils.detector_utils import check_training_targets
 
     N.detector.train()
     images = train_batch["image"]
     targets = N._targets_from_batch(train_batch)
     print(images.mean(), images.min(), images.max())
-    targets = validate_train_targets(N.detector, images, targets)
+    targets = check_training_targets(
+        images,
+        targets,
+        N.detector.spatial_dims,
+        N.detector.target_label_key,
+        N.detector.target_box_key,
+    )
     N.detector._check_detector_training_components()
     n = 0
     img = images[n, 0]
@@ -203,7 +205,9 @@ if __name__ == "__main__":
     head_outputs, num_anchor_locs = build_train_anchors(
         N.detector, images, head_outputs
     )
-    outputs = compute_train_loss(N.detector, head_outputs, targets, num_anchor_locs)
+    outputs = N.detector.compute_loss(
+        head_outputs, targets, N.detector.anchors, num_anchor_locs
+    )
     cls_loss = outputs[N.detector.cls_key]
     box_loss = outputs[N.detector.box_reg_key]
     train_loss = float(N.w_cls * cls_loss + N.w_reg * box_loss)

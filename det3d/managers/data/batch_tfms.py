@@ -24,22 +24,21 @@ class DataManagerDetBTfms(DataManagerDet):
         cprint(f"Batch Transforms: {batch_keys}", color="yellow")
 
     def install_gpu_tail(self):
-        ik, bk, lk, pk, mk = (
+        ik, bk, lk, pk = (
             self.image_key,
             self.box_key,
             self.label_key,
             self.point_key,
-            self.mask_key,
         )
         lm_key = self.lm_key if self.uses_lm_seg() else None
-        self.transforms_dict["GpuTail"] = BatchItemCompose(
+        self.GpuTail = BatchItemCompose(
             build_train_gpu_tail_compose(
                 device=self.device,
                 image_key=ik,
                 box_key=bk,
                 label_key=lk,
                 point_key=pk,
-                mask_key=mk,
+                mask_key=None,
                 lm_key=lm_key,
                 affine_lps_to_ras=self.affine_lps_to_ras,
                 intensity_tfms=self.transforms_dict["IntensityTfms"],
@@ -50,9 +49,10 @@ class DataManagerDetBTfms(DataManagerDet):
             box_key=bk,
             label_key=lk,
             point_key=pk,
-            mask_key=mk,
+            mask_key=None,
             lm_key=lm_key,
         )
+        self.transforms_dict["GpuTail"] = self.GpuTail
 
     def create_transforms(self):
         super().create_transforms()

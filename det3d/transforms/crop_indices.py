@@ -1,6 +1,5 @@
 import numpy as np
 import torch
-from det3d.transforms.detection import GenerateExtendedBoxMask
 from monai.transforms.croppad.array import Crop
 from monai.transforms.utils import map_binary_to_indices
 from monai.utils import fall_back_tuple
@@ -38,18 +37,6 @@ def monai_crop_center_to_slices(center, roi_size, spatial_shape):
     return slices, crop_start, crop_end
 
 
-def _bbox_overlap_center_boxes(boxes, roi_size, src_dims):
-    #AI
-    gen = GenerateExtendedBoxMask(
-        keys="bbox",
-        image_key="image",
-        spatial_size=tuple(int(v) for v in roi_size),
-        whole_box=False,
-    )
-    result = gen.generate_fg_center_boxes_np(boxes, src_dims, whole_box=False)
-    return result
-
-
 def _center_inside_int_box(center, box, naxis):
     for axis in range(naxis):
         lo = int(box[axis])
@@ -66,14 +53,12 @@ def _center_inside_any_int_box(center, boxes, naxis):
     return False
 
 
-def sample_crop_center_from_bboxes(boxes, roi_size, src_dims, is_fg, rng):
+def sample_crop_center_from_extended_boxes(center_boxes, src_dims, is_fg, rng):
     #AI
-    """Pos: center where patch intersects bbox (whole_box=False). Neg: outside those centers."""
-    roi_size = tuple(int(v) for v in roi_size)
+    """Pos/neg crop center from precomputed extended center boxes (N,6) ints."""
     src_dims = tuple(int(v) for v in src_dims)
-    boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 6)
+    center_boxes = np.asarray(center_boxes, dtype=np.int64).reshape(-1, 6)
     naxis = len(src_dims)
-    center_boxes = _bbox_overlap_center_boxes(boxes, roi_size, src_dims)
 
     if is_fg:
         box = center_boxes[int(rng.randint(0, center_boxes.shape[0]))]

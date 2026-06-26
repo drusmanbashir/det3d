@@ -2,14 +2,21 @@
 
 import torch
 from fran.configs.helpers import is_excel_None
-from monai.apps.detection.networks.retinanet_network import RetinaNet, resnet_fpn_feature_extractor
+from monai.apps.detection.networks.retinanet_network import (
+    RetinaNet,
+    resnet_fpn_feature_extractor,
+)
 from monai.apps.detection.utils.anchor_utils import AnchorGeneratorWithAnchorShape
 from monai.networks.nets import resnet
 from utilz.stringz import ast_literal_eval
 
-from det3d.detection.loss_config import apply_detector_loss_plan, apply_detector_sampler_plan
+from det3d.detection.loss_config import (
+    apply_detector_loss_plan,
+    apply_detector_sampler_plan,
+)
 from det3d.detection.retinanet_detector2 import RetinaNetDetector2
 from det3d.detection.retinaunet import build_retinaunet
+from det3d.detection.retinaunet_v3 import create_retinaunet_v3_from_conf
 
 VAL_PATCH_SIZE = [512, 512, 208]
 INFER_OVERLAP = 0.25
@@ -20,17 +27,22 @@ def arch_from_conf(configs) -> str:
     if is_excel_None(arch):
         arch = "retinanet"
     return str(arch).lower()
+
+
 #
+
 
 def size_divisible_from_conf(configs):
     plan = configs["plan_train"]
-    if arch_from_conf(configs) == "retinaunet":
-        from det3d.detection.retinaunet_network import encoder_abs_strides_from_plan
+    if arch_from_conf(configs) in ("retinaunet", "retinaunet_v3"):
+        if arch_from_conf(configs) == "retinaunet_v3":
+            from det3d.detection.retinaunet_v3 import encoder_abs_strides_from_plan as _easfp
+        else:
+            from det3d.detection.retinaunet_network import encoder_abs_strides_from_plan as _easfp
 
-        return encoder_abs_strides_from_plan(plan)[-1]
+        return _easfp(plan)[-1]
     return [
-        step * 2 * 2 ** max(plan["returned_layers"])
-        for step in plan["conv1_t_stride"]
+        step * 2 * 2 ** max(plan["returned_layers"]) for step in plan["conv1_t_stride"]
     ]
 
 
@@ -47,15 +59,13 @@ def _anchor_generator(plan, feature_levels):
     else:
         shapes = [[6, 8, 4], [8, 6, 5], [10, 10, 6]]
     return AnchorGeneratorWithAnchorShape(
-        feature_map_scales=[2 ** level for level in feature_levels],
+        feature_map_scales=[2**level for level in feature_levels],
         base_anchor_shapes=shapes,
     )
 
 
 def create_retinanet_from_conf(plan, script=True, debug=False):
-    anchor_generator = _anchor_generator(
-        plan, range(len(plan["returned_layers"]) + 1)
-    )
+    anchor_generator = _anchor_generator(plan, range(len(plan["returned_layers"]) + 1))
     conv1_t_size = [max(7, 2 * stride + 1) for stride in plan["conv1_t_stride"]]
     backbone = resnet.ResNet(
         block=resnet.ResNetBottleneck,
@@ -86,7 +96,10 @@ def create_retinanet_from_conf(plan, script=True, debug=False):
     )
     if script:
         net = torch.jit.script(net)
-    return RetinaNetDetector2(network=net, anchor_generator=anchor_generator, debug=debug)
+    return RetinaNetDetector2(
+        network=net, anchor_generator=anchor_generator, debug=debug
+    )
+
 
 
 def create_retinaunet_from_conf(plan, script=False, debug=False):
@@ -98,7 +111,9 @@ def create_retinaunet_from_conf(plan, script=False, debug=False):
     net = build_retinaunet(plan, num_anchors)
     if script:
         net = torch.jit.script(net)
-    return RetinaNetDetector2(network=net, anchor_generator=anchor_generator, debug=debug)
+    return RetinaNetDetector2(
+        network=net, anchor_generator=anchor_generator, debug=debug
+    )
 
 
 def wire_detector_from_conf(detector, configs, val_patch_size):
@@ -127,10 +142,13 @@ def create_detector_from_conf(configs, script=None, debug=False):
     arch = arch_from_conf(configs)
     if script is None:
         script = arch == "retinanet"
-    if arch == "retinaunet":
+    if arch == "retinaunet_v3":
+        detector = create_retinaunet_v3_from_conf(plan, script=script, debug=debug)
+    elif arch == "retinaunet":
         detector = create_retinaunet_from_conf(plan, script=script, debug=debug)
     else:
         detector = create_retinanet_from_conf(plan, script=script, debug=debug)
     val_patch_size = val_patch_size_from_conf(configs)
     wire_detector_from_conf(detector, configs, val_patch_size)
     return detector, val_patch_size
+

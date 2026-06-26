@@ -1,8 +1,9 @@
 import numpy as np
 import torch
+from monai.apps.detection.utils.detector_utils import check_training_targets
+from monai.apps.detection.utils.predict_utils import ensure_dict_value_to_list_
+
 from det3d.architectures.create_detector import INFER_OVERLAP, create_detector_from_conf
-from det3d.detection.nndet_train import maybe_store_batch_grid_preds
-from det3d.detection.retinanet_train import forward_train_batched
 from det3d.evaluation.coco import compute_coco_metrics
 from det3d.managers.det_schedule import configure_detection_optimizers
 from fran.managers.project import Project
@@ -31,13 +32,18 @@ class RetinaNetManager(LightningModule):
         label_key = self.detector.target_label_key
         boxes = batch[box_key]
         labels = batch[label_key]
-        return [
-            {
-                label_key: torch.as_tensor(label, device=self.device).reshape(-1),
-                box_key: torch.as_tensor(box, device=self.device).reshape(-1, 6),
-            }
-            for label, box in zip(labels, boxes)
-        ]
+        label_to_idx = {int(v): i for i, v in enumerate(self.plan["fg_labels"])}
+        out = []
+        for label, box in zip(labels, boxes):
+            box_tensor = torch.as_tensor(box, device=self.device).reshape(-1, 6)
+            cls_raw = torch.as_tensor(label, device=self.device).reshape(-1)[: box_tensor.shape[0]]
+            mapped = torch.tensor(
+                [label_to_idx[int(v.item())] for v in cls_raw],
+                dtype=torch.long,
+                device=self.device,
+            )
+            out.append({label_key: mapped, box_key: box_tensor})
+        return out
 
     def _val_inputs_from_batch(self, batch):
         images = batch["image"]
@@ -47,9 +53,59 @@ class RetinaNetManager(LightningModule):
         patch_voxels = int(np.prod(self.val_patch_size))
         return not all(item[0, ...].numel() < patch_voxels for item in val_inputs)
 
+    def _store_batch_grid_preds(self, batch, preds):
+        batch["pred"] = [
+            {
+                k: v.detach().cpu() if isinstance(v, torch.Tensor) else v
+                for k, v in p.items()
+            }
+            for p in preds
+        ]
+
+    def _forward_network_head(self, images):
+        dtype = next(self.detector.network.parameters()).dtype
+        if images.dtype != dtype:
+            images = images.to(dtype=dtype)
+        head_outputs = self.detector.network(images)
+        if isinstance(head_outputs, (tuple, list)):
+            head_outputs = {
+                self.detector.cls_key: head_outputs[: len(head_outputs) // 2],
+                self.detector.box_reg_key: head_outputs[len(head_outputs) // 2 :],
+            }
+        else:
+            ensure_dict_value_to_list_(head_outputs)
+        return head_outputs
+
+    def _build_train_anchors(self, images, head_outputs):
+        self.detector.generate_anchors(images, head_outputs)
+        num_anchor_locs_per_level = [
+            x.shape[2:].numel() for x in head_outputs[self.detector.cls_key]
+        ]
+        for key in (self.detector.cls_key, self.detector.box_reg_key):
+            head_outputs[key] = self.detector._reshape_maps(head_outputs[key])
+        return head_outputs, num_anchor_locs_per_level
+
+    def _forward_train_batched(self, images, targets):
+        """Training forward on DM-prebatched (B,C,D,H,W); skips RetinaNetDetector.preprocess_images."""
+        targets = check_training_targets(
+            images,
+            targets,
+            self.detector.spatial_dims,
+            self.detector.target_label_key,
+            self.detector.target_box_key,
+        )
+        self.detector._check_detector_training_components()
+        head_outputs = self._forward_network_head(images)
+        head_outputs, num_anchor_locs_per_level = self._build_train_anchors(
+            images, head_outputs
+        )
+        return self.detector.compute_loss(
+            head_outputs, targets, self.detector.anchors, num_anchor_locs_per_level
+        )
+
     def training_step(self, batch, batch_idx):
-        outputs = forward_train_batched(
-            self.detector, batch["image"], self._targets_from_batch(batch)
+        outputs = self._forward_train_batched(
+            batch["image"], self._targets_from_batch(batch)
         )
         cls_loss = outputs[self.detector.cls_key]
         box_loss = outputs[self.detector.box_reg_key]
@@ -69,7 +125,7 @@ class RetinaNetManager(LightningModule):
         val_outputs = self.detector(
             val_inputs, use_inferer=self._use_sliding_window_inferer(val_inputs)
         )
-        maybe_store_batch_grid_preds(self, batch, val_outputs)
+        self._store_batch_grid_preds(batch, val_outputs)
         self.val_outputs_all.extend(val_outputs)
         self.val_targets_all.extend(val_targets)
 

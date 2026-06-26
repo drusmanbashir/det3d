@@ -140,11 +140,14 @@ class RetinaUNet(nn.Module):
         )
 
     def forward(self, images: torch.Tensor):
-        feature_maps = self.feature_extractor(images)
-        return {
-            self.cls_key: self.classification_head(feature_maps),
-            self.box_reg_key: self.regression_head(feature_maps),
+        head_maps, _ = self.feature_extractor(images)
+        classification = self.classification_head(head_maps)
+        box_regression = self.regression_head(head_maps)
+        out = {
+            self.cls_key: classification,
+            self.box_reg_key: box_regression,
         }
+        return out
 
 
 def build_retinaunet(plan: dict, num_anchors: int) -> RetinaUNet:
@@ -160,3 +163,42 @@ def build_retinaunet(plan: dict, num_anchors: int) -> RetinaUNet:
         size_divisible=size_divisible,
         head_num_convs=1,
     )
+
+
+# %%
+if __name__ == '__main__':
+#SECTION:-------------------- setup --------------------------------------------------------------------------------------
+    from fran.managers import Project
+    from torch import Tensor
+    from utilz.imageviewers import ImageBBoxViewer
+
+    from det3d.configs.parser import ConfigMakerDet
+
+    project_title = "lidca"
+    plan_id = 4
+
+    P = Project(project_title)
+    C = ConfigMakerDet(P)
+    C.setup(plan_id)
+    conf = C.configs
+    conf["dataset_params"]["fold"] = 0
+    plan = conf["plan_train"]
+
+# %%
+# SECTION:-------------------- TRAINING --------------------------------------------------------------------------------------
+    net = build_retinaunet(conf["plan_train"], num_anchors=3)
+    feature_extractor = build_retinaunet_feature_extractor(plan)
+    size_divisible = encoder_abs_strides_from_plan(plan)[-1]
+    head_channels = int(plan.get("encoder_start_channels", 32)) * 4
+    plan["fg_labels"] = [1, 2, 3]
+# %%
+    R = RetinaUNet(
+        spatial_dims=int(plan["spatial_dims"]),
+        num_classes=len(plan["fg_labels"]),
+        num_anchors=3,
+        feature_extractor=feature_extractor,
+        head_channels=head_channels,
+        size_divisible=size_divisible,
+        head_num_convs=1,
+    )
+# %%

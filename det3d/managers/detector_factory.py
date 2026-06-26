@@ -19,7 +19,15 @@ from det3d.architectures.create_detector import arch_from_conf
 
 def resolve_detector_manager(configs: dict):
     detector = arch_from_conf(configs)
+    if detector == "retinaunet_v3":
+        from det3d.managers.retinaunet_v3 import RetinaUNetManagerV3
+
+        return RetinaUNetManagerV3
     if detector == "retinaunet":
+        if configs["model_params"].get("pre_trafo", False):
+            from det3d.managers.retinaunet_v2 import RetinaUNetManagerV2
+
+            return RetinaUNetManagerV2
         from det3d.managers.retinaunet import RetinaUNetManager
 
         return RetinaUNetManager
@@ -30,9 +38,19 @@ def resolve_detector_manager(configs: dict):
 
 def build_detector_manager(project_title, configs, lr=None, sync_dist=False) -> LightningModule:
     detector = configs["model_params"]["arch"]
-    if detector == "retinaunet":
-        from det3d.managers.retinaunet import RetinaUNetManager
-        manager_cls = RetinaUNetManager
+    if detector == "retinaunet_v3":
+        from det3d.managers.retinaunet_v3 import RetinaUNetManagerV3
+
+        manager_cls = RetinaUNetManagerV3
+    elif detector == "retinaunet":
+        if configs["model_params"].get("pre_trafo", False):
+            from det3d.managers.retinaunet_v2 import RetinaUNetManagerV2
+
+            manager_cls = RetinaUNetManagerV2
+        else:
+            from det3d.managers.retinaunet import RetinaUNetManager
+
+            manager_cls = RetinaUNetManager
     else:
         from det3d.managers.retinanet import RetinaNetManager
         manager_cls = RetinaNetManager

@@ -135,9 +135,10 @@ class BatchItemCompose:
         passthrough_keys = (
             self.point_key,
             self.label_key,
-            self.mask_key,
             self.box_key,
         )
+        if self.mask_key is not None:
+            passthrough_keys = (*passthrough_keys, self.mask_key)
         if self.lm_key is not None:
             passthrough_keys = (*passthrough_keys, self.lm_key)
         for i in range(n):
@@ -156,13 +157,84 @@ class BatchItemCompose:
         d[self.image_key] = torch.stack([it[self.image_key] for it in items], 0)
         d[self.box_key] = [it[self.box_key] for it in items]
         d[self.label_key] = [it[self.label_key] for it in items]
-        if self.mask_key in items[0]:
+        if self.mask_key is not None and self.mask_key in items[0]:
             d[self.mask_key] = torch.stack([it[self.mask_key] for it in items], 0)
         if self.lm_key is not None and self.lm_key in items[0]:
             d[self.lm_key] = torch.stack([it[self.lm_key] for it in items], 0)
         if self.point_key in d:
             del d[self.point_key]
         return attach_targets(d, self.box_key, self.label_key)
+
+
+class PreTrafoBatchItemCompose:
+    """GPU tail for pre_trafo: spatial aug on image+lm only (no box path)."""
+
+    def __init__(
+        self,
+        tfms,
+        image_key="image",
+        label_key="label",
+        lm_key="lm",
+        instances_key="instances",
+    ):
+        self.tfms = tfms
+        self.image_key = image_key
+        self.label_key = label_key
+        self.lm_key = lm_key
+        self.instances_key = instances_key
+
+    def __call__(self, batch):
+        d = dict(batch)
+        n = d[self.image_key].shape[0]
+        items = []
+        passthrough_keys = (self.label_key, self.lm_key, self.instances_key)
+        for i in range(n):
+            item = {self.image_key: d[self.image_key][i]}
+            for key in passthrough_keys:
+                val = d[key]
+                if isinstance(val, list):
+                    item[key] = val[i]
+                elif torch.is_tensor(val) and val.shape[0] == n:
+                    item[key] = val[i]
+                else:
+                    item[key] = val
+            items.append(self.tfms(item))
+        d[self.image_key] = torch.stack([it[self.image_key] for it in items], 0)
+        d[self.label_key] = [it[self.label_key] for it in items]
+        d[self.lm_key] = torch.stack([it[self.lm_key] for it in items], 0)
+        d[self.instances_key] = [it[self.instances_key] for it in items]
+        return d
+
+
+def build_train_gpu_tail_compose_pre_trafo(
+    *,
+    image_key,
+    lm_key,
+    intensity_tfms,
+    affine3d,
+    patch_size,
+    spatial_prob=1.0,
+):
+    p = float(spatial_prob)
+    spatial_keys = [image_key, lm_key]
+    return Compose(
+        [
+            RandAffined(
+                keys=spatial_keys,
+                mode=["bilinear", "nearest"],
+                prob=float(affine3d["p"]) * p,
+                rotate_range=affine3d["rotate_range"],
+                scale_range=affine3d["scale_range"],
+            ),
+            SyncMetaAffined(keys=spatial_keys),
+            ResizeWithPadOrCropd(
+                keys=spatial_keys,
+                spatial_size=tuple(int(v) for v in patch_size),
+                lazy=False,
+            ),
+            *intensity_tfms,
+        ]
+    )
 
 
 def build_train_gpu_tail_compose(
@@ -172,7 +244,7 @@ def build_train_gpu_tail_compose(
     box_key,
     label_key,
     point_key,
-    mask_key,
+    mask_key=None,
     lm_key=None,
     affine_lps_to_ras,
     intensity_tfms,
@@ -181,8 +253,11 @@ def build_train_gpu_tail_compose(
     spatial_prob=1.0,
 ):
     p = float(spatial_prob)
-    spatial_keys = [image_key, mask_key]
-    affine_mode = ["bilinear", "nearest"]
+    spatial_keys = [image_key]
+    affine_mode = ["bilinear"]
+    if mask_key is not None:
+        spatial_keys.append(mask_key)
+        affine_mode.append("nearest")
     if lm_key is not None:
         spatial_keys.append(lm_key)
         affine_mode.append("nearest")

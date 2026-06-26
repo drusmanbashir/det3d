@@ -1,0 +1,10 @@
+---
+description: Points to canonical docs policy. Read on any doc request.
+alwaysApply: false
+---
+
+# Docs
+
+Canonical rule: `~/scripts/.cursor/rules/docs-maintenance.mdc`
+
+det3d pages: `docs/README.md`

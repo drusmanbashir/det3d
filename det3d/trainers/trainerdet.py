@@ -6,6 +6,9 @@ from typing import Optional
 from nndet.core.retina import BaseRetinaNet
 import torch
 from det3d.detection.nndet_train import nndet_batch_to_xyzxyz, xyzxyz_exclusive_batch_to_nndet
+from det3d.detection.preprocess_images import check_training_targets
+from det3d.detection.retinanet_detector2 import RetinaNetDetector2
+from det3d.detection.retinanet_train import forward_train_joint
 from fran.callback.debug_epoch_limit import DebugEpochBatchLimit
 from fran.callback.incremental import LRFloorStop
 from fran.configs.helpers import normalize_logging_payload
@@ -24,10 +27,10 @@ from lightning.pytorch.callbacks import (
     StochasticWeightAveraging,
 )
 from lightning.pytorch.profilers import AdvancedProfiler
-from utilz.imageviewers import ImageMaskViewer
+from utilz.imageviewers import ImageMaskBboxViewer, ImageMaskViewer
 from utilz.stringz import ast_literal_eval, headline
 
-from det3d.architectures.create_detector import arch_from_conf
+from det3d.architectures.create_detector import arch_from_conf, create_retinaunet_v3_from_conf
 from det3d.callback.wandb_det_grid import (
     WandbDetImageGridCallback,
     WandbRetinaUNetImageGridCallback,
@@ -69,10 +72,11 @@ class TrainerDet(Trainer):
         return kwargs
 
     def wandb_grid_callback(self, wandb_grid_epoch_freq: int):
-        if arch_from_conf(self.configs) == "retinaunet":
-            return WandbRetinaUNetImageGridCallback(
-                **self.wandb_retinaunet_grid_cb_kwargs(wandb_grid_epoch_freq)
-            )
+        arch = arch_from_conf(self.configs)
+        if arch in ("retinaunet", "retinaunet_v3"):
+            kwargs = self.wandb_retinaunet_grid_cb_kwargs(wandb_grid_epoch_freq)
+            kwargs["adapt_nndet_boxes"] = arch == "retinaunet"
+            return WandbRetinaUNetImageGridCallback(**kwargs)
         return WandbDetImageGridCallback(
             **self.wandb_grid_cb_kwargs(wandb_grid_epoch_freq)
         )
@@ -200,6 +204,17 @@ class TrainerDet(Trainer):
     def resolve_orchestrator_class(self, batch_tfms=None):
         if batch_tfms is None:
             batch_tfms = self.batch_tfms
+        if self.configs["model_params"].get("pre_trafo", False):
+            from det3d.managers.data.pre_trafo import (
+                DataManagerDualDetPreTrafo,
+                DataManagerDualDetPreTrafoBTfms,
+            )
+
+            return (
+                DataManagerDualDetPreTrafoBTfms
+                if batch_tfms
+                else DataManagerDualDetPreTrafo
+            )
         return DataManagerDualDetBTfms if batch_tfms else DataManagerDualDet
 
     def normalize_plan_modes_for_det_pipeline(self):
@@ -251,15 +266,9 @@ class TrainerDet(Trainer):
             self.N = self.init_trainer(epochs)
 
     def init_trainer(self, epochs):
-        detector = self.configs["model_params"]["arch"]
-        if detector == "retinaunet":
-            from det3d.managers.retinaunet import RetinaUNetManager
+        from det3d.managers.detector_factory import resolve_detector_manager
 
-            manager_cls = RetinaUNetManager
-        else:
-            from det3d.managers.retinanet import RetinaNetManager
-
-            manager_cls = RetinaNetManager
+        manager_cls = resolve_detector_manager(self.configs)
         N = manager_cls(
             project_title=self.project.project_title,
             configs=self.configs,
@@ -436,7 +445,7 @@ if __name__ == "__main__":
     from det3d.configs.parser import ConfigMakerDet
 
     project_title = "lidca"
-    plan_id = 3
+    plan_id = 4
 
     P = Project(project_title)
     C = ConfigMakerDet(P)
@@ -444,19 +453,21 @@ if __name__ == "__main__":
     conf = C.configs
     conf["dataset_params"]["fold"] = 0
 
-# SECTION:-------------------- TRAINING --------------------------------------------------------------------------------------
 # %%
+# SECTION:-------------------- TRAINING --------------------------------------------------------------------------------------
     conf["model_params"]["arch"] = "retinanet"
-    conf["model_params"]["arch"] = "retinaunet"
+    conf["model_params"]["arch"] = "retinaunet_v3"
     print(conf["dataset_params"]["prezoom_scale"])
-    conf["plan_train"]["patch_size"] = [160,160,96]
-    bs = 10
-    device_id = 0
+
+    bs = 2
+    device_id = 1
     batch_tfms = True
     batch_tfms = False
     wandb = True
+    run_name = "LIDCA-V3-BS2-B"
     run_name = None
-    run_name = "LIDCA-DIET"
+
+# %%
     tags = []
     description = "TrainerDet lidca retinanet"
     lr = None
@@ -505,47 +516,113 @@ if __name__ == "__main__":
     tmt = D.train_manager
     tmv = D.valid_manager
 
-# %%
-
-
     tmt.setup()
     tmv.setup()
     train_dl = tmt.dl
     train_iter = iter(train_dl)
 # %%
-    a = tmt.ds[0]
-    a[0].keys()
-    a[0]['validation_impl']
-# %%
     train_batch = next(train_iter)
     batch = train_batch
-    batch['image'].shape
+    batch.keys()
+    img = batch['image']
+    print(img.min(), img.max(), img.mean())
+# %%
     batch['lm'].shape
     box = batch["bbox"]
-    img.shape
+# %%
 
-# %%
-    val_dl = tmv.dl
-    val_iter = iter(val_dl)
-    val_batch = next(val_iter)
-# %%
-    ImageBBoxViewer(img, box)
-
-# %%
 
     N = Tm.setup_model_for_cuda(device=device_id, precision="16-mixed")
     # N.on_fit_start()
     batch = Tm.fabric_infer.to_device(batch)
     print(batch.keys())
 # %%
+    images = batch["image"]
+    targets = batch["lm"]
+        targets = check_training_targets(
+            images,
+            targets,
+            N.detector.spatial_dims,
+            N.detector.target_label_key,
+            N.detector.target_box_key,
+        )
+        N.detector._check_detector_training_components()
+        head_outputs = N._forward_network_head(images)
+        seg_key = N.detector.network.seg_key
+        seg_logits = head_outputs.pop(seg_key)
+        if isinstance(seg_logits, list):
+            seg_logits = seg_logits[0]
+        head_outputs, num_anchor_locs_per_level = N._build_train_anchors(
+            images, head_outputs
+        )
+        det_losses = N.detector.compute_loss(
+            head_outputs, targets, N.detector.anchors, num_anchor_locs_per_level
+        )
+        seg_total = N.seg_loss_fnc(seg_logits, lm_batch)
+        cls_key = N.detector.cls_key
+        box_key = N.detector.box_reg_key
+        cls_loss = det_losses[cls_key]
+        box_loss = det_losses[box_key]
+        total = N.w_cls * cls_loss + N.w_reg * box_loss + seg_total
+        return {
+            "loss": total,
+            cls_key: cls_loss.detach(),
+            box_key: box_loss.detach(),
+            "loss_ce": N.seg_loss_fnc.loss_dict["loss_ce"],
+            "loss_dice": N.seg_loss_fnc.loss_dict["loss_dice"],
+        }
 
-    losses, preds, nb = N._step_losses(batch, 0, True)
+
 # %%
-    preds.keys()
+    det = N.detector
+    debug = False
+    script=None
+    plan = Tm.configs["plan_train"]
+
+
+    det= create_retinaunet_v3_from_conf(plan, script=script, debug=debug)
+
+
+
+
+# %%
+    from det3d.architectures.create_detector import _anchor_generator
+
+    decoder_levels = plan.get("decoder_levels", (1, 2, 3, 4))
+    if isinstance(decoder_levels, str):
+        decoder_levels = ast_literal_eval(decoder_levels)
+    anchor_generator = _anchor_generator (plan, decoder_levels)
+    num_anchors = anchor_generator.num_anchors_per_location()[0]
+    net = build_retinaunet_v3(plan, num_anchors)
+    if script:
+        net = torch.jit.script(net)
+    R = RetinaNetDetector2(network=net, anchor_generator=anchor_generator, debug=debug)
+
+
+# %%
+    outputs = forward_train_joint(
+        N.detector,
+        batch["image"],
+        N._targets_from_batch(batch),
+        N.seg_loss_fnc,
+        batch["lm"],
+        N.plan,
+    )
+
+
+# %%
+
+# %%
+    losses, preds, nb = N._step_losses(batch, 0, True) # %% preds.keys()
     lm = preds["pred_seg"]
     batch_idx = 0
     ImageMaskViewer([img[0], lm[0, 1, :]], "im")
+    print(N.nndet_plan.keys())
+    print(N.nndet_plan["anchors"].keys())
+    plan2= N.nndet_plan
+    plan2["anchors"]["width"]
 # %%
+    R = Tm.N
 # SECTION:-------------------- validation_step--------------------------------------------------------------------------------------  # T:block_meta|TrainerDet.validation_step
 # %%
     SCORE_THRESH = 0.30  # was 0.02
@@ -558,12 +635,15 @@ if __name__ == "__main__":
 # %%
 
     batch = batch
-    R = N
+    R = N.nndet_module
+    R.encoder
+    R.box_evaluator
+    R.classes
+
+
+
 
 # %%
-    batch = batch
-    batch_idx = 0
-    evaluation = True
 # %%  # T:block_start|RetinaUNetManager._step_losses
 # %%
     img = nb['data']
@@ -575,24 +655,107 @@ if __name__ == "__main__":
     ImageBBoxViewer(im, box_viz)
 
 # %%
+
 # /home/ub/code/det3d/det3d/managers/retinaunet.py  # T:block_donor|/home/ub/code/det3d/det3d/managers/retinaunet.py
 #SECTION:-------------------- _step_losses --------------------------------------------------------------------------------------  # T:block_meta|RetinaUNetManager._step_losses
     # requires R = RetinaUNetManager(...) in __main__  # T:requires_alias|R = RetinaUNetManager(...)
-    nb = R._nndet_targets(batch)  # T:self_ref|nb = self._nndet_targets(batch)
+    batch = batch
+    batch_idx = 0
+    evaluation = True
+    nb = N._det3d_batch_to_nndet(batch)
     nb.keys()
-    losses, prediction = R.net.train_step(  # T:self_ref|losses, prediction = self.net.train_step(
+    nb["target_classes"]
+    nb["target_boxes"]
+    targets = {
+        "target_boxes": nb["target_boxes"],
+        "target_classes": nb["target_classes"],
+        "target_seg": nb["target_seg"],
+    }
+
+    losses, prediction = N.net.train_step(  # T:self_ref|losses, prediction = self.net.train_step(
         images=nb["data"],
-        targets={
-            "target_boxes": nb["target_boxes"],
-            "target_classes": nb["target_classes"],
-            "target_seg": nb["target_seg"],
-        },
-        evaluation=evaluation,
+        targets= targets,
+                                          evaluation=evaluation,
         batch_num=batch_idx,
     )
     _step_losses_result = losses, prediction, nb  # T:return|return losses, prediction, nb
+    prediction.keys()
+    preds = prediction['pred_boxes'][0]
+    scores = prediction['pred_scores'][0]
+    nb['data'].min()
+    nb['data'].max()
+    nb['data'].mean()
+    im.mean()
+    im.min()
+    box = preds[0]
+    box_viz = nndet_batch_to_xyzxyz(box)
+    ImageBBoxViewer(im, box_viz)
+    from torch import Tensor
+
+#SECTION:-------------------- train_step --------------------------------------------------------------------------------------  # T:block_meta|TrainerDet.train_step
+    """
+    Perform a single training step (forward pass + loss computation)
+
+    Args:
+        images: batch of images
+        targets: labels for training
+            `target_boxes` (List[Tensor]): ground truth bounding boxes
+                (x1, y1, x2, y2, (z1, z2))[X, dim * 2], X= number of ground
+                truth boxes in image
+            `target_classes` (List[Tensor]): ground truth class per box
+                (classes start from 0) [X], X= number of ground truth
+                boxes in image
+            `target_seg`(Tensor): segmentation ground truth
+                (only needed if :param:`segmenter`
+                was provided in init) (classes start from 1, 0 background)
+        evaluation (bool): compute final predictions (includes detection
+            postprocessing)
+        batch_num (int): batch index inside epoch
+
+    Returns:
+        torch.Tensor: final loss for back propagation
+        Dict: predictions for metric calculation
+            'pred_boxes': List[Tensor]: predicted bounding boxes for each
+                image List[[R, dim * 2]]
+            'pred_scores': List[Tensor]: predicted probability for the
+                class List[[R]]
+            'pred_labels': List[Tensor]: predicted class List[[R]]
+            'pred_seg': Tensor: predicted segmentation [N, dims]
+        Dict[str, torch.Tensor]: scalars for logging (e.g. individual
+            loss components)
+    """
+    # import napari
+    # with napari.gui_qt():
+    #     viewer = napari.view_image(images.detach().cpu().numpy())
+    #     viewer.add_labels(seg_targets[:, None].detach().cpu().numpy())
+    target_boxes = targets["target_boxes"]
+    target_classes = targets["target_classes"]
+    target_seg= targets["target_seg"]
+    pred_detection, anchors, pred_seg = Tm(images)  # T:self_ref|pred_detection, anchors, pred_seg = self(images)
+    labels, matched_gt_boxes = Tm.assign_targets_to_anchors(  # T:self_ref|labels, matched_gt_boxes = self.assign_targets_to_anchors(
+        anchors, target_boxes, target_classes)
+    losses = {}
+    head_losses, pos_idx, neg_idx = Tm.head.compute_loss(  # T:self_ref|head_losses, pos_idx, neg_idx = self.head.compute_loss(
+        pred_detection, labels, matched_gt_boxes, anchors)
+    losses.update(head_losses)
+    if Tm.segmenter is not None:  # T:self_ref|if self.segmenter is not None:
+        losses.update(Tm.segmenter.compute_loss(pred_seg, target_seg))  # T:self_ref|    losses.update(self.segmenter.compute_loss(pred_seg, target_seg))
+    if evaluation:
+        prediction = Tm.postprocess_for_inference(  # T:self_ref|    prediction = self.postprocess_for_inference(
+            images=images,
+            pred_detection=pred_detection,
+            pred_seg=pred_seg,
+            anchors=anchors,
+        )
+    else:
+        prediction = None
+    # self.save_matched_anchors(images=images, target_boxes=target_boxes,
+    #                             anchors=anchors, pos_idx=pos_idx,
+    #                             neg_idx=neg_idx, seg=seg_targets)
+    train_step_result = losses, prediction  # T:return|return losses, prediction
 #SECTION:-------------------- _step_losses end --------------------------------------------------------------------------------------  # T:block_meta_end|RetinaUNetManager._step_losses
     # end PythonMethodScratch  # T:block_end|RetinaUNetManager._step_losses
+
 # %%
     # /home/ub/code/det3d/det3d/managers/retinaunet.py  # T:block_donor|/home/ub/code/det3d/det3d/managers/retinaunet.py
     tfms="Ld,Rtr,L2,E,Norm,BoxToWorld,ToPoints,Zoom,Flip0,Flip1,Flip2,Rand90,Rot,AffinePts,ToBoxes,BoxClip,DelMask,IntensityTfms,Dtype"
@@ -712,8 +875,10 @@ if __name__ == "__main__":
     dici = tfms["Dtype"](dici)
     print(dici['image'].shape)
 
-
 # %%
+#SECTION:-------------------- train_step end --------------------------------------------------------------------------------------  # T:block_meta_end|TrainerDet.train_step
+    # end PythonMethodScratch  # T:block_end|TrainerDet.train_step
+
 
 
 

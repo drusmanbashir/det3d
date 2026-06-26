@@ -2,7 +2,7 @@ import json
 import resource
 from functools import partial
 from pathlib import Path
-from utilz.imageviewers import ImageBBoxViewer, ImageMaskViewer
+from utilz.imageviewers import ImageBBoxViewer, ImageMaskBboxViewer, ImageMaskViewer
 from typing import Optional
 
 import numpy as np
@@ -13,11 +13,12 @@ from det3d.managers.data.valid_patch_stream import (
     PatchStreamDatasetDet,
     patch_stream_collate_fn,
 )
+from det3d.preprocessing.hdf5_shards_det import ensure_hdf5_shards_for_plan
 from det3d.transforms.crop_indices import (
     monai_crop_center_to_slices,
-    sample_crop_center_from_bboxes,
-    volume_fg_flat_indices,
+    sample_crop_center_from_extended_boxes,
 )
+from det3d.transforms.detection import patch_size_manifest_key
 from fran.managers.data.valid_patch_stream import _pad_tensor_to_patch_size
 from det3d.utils.bbox_sidecar import bbox_sidecar_path, load_detection_sidecar, valid_detection_box
 from fran.configs.helpers import is_excel_None
@@ -50,21 +51,26 @@ from monai.transforms.croppad.dictionary import ResizeWithPadOrCropd
 from monai.transforms.spatial.dictionary import ConvertBoxToPointsd, ConvertPointsToBoxesd, RandAffined
 from monai.transforms.utility.dictionary import ApplyTransformToPointsd
 from fran.utils.folder_names import FolderNames
+from utilz.fileio import load_json
 from utilz.stringz import info_from_filename
 
 
-class LoadHDF5DetShardBBoxd(MapTransform):
-    """Load RandCrop bbox + src_dims from HDF5 shard."""
+class LoadHDF5DetShardExtendedBBoxd(MapTransform):
+    """Load HDF5 shard paths, bbox, src_dims, and precomputed extended center boxes."""
 
     def __init__(
         self,
         keys,
         manifest_fn: str,
+        data_folder: str,
+        patch_size,
         box_key: str = "bbox",
         allow_missing_keys: bool = False,
     ):
         super().__init__(keys, allow_missing_keys)
         self.manifest_fn = Path(manifest_fn)
+        self.data_folder = Path(data_folder)
+        self.patch_size_key = patch_size_manifest_key(patch_size)
         self.box_key = box_key
         self._manifest_cache = {}
 
@@ -77,6 +83,7 @@ class LoadHDF5DetShardBBoxd(MapTransform):
         with open(self.manifest_fn, "r", encoding="utf-8") as f:
             manifest = json.load(f)
 
+        # Shard-level build tag; symlink dir name may differ. Not copied to sample dict — RandCrop uses per-case image.shape.
         case_to_shard: dict[str, str] = {}
         for shard_info in manifest["shards"]:
             shard_name = shard_info["shard"]
@@ -103,12 +110,15 @@ class LoadHDF5DetShardBBoxd(MapTransform):
         case_path = f"/cases/{case_id}"
         with h5py.File(shard_path, "r") as h5f:
             case_grp = h5f[case_path]
-            bbox = np.asarray(case_grp[self.box_key][:], dtype=np.float32)
-            src_dims = tuple(int(v) for v in case_grp["mask"].shape)
+            src_dims = tuple(int(v) for v in case_grp["image"].shape)
+        ext_fn = self.data_folder / "extended_bboxes" / f"{case_id}.json"
+        ext_all = json.loads(ext_fn.read_text(encoding="utf-8"))
+        center_boxes = ext_all[self.patch_size_key]
         d["hdf5_shard_path"] = str(shard_path)
         d["hdf5_case_path"] = case_path
+        # Volume bounds for RandCrop (Rtr runs before L2 loads pixels). Per-case HDF5 dataset shape, not plan or manifest tag.
         d["src_dims"] = src_dims
-        d[self.box_key] = bbox
+        d["extended_center_boxes"] = np.asarray(center_boxes, dtype=np.int64)
         return d
 
 
@@ -144,8 +154,8 @@ class RandCropByFgIndicesd(RandCropByFlatIndicesd):
         return out
 
 
-class RandCropByBBoxesd(RandCropByFgIndicesd):
-    """RandCropByFgIndicesd; pos centers where patch intersects bbox (whole_box=False)."""
+class RandCropExtendedBBoxd(RandCropByFgIndicesd):
+    """RandCrop from precomputed extended center boxes per patch size."""
 
     def __init__(
         self,
@@ -154,7 +164,7 @@ class RandCropByBBoxesd(RandCropByFgIndicesd):
         pos=1.0,
         neg=1.0,
         num_samples=1,
-        box_key="bbox",
+        extended_boxes_key="extended_center_boxes",
         src_dims_key="src_dims",
         allow_missing_keys=False,
     ):
@@ -169,54 +179,26 @@ class RandCropByBBoxesd(RandCropByFgIndicesd):
             src_dims_key=src_dims_key,
             allow_missing_keys=allow_missing_keys,
         )
-        self.box_key = box_key
+        self.extended_boxes_key = extended_boxes_key
 
     def __call__(self, data):
         d = dict(data)
         src_dims = tuple(int(v) for v in d[self.src_dims_key])
-        boxes = np.asarray(d[self.box_key], dtype=np.float32).reshape(-1, 6)
+        center_boxes = np.asarray(d[self.extended_boxes_key], dtype=np.int64).reshape(-1, 6)
         out = []
         for _ in range(self.num_samples):
             sample = dict(d)
             choose_fg = self.R.rand() < self.pos / (self.pos + self.neg)
-            sample_is_fg = bool(choose_fg and boxes.shape[0] > 0)
-            center = sample_crop_center_from_bboxes(
-                boxes, self.roi_size, src_dims, sample_is_fg, self.R
+            sample_is_fg = bool(choose_fg and center_boxes.shape[0] > 0)
+            center = sample_crop_center_from_extended_boxes(
+                center_boxes, src_dims, sample_is_fg, self.R
             )
-            sampled_flat_index = int(np.ravel_multi_index(center, src_dims))
-            crop_slices, crop_start, crop_end = self._compute_crop(center, src_dims)
-            sample["crop_center"] = center
+            crop_slices, crop_start, _crop_end = self._compute_crop(center, src_dims)
             sample["crop_slices"] = crop_slices
             sample["crop_start"] = crop_start
-            sample["crop_end"] = crop_end
-            sample["sample_is_fg"] = sample_is_fg
-            sample["sampled_flat_index"] = sampled_flat_index
+            del sample[self.src_dims_key], sample[self.extended_boxes_key]
             out.append(sample)
         return out
-
-
-class DetRandCropIndicesd(MapTransform):
-    """RandCrop fg pool from mask (bg sampled at train time)."""
-
-    def __init__(
-        self,
-        mask_key="mask",
-        fg_indices_key="fg_indices",
-        src_dims_key="src_dims",
-        allow_missing_keys=False,
-    ):
-        super().__init__([mask_key], allow_missing_keys)
-        self.mask_key = mask_key
-        self.fg_indices_key = fg_indices_key
-        self.src_dims_key = src_dims_key
-
-    def __call__(self, data):
-        d = dict(data)
-        mask = d[self.mask_key]
-        spatial = tuple(int(v) for v in mask.shape[-3:])
-        d[self.src_dims_key] = spatial
-        d[self.fg_indices_key] = volume_fg_flat_indices(mask)
-        return d
 
 
 class CropDetPatchd(MapTransform):
@@ -356,7 +338,7 @@ class LoadHDF5DetCropd(MapTransform):
         crop_slices = tuple(d[self.crop_slices_key])
         crop_start = tuple(int(v) for v in d[self.crop_start_key])
         h5py = import_h5py()
-        h5_keys = tuple(dict.fromkeys(("image", "mask", *self.keys)))
+        h5_keys = tuple(dict.fromkeys(("image", *self.keys)))
         with h5py.File(shard_path, "r") as h5f:
             case_grp = h5f[case_path]
             loaded = {
@@ -364,26 +346,32 @@ class LoadHDF5DetCropd(MapTransform):
                 for key in h5_keys
                 if key in case_grp
             }
+            bbox = np.asarray(case_grp[self.box_key][:], dtype=np.float32)
         meta = {
             "filename_or_obj": f"{shard_path}:{case_path}",
-            "case_id": d.get("case_id"),
+            "case_id": d["case_id"],
             "crop_start": crop_start,
-            "crop_end": d.get("crop_end"),
-            "sampled_flat_index": d.get("sampled_flat_index"),
-            "sample_is_fg": d.get("sample_is_fg"),
             "original_channel_dim": 0,
         }
         for key, arr in loaded.items():
             if arr.ndim == 3:
                 arr = arr[np.newaxis, ...]
             d[key] = MetaTensor(torch.as_tensor(arr), meta=dict(meta))
-        box = torch.as_tensor(d[self.box_key], dtype=torch.float32)
+        box = torch.as_tensor(bbox, dtype=torch.float32)
         if box.numel() > 0:
             start = torch.tensor(crop_start, dtype=box.dtype)
             box = box.clone()
             box[:, :3] -= start
             box[:, 3:] -= start
             d[self.box_key] = box
+        else:
+            d[self.box_key] = box
+        del (
+            d[self.shard_path_key],
+            d[self.case_path_key],
+            d[self.crop_slices_key],
+            d[self.crop_start_key],
+        )
         return d
 
 
@@ -515,7 +503,7 @@ class DataManagerDet(DataManager):
     def uses_lm_seg(self):
         from det3d.architectures.create_detector import arch_from_conf
 
-        return arch_from_conf(self.configs) == "retinaunet"
+        return arch_from_conf(self.configs) in ("retinaunet", "retinaunet_v3")
 
     def _rand_crop_patch_size(self):
         if self.uses_lm_seg():
@@ -702,6 +690,8 @@ class DataManagerDet(DataManager):
         return data, skipped
 
     def _require_shard_manifest(self, data_folder):
+        data_folder = Path(data_folder)
+        ensure_hdf5_shards_for_plan(data_folder, self.plan["src_dims"])
         manifest_fn = data_folder / "hdf5_shards" / (
             f"src_{'_'.join(str(int(v)) for v in self.plan['src_dims'])}"
         ) / "manifest.json"
@@ -739,11 +729,9 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
     def derive_data_folder(self, plan):
         data_folder = super(DataManagerDet, self).derive_data_folder(plan)
         self._require_shard_manifest(data_folder)
-        masks_dir = data_folder / "masks"
-        if not masks_dir.is_dir():
-            raise FileNotFoundError(f"Expected masks/ under {data_folder}")
-        if len(list(masks_dir.glob("*.pt"))) == 0:
-            raise FileNotFoundError(f"No label-bounded masks under {masks_dir}")
+        manifest_fn = data_folder / "manifest.json"
+        if not manifest_fn.is_file():
+            raise FileNotFoundError(f"Missing manifest.json under {data_folder}")
         return data_folder
 
     def set_effective_batch_size(self):
@@ -768,59 +756,69 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
 
     def create_transforms(self):
         super().create_transforms()
-        ik, bk, lk, mk, pk, lmk = (
+        ik, bk, lk, pk, lmk = (
             self.image_key,
             self.box_key,
             self.label_key,
-            self.mask_key,
             self.point_key,
             self.lm_key,
         )
-        load_keys = [ik, mk]
+        load_keys = [ik]
         use_lm = self.uses_lm_seg()
         if use_lm:
             load_keys.append(lmk)
-        spatial_aug_keys = [ik, mk]
+        spatial_aug_keys = [ik]
         if use_lm:
             spatial_aug_keys.append(lmk)
         affine_modes = ["bilinear" if k == ik else "nearest" for k in spatial_aug_keys]
         plan = self.plan
         patch_size = self._patch_size()
         scale = float(self.dataset_params["prezoom_scale"])
-        patch_size_prezoom = [int(v * scale) for v in patch_size]
+        patch_size_prezoom = tuple(int(v * scale) for v in patch_size)
+        data_manifest = load_json(self.data_folder / "manifest.json")
+        manifest_patch_sizes = [
+            tuple(int(v) for v in ps)
+            for ps in data_manifest["extended_bboxes_patch_sizes"]
+        ]
+        if patch_size_prezoom not in manifest_patch_sizes:
+            raise ValueError(
+                f"patch_size_prezoom {patch_size_prezoom} not in manifest "
+                f"extended_bboxes_patch_sizes {manifest_patch_sizes}"
+            )
         affine_lps_to_ras = self.affine_lps_to_ras
         clip = self.dataset_params["intensity_clip_range"]
         affine3d = self.configs["affine3d"]
 
-        self.transforms_dict["Ld"] = LoadHDF5DetShardBBoxd(
+        self.Ld = LoadHDF5DetShardExtendedBBoxd(
             keys=["case_id"],
             manifest_fn=str(self.hdf5_manifest_fn),
+            data_folder=str(self.data_folder),
+            patch_size=patch_size_prezoom,
             box_key=bk,
         )
-        self.transforms_dict["Rtr"] = RandCropByBBoxesd(
+        self.Rtr = RandCropExtendedBBoxd(
             keys=[ik],
             roi_size=patch_size_prezoom,
             num_samples=int(plan["samples_per_file"]),
             pos=self.dataset_params["fgbg_ratio"],
             neg=1,
-            box_key=bk,
             src_dims_key="src_dims",
         )
-        self.transforms_dict["L2"] = LoadHDF5DetCropd(keys=load_keys, box_key=bk)
-        self.transforms_dict["E"] = EnsureChannelFirstd(keys=load_keys)
-        self.transforms_dict["Affine"] = RandAffined(
+        self.L2 = LoadHDF5DetCropd(keys=load_keys, box_key=bk)
+        self.E = EnsureChannelFirstd(keys=load_keys)
+        self.Affine = RandAffined(
             keys=spatial_aug_keys,
             mode=affine_modes,
             prob=affine3d["p"],
             rotate_range=affine3d["rotate_range"],
             scale_range=affine3d["scale_range"],
         )
-        self.transforms_dict["ResizePC"] = ResizeWithPadOrCropd(
+        self.ResizePC = ResizeWithPadOrCropd(
             keys=spatial_aug_keys,
             spatial_size=patch_size,
             lazy=False,
         )
-        self.transforms_dict["Norm"] = ScaleIntensityRanged(
+        self.Norm = ScaleIntensityRanged(
             keys=[ik],
             a_min=float(clip[0]),
             a_max=float(clip[1]),
@@ -828,26 +826,37 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
             b_max=1.0,
             clip=True,
         )
-        self.transforms_dict["BoxToWorld"] = AffineBoxToWorldCoordinated(
+        self.BoxToWorld = AffineBoxToWorldCoordinated(
             box_keys=[bk],
             box_ref_image_keys=ik,
             affine_lps_to_ras=affine_lps_to_ras,
         )
-        self.transforms_dict["ToPoints"] = ConvertBoxToPointsd(keys=[bk])
-        self.transforms_dict["AffinePts"] = ApplyTransformToPointsd(
+        self.ToPoints = ConvertBoxToPointsd(keys=[bk])
+        self.AffinePts = ApplyTransformToPointsd(
             keys=[pk], refer_keys=ik, affine_lps_to_ras=affine_lps_to_ras
         )
-        self.transforms_dict["ToBoxes"] = ConvertPointsToBoxesd(keys=[pk], box_key=bk)
-        self.transforms_dict["BoxClip"] = ClipBoxToImaged(
+        self.ToBoxes = ConvertPointsToBoxesd(keys=[pk], box_key=bk)
+        self.BoxClip = ClipBoxToImaged(
             box_keys=bk,
             label_keys=[lk],
             box_ref_image_keys=ik,
             remove_empty=True,
         )
-        ld = self.transforms_dict["Ld"]
-        if type(ld) is not LoadHDF5DetShardBBoxd:
+        self.transforms_dict["Ld"] = self.Ld
+        self.transforms_dict["Rtr"] = self.Rtr
+        self.transforms_dict["L2"] = self.L2
+        self.transforms_dict["E"] = self.E
+        self.transforms_dict["Affine"] = self.Affine
+        self.transforms_dict["ResizePC"] = self.ResizePC
+        self.transforms_dict["Norm"] = self.Norm
+        self.transforms_dict["BoxToWorld"] = self.BoxToWorld
+        self.transforms_dict["ToPoints"] = self.ToPoints
+        self.transforms_dict["AffinePts"] = self.AffinePts
+        self.transforms_dict["ToBoxes"] = self.ToBoxes
+        self.transforms_dict["BoxClip"] = self.BoxClip
+        if type(self.Ld) is not LoadHDF5DetShardExtendedBBoxd:
             raise RuntimeError(
-                f"det shard train must use LoadHDF5DetShardBBoxd, got {type(ld)}"
+                f"det shard train must use LoadHDF5DetShardExtendedBBoxd, got {type(self.Ld)}"
             )
 
 
@@ -1170,6 +1179,7 @@ if __name__ == "__main__":
     C.setup(plan_id)
     conf = C.configs
     conf["dataset_params"]["fold"] = conf_fold
+    conf["plan_train"]["patch_size"]=[128,128,64]
 
 #SECTION:--- dualdet datamanager ---
 # %%
@@ -1186,6 +1196,7 @@ if __name__ == "__main__":
         if plan["mode"] in {"det", "lbd"}:
             plan["mode"] = "lbd"
 
+    plan["patch_size"]=[128,128,64]
     DmCls = DataManagerDualDetBTfms if batch_tfms else DataManagerDualDet
     D = DmCls(
         project_title=project_title,
@@ -1212,6 +1223,8 @@ if __name__ == "__main__":
     dat[0].keys()
     img = dat[0]['image']
     lm  = dat[0]['lm']
+    bbox = dat[0]['bbox']
+    ImageMaskBboxViewer(img, lm, bbox)
     ImageMaskViewer([img, lm],'im')
 # %%
 #SECTION:-------------------- ts--------------------------------------------------------------------------------------

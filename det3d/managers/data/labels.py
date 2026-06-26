@@ -5,7 +5,8 @@ from utilz.fileio import load_json
 
 def infer_det_labels_from_data_folder(dm, configs):
     dm.prepare_data()
-    labels_all = load_json(Path(dm.data_folder) / "labels_all.json")
+    manifest = load_json(Path(dm.data_folder) / "manifest.json")
+    labels_all = manifest["labels_all"]
     num_classes = max(labels_all) + 1
     fg_labels = [v for v in labels_all if v != 0] or [0]
     for plan_key in ("plan_train", "plan_valid", "plan_test"):

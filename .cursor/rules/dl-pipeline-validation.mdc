@@ -1,0 +1,109 @@
+---
+description: Deep learning pipeline validation — smoke/overfit checks and scratch-block workflow for step-by-step iteration.
+globs: "**/*.py"
+alwaysApply: false
+---
+
+# Deep learning pipeline validation
+
+Use this when validating a new arch, loss path, dataloader, or trainer wiring — before full-dataset training.
+
+## Goal
+
+Prove the **pipeline is wired correctly**, not that the model generalizes. Industry practice (Andrej Karpathy recipe, fast.ai sanity checks, PyTorch Lightning `overfit_batches`):
+
+1. **Data → model → loss → backward → optimizer** runs without shape/key errors.
+2. **Training loss decreases** on a tiny fixed subset when the model has enough capacity.
+3. **Overfitting train** is success: if loss drops and train metrics improve on the same small batch, wiring works.
+
+Validation loops, COCO/mDice, and WandB grids are **phase-2** checks after the smoke passes.
+
+## Standard smoke protocol
+
+### 1. Tiny dataset
+
+- **2–8 cases** or **1–4 batches** from real preprocessed shards.
+- Fixed `train_indices`; reproducible `seed`.
+- Prefer one fold, one datasource if multi-source.
+
+### 2. Train-only first
+
+- `val_every_n_epochs` very high or no val dataloader.
+- `early_stopping=False`.
+- `max_epochs` 20–50 (enough to see loss curve).
+- Optional: Lightning `overfit_batches=1` for single-batch memorization test.
+
+### 3. Pass criteria
+
+| Signal | Pass |
+|--------|------|
+| No crash first epoch | required |
+| `train0_loss` (or equivalent) trends down | required |
+| Gradients non-zero on head/backbone | required |
+| Train metric improves on same subset (e.g. det AP proxy, seg dice on train batch) | strong signal |
+| Val metric on holdout | not required for smoke |
+
+### 4. Phase-2 (after smoke)
+
+- Enable val every N epochs.
+- Check `val0_*` metrics and callbacks (WandB grid, checkpoint).
+- Single-GPU short run before multi-GPU.
+
+### 5. What smoke does *not* prove
+
+- Hyperparameters are optimal.
+- Model beats baseline.
+- Inference/sliding-window stitching is correct (test separately).
+
+## det3d conventions
+
+- Scratch work: `det3d/extra/{topic}.py` per `extra-scratch-workflow.mdc`.
+- Ad hoc validation: `/s/agent_rw/tmp/` — not repo `test_*.py` unless user asks for persistent regression tests.
+- Active conda env: `dl`.
+- Managers: log `train0_*`; val `val0_*` (see `RetinaNetManager`, `RetinaUNetManagerV3`).
+
+## Scratch blocks for step-by-step use
+
+When building or validating a pipeline, **append `# %%` scratch blocks** in `extra/{topic}.py` so the user can run steps in Neovim (`<leader>sa`) or Cursor:
+
+```
+# %%
+#SECTION:--- step name ---
+    ... code ...
+# end PythonMethodScratch  (optional footer on last block)
+```
+
+### Block order (typical)
+
+1. **imports** — hoist deps for following blocks.
+2. **config** — `ConfigMakerDet` / minimal dict; set `arch`, fold, tiny indices.
+3. **build network / detector** — `create_detector_from_conf` or direct `build_*`.
+4. **synthetic forward** — random tensor; assert output shapes/keys.
+5. **single real batch** — one batch from DM; print keys, shapes, loss dict.
+6. **joint loss / backward** — `loss.backward()`; optional grad norm print.
+7. **overfit smoke** — comments + call site for `TrainerDet.setup` with train-only flags.
+8. **val / infer** — only after smoke passes.
+
+### Rules for agents
+
+- Add or extend scratch blocks when implementing new pipeline pieces; do not skip straight to production-only code.
+- Mirror Neovim parity: inherited methods expanded, args from last `__main__` call site, `#SECTION:--- name ---` delimiters.
+- After user approves scratch, lift into target module; `git mv` extra → `extra/archived/`.
+- Reference existing scratches: `det3d/extra/retinaunet_v3.py`, `det3d/extra/trainer.py`, `det3d/managers/detector_factory.py` (`__main__`).
+
+## Quick commands (examples)
+
+```bash
+# import + synthetic forward
+conda run -n dl python -m det3d.extra.retinaunet_v3
+
+# train-only smoke (adjust paths/indices in scratch or CLI)
+conda run -n dl python run/training/train.py --arch retinaunet_v3 ...
+```
+
+## Anti-patterns
+
+- Full dataset + val + early stopping as first run.
+- Treating poor val AP on smoke as pipeline failure.
+- Skipping backward/optimizer step in synthetic-only tests.
+- Writing repo regression tests for one-off wiring checks.

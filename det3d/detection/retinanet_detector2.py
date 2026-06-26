@@ -45,6 +45,22 @@ class RetinaNetDetector2(RetinaNetDetector):
             losses = self.compute_loss(head_outputs, targets, self.anchors, num_anchor_locs_per_level)
             return losses
 
+        seg_key = getattr(self.network, "seg_key", None)
+        if seg_key is not None and not self.training and not use_inferer:
+            network_forward = self.network.forward
+
+            def det_head_forward(images):
+                outputs = network_forward(images)
+                outputs.pop(seg_key)
+                return outputs
+
+            self.network.forward = det_head_forward
+            try:
+                result = super().forward(input_images, targets, use_inferer=use_inferer)
+            finally:
+                self.network.forward = network_forward
+            return result
+
         return super().forward(input_images, targets, use_inferer=use_inferer)
 
 

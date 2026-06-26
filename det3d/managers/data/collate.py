@@ -167,6 +167,77 @@ def _flatten_dict_samples(batch):
     return flat
 
 
+def lbd_det_collate_train_pre_trafo(batch):
+    """Train collate for pre_trafo path: image + lm + label/instances only."""
+    imgs = []
+    lms = []
+    classes = []
+    instances = []
+    fns_imgs = []
+    fns_lms = []
+
+    for itemlist in batch:
+        for item in itemlist:
+            imgs.append(item["image"])
+            fns_imgs.append(item["image"].meta["filename_or_obj"])
+            lms.append(item["lm"])
+            classes.append(item["label"])
+            instances.append(item["instances"])
+            fns_lms.append(item["lm"].meta["filename_or_obj"])
+
+    images_out = torch.stack(imgs, 0)
+    lms_out = torch.stack(lms, 0)
+    if len(imgs) == 1:
+        fns_imgs = fns_imgs[0]
+        fns_lms = fns_lms[0]
+    images_out.meta["filename_or_obj"] = fns_imgs
+    lms_out.meta["filename_or_obj"] = fns_lms
+
+    dici = {
+        "image": images_out,
+        "label": classes,
+        "lm": lms_out,
+        "instances": instances,
+    }
+    return dici
+
+
+def lbd_det_collate_val_pre_trafo(batch):
+    """Val collate for pre_trafo path: image + lm + label/instances only."""
+    imgs = []
+    lms = []
+    classes = []
+    instances = []
+    fns_imgs = []
+    fns_lms = []
+
+    for item in batch:
+        imgs.append(item["image"])
+        fns_imgs.append(item["image"].meta["filename_or_obj"])
+        lms.append(item["lm"])
+        classes.append(item["label"])
+        instances.append(item["instances"])
+        fns_lms.append(item["lm"].meta["filename_or_obj"])
+
+    images_out = torch.stack(imgs, 0)
+    lms_out = torch.stack(lms, 0)
+    if len(batch) == 1:
+        fns_imgs = fns_imgs[0]
+        fns_lms = fns_lms[0]
+    images_out.meta["filename_or_obj"] = fns_imgs
+    lms_out.meta["filename_or_obj"] = fns_lms
+
+    dici = {
+        "image": images_out,
+        "label": classes,
+        "lm": lms_out,
+        "instances": instances,
+    }
+    if "validation_impl" in batch[0]:
+        dici["validation_impl"] = batch[0]["validation_impl"]
+    return dici
+
+
 def lbd_det_collate_train(batch):
     '''
     expects a list of lists (in case an image is sampled >1) of dicts
@@ -174,7 +245,6 @@ def lbd_det_collate_train(batch):
 
     imgs = []
     lms = []
-    masks = []
     classes = []
 
     boxes = []
@@ -187,7 +257,6 @@ def lbd_det_collate_train(batch):
             imgs.append(item["image"])
             fns_imgs.append(item["image"].meta["filename_or_obj"])
             lms.append(item["lm"])
-            masks.append(item["mask"])
             classes.append(item["label"])
             boxes.append(item["bbox"])
             points.append(item["points"])
@@ -195,7 +264,6 @@ def lbd_det_collate_train(batch):
 
     images_out = torch.stack(imgs, 0)
     lms_out = torch.stack(lms, 0)
-    masks_out = torch.stack(masks, 0)
     if len(imgs) == 1:
         fns_imgs = fns_imgs[0]
         fns_lms = fns_lms[0]
@@ -207,7 +275,6 @@ def lbd_det_collate_train(batch):
         "bbox": boxes,
         "label": classes,
         "lm": lms_out,
-        "mask": masks_out,
         "points": points,
     }
     return dici

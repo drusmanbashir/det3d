@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 from utilz.stringz import ast_literal_eval
 
 from det3d.detection.arch.nndet.blocks.basic import StackedConvBlock2
@@ -65,10 +66,21 @@ class RetinaUNetFeatureExtractor(nn.Module):
         self.decoder_levels = list(decoder_levels)
         self.out_channels = decoder.fixed_out_channels
 
+    def _encode(self, images: torch.Tensor):
+        return self.encoder(images)
+
+    def _decode(self, feats):
+        return self.decoder(feats)
+
     def forward(self, images: torch.Tensor):
-        feats = self.encoder(images)
-        fpn_feats = self.decoder(feats)
-        return [fpn_feats[i] for i in self.decoder_levels]
+        if self.training:
+            feats = checkpoint(self._encode, images, use_reentrant=False)
+            fpn_feats = checkpoint(self._decode, feats, use_reentrant=False)
+        else:
+            feats = self.encoder(images)
+            fpn_feats = self.decoder(feats)
+        head_maps = [fpn_feats[i] for i in self.decoder_levels]
+        return head_maps, fpn_feats
 
 
 def build_retinaunet_feature_extractor(plan: dict) -> RetinaUNetFeatureExtractor:

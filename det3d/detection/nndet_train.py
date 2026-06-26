@@ -133,6 +133,66 @@ def xyzxyz_exclusive_batch_to_nndet(boxes):
     return torch.stack(rows, 0)
 
 
+def disk_bbox_to_nndet_xyxyzz(disk_bbox: torch.Tensor) -> torch.Tensor:
+    """MONAI xyzxyz (post aug) → nnDet xyxyzz matching ``instances_to_boxes`` lower −1."""
+    out = xyzxyz_exclusive_batch_to_nndet(disk_bbox)
+    if out.numel():
+        out[:, [0, 1, 4]] -= 1
+    return out
+
+
+def det3d_semantic_target_seg_from_batch(
+    batch_pre: dict,
+    *,
+    device: torch.device | None = None,
+) -> torch.Tensor:
+    """Map aug'd lm instance ids → semantic seg (same rule as Instances2Segmentation)."""
+    ensure_nndet_importable()
+    from nndet.io.transforms.instances import instances_to_segmentation
+
+    target = batch_pre["target"]
+    semantic = torch.zeros_like(target)
+    for i in range(int(target.shape[0])):
+        instances_to_segmentation(
+            target[i, 0],
+            batch_pre["instance_mapping"][i],
+            add_background=True,
+            out=semantic[i, 0],
+        )
+    if device is not None:
+        semantic = semantic.to(device)
+    return semantic[:, 0]
+
+
+def _batch_pre_for_semantic(
+    lm_src,
+    labels,
+    instances_batch,
+    fg_labels,
+    crop_starts,
+    forward_patch_size,
+    n: int,
+) -> dict:
+    targets = []
+    mappings = []
+    for i in range(n):
+        lm_item = lm_src[i] if isinstance(lm_src, list) else lm_src[i]
+        vol = _lm_seg_volume(lm_item)
+        if crop_starts is not None:
+            vol, _ = _center_crop_spatial(vol, forward_patch_size, crop_starts)
+        targets.append(vol.float().unsqueeze(0).unsqueeze(0))
+        inst = instances_batch[i] if instances_batch is not None else None
+        mappings.append(
+            _instance_mapping_for_item(
+                lm_item, labels[i], instances=inst, fg_labels=fg_labels
+            )
+        )
+    return {
+        "target": torch.cat(targets, 0),
+        "instance_mapping": mappings,
+    }
+
+
 def _nndet_target_classes(target_boxes, target_classes_raw, fg_labels):
   #AI
     """Map semantic box labels to nnDetection fg indices (0..K-1)."""
@@ -152,9 +212,77 @@ def _nndet_target_classes(target_boxes, target_classes_raw, fg_labels):
     return out
 
 
-def det3d_batch_to_nndet(batch, forward_patch_size=None, seg_key="lm", fg_labels=None):
+def _instance_mapping_for_item(lm_item, labels, instances=None, fg_labels=None):
   #AI
-    """det3d collate → nnDetection train_step targets (center crop, box remap, fg_labels)."""
+    """Map lm instance ids to nnDet fg class indices."""
+    if instances is not None:
+        label_to_idx = {int(v): i for i, v in enumerate(fg_labels)}
+        mapping = {}
+        for key, semantic in instances.items():
+            mapping[str(key)] = label_to_idx[int(semantic)]
+        return mapping
+    vol = _lm_seg_volume(lm_item)
+    inst = vol.unique(sorted=True)
+    inst = inst[inst > 0].tolist()
+    lbl = torch.as_tensor(labels).reshape(-1).long()
+    label_to_idx = {int(v): i for i, v in enumerate(fg_labels)}
+    mapping = {}
+    for j, iid in enumerate(sorted(int(i) for i in inst)):
+        if j < lbl.numel():
+            mapping[str(iid)] = label_to_idx[int(lbl[j].item())]
+        else:
+            mapping[str(iid)] = 0
+    return mapping
+
+
+def det3d_batch_to_pre_trafo_input(batch, forward_patch_size=None, fg_labels=None):
+  #AI
+    """det3d collate batch -> nnDet pre_trafo input: data, target, instance_mapping."""
+    data = batch["image"].float()
+    crop_starts = None
+    if forward_patch_size is not None:
+        forward_patch_size = tuple(int(v) for v in forward_patch_size)
+        spatial = tuple(int(v) for v in data.shape[-3:])
+        if any(s > p for s, p in zip(spatial, forward_patch_size)):
+            data, crop_starts = _center_crop_spatial(data, forward_patch_size)
+
+    lm_src = batch["lm"]
+    n = int(data.shape[0])
+    targets = []
+    mappings = []
+    instances_batch = batch["instances"]
+    labels = batch["label"]
+    for i in range(n):
+        lm_item = lm_src[i] if isinstance(lm_src, list) else lm_src[i]
+        vol = _lm_seg_volume(lm_item)
+        if crop_starts is not None:
+            vol, _ = _center_crop_spatial(vol, forward_patch_size, crop_starts)
+        targets.append(vol.float().unsqueeze(0).unsqueeze(0))
+        inst = instances_batch[i]
+        mappings.append(
+            _instance_mapping_for_item(
+                lm_item, labels[i], instances=inst, fg_labels=fg_labels
+            )
+        )
+
+    batch_pre = {
+        "data": data,
+        "target": torch.cat(targets, 0),
+        "instance_mapping": mappings,
+    }
+    return batch_pre
+
+
+def det3d_batch_to_nndet(
+    batch,
+    forward_patch_size=None,
+    seg_key="lm",
+    fg_labels=None,
+    *,
+    use_disk_box_plug=True,
+):
+  #AI
+    """det3d collate → nnDetection train_step targets (disk boxes + semantic seg)."""
     data = batch["image"]
     crop_starts = None
     if forward_patch_size is not None:
@@ -166,23 +294,17 @@ def det3d_batch_to_nndet(batch, forward_patch_size=None, seg_key="lm", fg_labels
     lm_src = batch[seg_key]
     n = int(data.shape[0])
 
-    target_seg_list = []
     target_boxes = []
     target_classes_raw = []
+    instances_batch = batch["instances"] if "instances" in batch else None
+
+    box_to_nndet = disk_bbox_to_nndet_xyxyzz if use_disk_box_plug else xyzxyz_exclusive_batch_to_nndet
 
     for i in range(n):
-        lm_item = lm_src[i] if isinstance(lm_src, list) else lm_src[i]
-        lm_vol = _lm_seg_volume(lm_item)
-        if crop_starts is not None:
-            lm_vol, _ = _center_crop_spatial(lm_vol, forward_patch_size, crop_starts)
-
-        target_seg_list.append(lm_vol.long())
-
         box = batch["bbox"][i]
         if crop_starts is not None:
             box = _crop_boxes_to_patch(box, crop_starts, forward_patch_size)
-        box = xyzxyz_exclusive_batch_to_nndet(box)
-        target_boxes.append(box)
+        target_boxes.append(box_to_nndet(box))
 
         label = torch.as_tensor(batch["label"][i], dtype=torch.long).reshape(-1)
         target_classes_raw.append(label)
@@ -191,7 +313,19 @@ def det3d_batch_to_nndet(batch, forward_patch_size=None, seg_key="lm", fg_labels
         target_boxes, target_classes_raw, fg_labels
     )
 
-    target_seg = torch.stack(target_seg_list, 0)
+    batch_pre = _batch_pre_for_semantic(
+        lm_src,
+        batch["label"],
+        instances_batch,
+        fg_labels,
+        crop_starts,
+        forward_patch_size,
+        n,
+    )
+    target_seg = det3d_semantic_target_seg_from_batch(
+        batch_pre, device=data.device if isinstance(data, torch.Tensor) else None
+    )
+
     out = {
         "data": data,
         "target_boxes": target_boxes,

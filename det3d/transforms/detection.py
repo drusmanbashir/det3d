@@ -32,7 +32,10 @@ from monai.transforms import (
     RandShiftIntensityd,
     RandZoomd,
 )
-from monai.transforms.spatial.dictionary import ConvertBoxToPointsd, ConvertPointsToBoxesd
+from monai.transforms.spatial.dictionary import (
+    ConvertBoxToPointsd,
+    ConvertPointsToBoxesd,
+)
 from monai.transforms.utility.dictionary import ApplyTransformToPointsd
 from monai.utils.type_conversion import convert_data_type
 
@@ -52,7 +55,9 @@ def generate_detection_train_transform(
     compute_dtype = torch.float16 if amp else torch.float32
     return Compose(
         [
-            LoadImaged(keys=[image_key], image_only=False, meta_key_postfix="meta_dict"),
+            LoadImaged(
+                keys=[image_key], image_only=False, meta_key_postfix="meta_dict"
+            ),
             EnsureChannelFirstd(keys=[image_key]),
             EnsureTyped(keys=[image_key, box_key], dtype=torch.float32),
             EnsureTyped(keys=[label_key], dtype=torch.long),
@@ -95,7 +100,9 @@ def generate_detection_train_transform(
             RandFlipd(keys=[image_key], prob=0.5, spatial_axis=2),
             RandRotate90d(keys=[image_key], prob=0.75, max_k=3, spatial_axes=(0, 1)),
             ApplyTransformToPointsd(
-                keys=[point_key], refer_keys=image_key, affine_lps_to_ras=affine_lps_to_ras
+                keys=[point_key],
+                refer_keys=image_key,
+                affine_lps_to_ras=affine_lps_to_ras,
             ),
             ConvertPointsToBoxesd(keys=[point_key]),
             ClipBoxToImaged(
@@ -158,7 +165,9 @@ def generate_detection_val_transform(
     compute_dtype = torch.float16 if amp else torch.float32
     return Compose(
         [
-            LoadImaged(keys=[image_key], image_only=False, meta_key_postfix="meta_dict"),
+            LoadImaged(
+                keys=[image_key], image_only=False, meta_key_postfix="meta_dict"
+            ),
             EnsureChannelFirstd(keys=[image_key]),
             EnsureTyped(keys=[image_key, box_key], dtype=torch.float32),
             EnsureTyped(keys=[label_key], dtype=torch.long),
@@ -176,6 +185,145 @@ def generate_detection_val_transform(
             EnsureTyped(keys=label_key, dtype=torch.long),
         ]
     )
+
+
+def extended_bbox_patch_size_keys(
+    dim_x,
+    dim_y,
+    dim_z,
+    same_xy=True,
+    prepatch_zoom_scales=(1.1, 1.2, 1.4),
+):
+    dim_x = [int(v) for v in dim_x]
+    dim_y = [int(v) for v in dim_y]
+    dim_z = [int(v) for v in dim_z]
+    prepatch_zoom_scales = [float(v) for v in prepatch_zoom_scales]
+    if same_xy:
+        base_keys = [(dx, dx, dz) for dx in dim_x for dz in dim_z]
+    else:
+        base_keys = [(dx, dy, dz) for dx in dim_x for dy in dim_y for dz in dim_z]
+    keys = []
+    seen = set()
+    for patch_size in base_keys:
+        if patch_size not in seen:
+            seen.add(patch_size)
+            keys.append(patch_size)
+        for scale in prepatch_zoom_scales:
+            scaled = tuple(int(v * scale) for v in patch_size)
+            if scaled not in seen:
+                seen.add(scaled)
+                keys.append(scaled)
+    return keys
+
+
+def patch_size_manifest_key(patch_size):
+    # AI
+    result = ",".join(str(int(v)) for v in patch_size)
+    return result
+
+
+def ExtendedBBoxesByPatchSizes(
+    boxes,
+    image_size,
+    dim_x=(128, 160, 192),
+    dim_y=(128, 160, 192),
+    dim_z=(64, 96, 128),
+    same_xy=True,
+    whole_box=False,
+    prepatch_zoom_scales=(1.1, 1.2, 1.4),
+):
+    # AI
+    """Extended crop-center xyzxyz ranges per patch-size key; no mask."""
+    image_size = tuple(int(v) for v in image_size)
+    boxes_np, *_ = convert_data_type(boxes, np.ndarray)
+    if boxes_np.size == 0:
+        boxes_np = boxes_np.reshape(0, 6)
+    out = {}
+    for patch_size in extended_bbox_patch_size_keys(
+        dim_x, dim_y, dim_z, same_xy, prepatch_zoom_scales
+    ):
+        gen = GenerateExtendedBoxMask(
+            keys="bbox",
+            image_key="image",
+            spatial_size=patch_size,
+            whole_box=whole_box,
+        )
+        ext = gen.generate_fg_center_boxes_np(boxes_np, image_size, whole_box=whole_box)
+        key = patch_size_manifest_key(patch_size)
+        if ext.shape[0] == 0:
+            out[key] = []
+        else:
+            out[key] = ext.astype(int).tolist()
+    result = out
+    return result
+
+
+def build_extended_bboxes_manifest_payload(
+    dim_x,
+    dim_y,
+    dim_z,
+    same_xy=True,
+    whole_box=False,
+    labels_all=None,
+    prepatch_zoom_scales=(1.1, 1.2, 1.4),
+):
+    # AI
+    patch_sizes = extended_bbox_patch_size_keys(
+        dim_x, dim_y, dim_z, same_xy, prepatch_zoom_scales
+    )
+    payload = {
+        "labels_all": sorted(int(v) for v in labels_all),
+        "extended_bboxes_patch_sizes": [list(ps) for ps in patch_sizes],
+        "same_xy": bool(same_xy),
+        "whole_box": bool(whole_box),
+        "dim_x": [int(v) for v in dim_x],
+        "dim_y": [int(v) for v in dim_y],
+        "dim_z": [int(v) for v in dim_z],
+        "prepatch_zoom_scales": [float(v) for v in prepatch_zoom_scales],
+    }
+    return payload
+
+
+class ExtendedBBoxesByPatchSizesd(MapTransform):
+    def __init__(
+        self,
+        keys,
+        box_key="bbox",
+        image_key="image",
+        extended_bboxes_key="extended_bboxes",
+        dim_x=(128, 160, 192),
+        dim_y=(128, 160, 192),
+        dim_z=(64, 96, 128),
+        same_xy=True,
+        whole_box=False,
+        prepatch_zoom_scales=(1.1, 1.2, 1.4),
+        allow_missing_keys=False,
+    ):
+        super().__init__(keys, allow_missing_keys)
+        self.box_key = box_key
+        self.image_key = image_key
+        self.extended_bboxes_key = extended_bboxes_key
+        self.dim_x = dim_x
+        self.dim_y = dim_y
+        self.dim_z = dim_z
+        self.same_xy = same_xy
+        self.whole_box = whole_box
+        self.prepatch_zoom_scales = prepatch_zoom_scales
+
+    def __call__(self, data):
+        d = dict(data)
+        spatial_shape = tuple(int(v) for v in d[self.image_key].shape[-3:])
+        d[self.extended_bboxes_key] = ExtendedBBoxesByPatchSizes(
+            d[self.box_key],
+            spatial_shape,
+            dim_x=self.dim_x,
+            dim_y=self.dim_y,
+            dim_z=self.dim_z,
+            same_xy=self.same_xy,
+            whole_box=self.whole_box,
+            prepatch_zoom_scales=self.prepatch_zoom_scales,
+        )
+        return d
 
 
 class GenerateExtendedBoxMask(MapTransform):
@@ -201,24 +349,34 @@ class GenerateExtendedBoxMask(MapTransform):
         boxes_stop = np.floor(boxes_np[:, spatial_dims:]).astype(int)
         for axis in range(spatial_dims):
             if not whole_box:
-                extended_boxes[:, axis] = boxes_start[:, axis] - self.spatial_size[axis] // 2 + 1
+                extended_boxes[:, axis] = (
+                    boxes_start[:, axis] - self.spatial_size[axis] // 2 + 1
+                )
                 extended_boxes[:, axis + spatial_dims] = (
                     boxes_stop[:, axis] + self.spatial_size[axis] // 2 - 1
                 )
             else:
-                extended_boxes[:, axis] = boxes_stop[:, axis] - self.spatial_size[axis] // 2 - 1
-                extended_boxes[:, axis] = np.minimum(extended_boxes[:, axis], boxes_start[:, axis])
+                extended_boxes[:, axis] = (
+                    boxes_stop[:, axis] - self.spatial_size[axis] // 2 - 1
+                )
+                extended_boxes[:, axis] = np.minimum(
+                    extended_boxes[:, axis], boxes_start[:, axis]
+                )
                 extended_boxes[:, axis + spatial_dims] = (
                     extended_boxes[:, axis] + self.spatial_size[axis] // 2
                 )
                 extended_boxes[:, axis + spatial_dims] = np.maximum(
                     extended_boxes[:, axis + spatial_dims], boxes_stop[:, axis]
                 )
-        extended_boxes, _ = clip_boxes_to_image(extended_boxes, image_size, remove_empty=True)
+        extended_boxes, _ = clip_boxes_to_image(
+            extended_boxes, image_size, remove_empty=True
+        )
         return extended_boxes
 
     def generate_mask_img(self, boxes, image_size, whole_box=True):
-        extended_boxes_np = self.generate_fg_center_boxes_np(boxes, image_size, whole_box)
+        extended_boxes_np = self.generate_fg_center_boxes_np(
+            boxes, image_size, whole_box
+        )
         mask_img = convert_box_to_mask(
             extended_boxes_np,
             np.ones(extended_boxes_np.shape[0]),

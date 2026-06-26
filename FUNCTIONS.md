@@ -66,6 +66,7 @@
 - `train.py` — Lightning det training entrypoint; `--arch retinanet|retinaunet`, `--nndet-forward-patch-size 128,128,64` (DM RandCrop patch; same DM for both arch), `--batch-tfms` → `TrainerDet.resolve_orchestrator_class`
 - `nndet_env_dl.sh` — env vars for native nnDetection in conda `dl` (`det_data`, `det_models`, MLflow)
 - `nndet_train_lidc.sh` — native nnDet LIDC training (`nndet_train Task012_LIDC`, forwards `-o` / `--sweep`)
+- `benchmark_det_pipelines.py` — benchmark pipelines (native nnDet + `retinaunet_v3`); det loss cls+reg; refs `LIDCA-HOSS`/`LIDCA-IMPS`; `run|report|all|sweep`
 
 ## det3d/inference
 

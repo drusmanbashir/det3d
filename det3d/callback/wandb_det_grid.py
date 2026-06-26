@@ -66,7 +66,7 @@ def adapt_retinaunet_pred_boxes(pred):
     return pred
 
 
-def _items_from_batch(batch, preds, score_min, top_k, retinaunet=False, gt_seg_key=None):
+def _items_from_batch(batch, preds, score_min, top_k, retinaunet=False, adapt_nndet_boxes=True, gt_seg_key=None):
     batch_size = int(batch["image"].shape[0])
     case_ids = _case_ids_from_batch(batch)
     while len(case_ids) < batch_size:
@@ -75,10 +75,10 @@ def _items_from_batch(batch, preds, score_min, top_k, retinaunet=False, gt_seg_k
     for b in range(batch_size):
         pred_cpu = {k: v.detach().cpu() for k, v in preds[b].items()}
         pred = filter_detection_pred(pred_cpu, score_min=score_min, top_k=top_k)
-        if retinaunet:
+        if retinaunet and adapt_nndet_boxes:
             pred = adapt_retinaunet_pred_boxes(pred)
         pred_overlap = filter_detection_pred(pred_cpu, score_min=score_min, top_k=None)
-        if retinaunet:
+        if retinaunet and adapt_nndet_boxes:
             pred_overlap = adapt_retinaunet_pred_boxes(pred_overlap)
         item = {
             "case_id": case_ids[b],
@@ -390,6 +390,7 @@ class WandbRetinaUNetImageGridCallback(WandbDetImageGridCallback):
         show_fg_heatmap=True,
         show_gt_seg=True,
         gt_seg_key="lm",
+        adapt_nndet_boxes=True,
     ):
         super().__init__(
             patch_size=patch_size,
@@ -411,6 +412,7 @@ class WandbRetinaUNetImageGridCallback(WandbDetImageGridCallback):
         self.show_pred_seg = show_pred_seg
         self.show_gt_seg = show_gt_seg
         self.gt_seg_key = gt_seg_key
+        self.adapt_nndet_boxes = adapt_nndet_boxes
 
     def _append_det_batch(self, batch):
         gt_seg_key = self.gt_seg_key if self.show_gt_seg else None
@@ -421,6 +423,7 @@ class WandbRetinaUNetImageGridCallback(WandbDetImageGridCallback):
                 self.score_min,
                 top_k=self.pred_top_k,
                 retinaunet=True,
+                adapt_nndet_boxes=self.adapt_nndet_boxes,
                 gt_seg_key=gt_seg_key,
             )
         )

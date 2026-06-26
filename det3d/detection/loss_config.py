@@ -8,7 +8,7 @@ def apply_detector_loss_plan(detector, configs):
     arch = str(configs["model_params"]["arch"]).lower()
     cls_loss = str(plan.get("cls_loss", "bce")).lower()
     reg_loss = str(plan.get("reg_loss", "smooth_l1")).lower()
-    if arch == "retinaunet":
+    if arch in ("retinaunet", "retinaunet_v3"):
         reg_loss = "giou"
 
     if cls_loss == "focal":
@@ -29,7 +29,7 @@ def apply_detector_loss_plan(detector, configs):
 def apply_detector_sampler_plan(detector, configs):
     plan = configs["plan_train"]
     arch = str(configs["model_params"]["arch"]).lower()
-    if arch == "retinaunet":
+    if arch in ("retinaunet", "retinaunet_v3"):
         batch_size_per_image = 32
         positive_fraction = 0.33
         min_neg = 1

@@ -1,10 +1,11 @@
 from det3d.trainers.trainerdet import TrainerDet
 from det3d.trainers.trainerdet_rt import TrainerDetRT, TrainerDetRunThrough
-from det3d.trainers.transferdet import TrainerDetTransfer
+from det3d.trainers.transferdet import TrainerDetTransfer, TrainerDetTransferRT
 
 __all__ = [
     "TrainerDet",
     "TrainerDetRT",
     "TrainerDetRunThrough",
     "TrainerDetTransfer",
+    "TrainerDetTransferRT",
 ]

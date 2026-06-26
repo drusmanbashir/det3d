@@ -1,19 +1,18 @@
 import torch
 from det3d.detection.nndet_train import (
-    build_nndet_retinaunet_module,
+    _batch_pre_for_semantic,
+    _center_crop_spatial,
+    _crop_boxes_to_patch,
+    _nndet_target_classes,
+    det3d_semantic_target_seg_from_batch,
+    disk_bbox_to_nndet_xyxyzz,
     ensure_nndet_importable,
-    forward_patch_size_from_configs,
-    maybe_store_batch_grid_preds,
-    xyzxyz_exclusive_batch_to_nndet,
+    nndet_batch_pred_to_vis_list,
 )
 from det3d.utils.tensor import to_numpy
-from det3d.extra.trainer_nndet import (
-    apply_det3d_plan_to_nndet_model_cfg,
-    load_nndet_train_cfgs,
-    plan_from_det3d,
-)
 from fran.managers.project import Project
 from lightning.pytorch import LightningModule
+from utilz.stringz import ast_literal_eval
 
 
 class RetinaUNetManager(LightningModule):
@@ -28,9 +27,9 @@ class RetinaUNetManager(LightningModule):
         self.plan = configs["plan_train"]
         self.lr = float(lr if lr is not None else self.configs["model_params"]["lr"])
         self.class_names = [self.plan["class_name"]]
-        self.forward_patch_size = forward_patch_size_from_configs(configs)
+        self.forward_patch_size = self._forward_patch_size_from_configs(configs)
         self.val_patch_size = self.forward_patch_size
-        self.nndet_module, self.nndet_plan = build_nndet_retinaunet_module(
+        self.nndet_module, self.nndet_plan = self._build_nndet_module(
             configs, num_train_batches=2500
         )
         self.val_loss_sum = 0.0
@@ -41,35 +40,104 @@ class RetinaUNetManager(LightningModule):
     def net(self):
         return self.nndet_module.model
 
-    def _nndet_targets(self, batch):
-        from monai.data.box_utils import clip_boxes_to_image
-        data = batch["image"]
-        label_to_idx = {int(v): i for i, v in enumerate(self.plan["fg_labels"])}  # T:self_ref|label_to_idx = {int(v): i for i, v in enumerate(self.plan["fg_labels"])}
-        target_boxes = []
-        target_classes = []
-        for i in range(data.shape[0]):  # T:loop|for i in range(data.shape[0]):
-            box = batch["bbox"][i]
-            nndet_box = xyzxyz_exclusive_batch_to_nndet(box)  # T:indent|    nndet_box = xyzxyz_exclusive_batch_to_nndet(box)
-            target_boxes.append(nndet_box)  # T:indent|    target_boxes.append(nndet_box)
-            cls_ = batch["label"][i][: box.shape[0]]  # T:indent|    cls_ = batch["label"][i][: box.shape[0]]
-            mapped = torch.tensor(  # T:indent|    mapped = torch.tensor(
-                [label_to_idx[int(v.item())] for v in cls_],  # T:indent|        [label_to_idx[int(v.item())] for v in cls_],
-                dtype=torch.long,  # T:indent|        dtype=torch.long,
-                device=nndet_box.device,  # T:indent|        device=nndet_box.device,
-            )  # T:indent|    )
-            target_classes.append(mapped)  # T:indent|    target_classes.append(mapped)
+    def _forward_patch_size_from_configs(self, configs):
+        fps = configs["model_params"].get("nndet_forward_patch_size")
+        if fps is None:
+            fps = configs["plan_train"]["patch_size"]
+        if fps is None:
+            return None
+        if isinstance(fps, str):
+            fps = ast_literal_eval(fps)
+        return [int(v) for v in fps]
 
-        batch['lm'] = batch['lm'].squeeze(1)
-        out = {
+    def _build_nndet_module(self, configs, num_train_batches):
+        from pathlib import Path
+        ensure_nndet_importable()
+        from nndet.ptmodule.retinaunet.v001 import RetinaUNetV001
+        from det3d.configs.parser import resolve_nndet_plan_path
+        from det3d.extra.trainer_nndet import (
+            apply_det3d_plan_to_nndet_model_cfg,
+            load_nndet_train_cfgs,
+            plan_from_det3d,
+        )
+
+        plan_train = configs["plan_train"]
+        plan_path = configs["model_params"].get("nndet_plan_path")
+        if plan_path is None:
+            plan_path = resolve_nndet_plan_path(
+                configs["mnemonic"], Path(configs["configurations_dir"])
+            )
+        else:
+            plan_path = Path(plan_path)
+        if not plan_path.is_file():
+            raise FileNotFoundError(plan_path)
+        model_cfg, trainer_cfg = load_nndet_train_cfgs()
+        model_cfg = apply_det3d_plan_to_nndet_model_cfg(model_cfg, plan_train)
+        trainer_cfg["num_train_batches_per_epoch"] = int(num_train_batches)
+        trainer_cfg["max_num_epochs"] = int(configs["model_params"].get("max_epochs", 600))
+        plan = plan_from_det3d(plan_train, plan_path=str(plan_path))
+        module = RetinaUNetV001(
+            model_cfg=model_cfg,
+            trainer_cfg=trainer_cfg,
+            plan=plan,
+        )
+        return module, plan
+
+    def _det3d_batch_to_nndet(self, batch, seg_key="lm", use_disk_box_plug=True):
+        from det3d.detection.nndet_train import xyzxyz_exclusive_batch_to_nndet
+
+        data = batch["image"]
+        forward_patch_size = self.forward_patch_size
+        crop_starts = None
+        if forward_patch_size is not None:
+            forward_patch_size = tuple(int(v) for v in forward_patch_size)
+            spatial = tuple(int(v) for v in data.shape[-3:])
+            if any(s > p for s, p in zip(spatial, forward_patch_size)):
+                data, crop_starts = _center_crop_spatial(data, forward_patch_size)
+
+        lm_src = batch[seg_key]
+        n = int(data.shape[0])
+        target_boxes = []
+        target_classes_raw = []
+        instances_batch = batch["instances"] if "instances" in batch else None
+        if use_disk_box_plug:
+            box_to_nndet = disk_bbox_to_nndet_xyxyzz
+        else:
+            box_to_nndet = xyzxyz_exclusive_batch_to_nndet
+
+        for i in range(n):
+            box = batch["bbox"][i]
+            if crop_starts is not None:
+                box = _crop_boxes_to_patch(box, crop_starts, forward_patch_size)
+            target_boxes.append(box_to_nndet(box))
+
+            label = torch.as_tensor(batch["label"][i], dtype=torch.long).reshape(-1)
+            target_classes_raw.append(label)
+
+        target_classes = _nndet_target_classes(
+            target_boxes, target_classes_raw, self.plan["fg_labels"]
+        )
+        batch_pre = _batch_pre_for_semantic(
+            lm_src,
+            batch["label"],
+            instances_batch,
+            self.plan["fg_labels"],
+            crop_starts,
+            forward_patch_size,
+            n,
+        )
+        target_seg = det3d_semantic_target_seg_from_batch(
+            batch_pre, device=data.device if isinstance(data, torch.Tensor) else None
+        )
+        return {
             "data": data,
             "target_boxes": target_boxes,
             "target_classes": target_classes,
-            "target_seg": batch["lm"]
+            "target_seg": target_seg,
         }
-        return out
 
     def _step_losses(self, batch, batch_idx, evaluation=False):
-        nb = self._nndet_targets(batch)
+        nb = self._det3d_batch_to_nndet(batch)
         nb.keys()
         losses, prediction = self.net.train_step(
             images=nb["data"],
@@ -143,7 +211,7 @@ class RetinaUNetManager(LightningModule):
             seg_probs=to_numpy(prediction["pred_seg"]),
             target=to_numpy(nb["target_seg"]),
         )
-        maybe_store_batch_grid_preds(self, batch, prediction)
+        batch["pred"] = nndet_batch_pred_to_vis_list(prediction)
 
     def on_validation_epoch_end(self):
         val_loss = self.val_loss_sum / self.val_loss_count
@@ -202,6 +270,11 @@ if __name__ == "__main__":
 
     ensure_nndet_importable()
     from nndet.ptmodule.retinaunet.v001 import RetinaUNetV001
+    from det3d.extra.trainer_nndet import (
+        apply_det3d_plan_to_nndet_model_cfg,
+        load_nndet_train_cfgs,
+        plan_from_det3d,
+    )
 
     num_train_batches = 2500
 

@@ -8,7 +8,7 @@ OUT = Path(__file__).resolve().parents[2].parent / "fran" / "configurations" / "
 PARAM_COLS = ["var_name", "tune_value", "tune_type", "tune", "manual_value", "notes"]
 
 MODEL_PARAMS = [
-    ("arch", "retinaunet", "choice", 0, "retinanet", "retinanet | retinaunet"),
+    ("arch", "retinaunet", "choice", 0, "retinanet", "retinanet | retinaunet | retinaunet_v3"),
     ("spatial_dims", None, None, 0, 3, "both"),
     ("n_input_channels", None, None, 0, 1, "CT single channel"),
     ("class_name", None, None, 0, "nodule", "COCO metrics label only"),
@@ -35,6 +35,8 @@ LOSS_PARAMS = [
     ("sampler_batch_size_per_image", "32", None, 0, 64, "retinanet default; retinaunet override in code"),
     ("sampler_pool_size", None, None, 0, 20, "loss_params sheet"),
     ("sampler_min_neg", "1", None, 0, 16, "retinanet default; retinaunet override in code"),
+    ("lambda_dice", None, None, 0, 0.5, "retinaunet_v3 seg loss"),
+    ("lambda_ce", None, None, 0, 0.5, "retinaunet_v3 seg loss"),
 ]
 
 DATA_PARAMS = [
@@ -98,6 +100,8 @@ DET_SHEET_ONLY_KEYS = {
     "sampler_batch_size_per_image",
     "sampler_pool_size",
     "sampler_min_neg",
+    "lambda_dice",
+    "lambda_ce",
     "score_thresh",
     "nms_thresh",
     "detections_per_img",
@@ -119,7 +123,8 @@ def _lungs_plan_base():
         "remapping_source": None,
         "remapping_lbd_rbd": None,
         "remapping_train": None,
-        "patch_size": "[192, 192, 80]",
+        "patch_dim0": 160,
+        "patch_dim1": 96,
         "nnz_allowed": False,
         "ignore_labels_cc": 1,
         "dusting_mm": None,

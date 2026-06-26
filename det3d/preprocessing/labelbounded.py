@@ -24,10 +24,15 @@ from utilz.stringz import info_from_filename, strip_extension
 
 from det3d.preprocessing.dataset_details import write_dataset_details_csv
 from det3d.preprocessing.helpers import dusting_threshold
-from det3d.preprocessing.hdf5_shards_det import DetHDF5ShardGenerator
+from det3d.preprocessing.hdf5_shards_det import (
+    DetHDF5ShardGenerator,
+    ensure_hdf5_shards_for_plan,
+)
 from det3d.transforms.bbox_stats import DetectionBBoxStatsd
-from det3d.transforms.crop_indices import volume_fg_flat_indices
-from det3d.transforms.detection import GenerateExtendedBoxMask
+from det3d.transforms.detection import (
+    ExtendedBBoxesByPatchSizesd,
+    build_extended_bboxes_manifest_payload,
+)
 from det3d.utils.bbox_sidecar import (
     bbox_sidecar_path,
     save_detection_sidecar,
@@ -48,39 +53,51 @@ class _LBDDetWorker(_LBDSamplerWorkerBase):
         output_folder,
         dusting_threshold=3.0,
         ignore_labels_cc=None,
+        extended_bbox_dim_x=(128, 160, 192),
+        extended_bbox_dim_y=(128, 160, 192),
+        extended_bbox_dim_z=(64, 96, 128),
+        extended_bbox_same_xy=True,
+        extended_bbox_prepatch_zoom_scales=(1.1, 1.2, 1.4),
     ):
         self.dusting_threshold = dusting_threshold
         self.ignore_labels_cc = [] if ignore_labels_cc is None else listify(ignore_labels_cc)
+        self.extended_bbox_dim_x = extended_bbox_dim_x
+        self.extended_bbox_dim_y = extended_bbox_dim_y
+        self.extended_bbox_dim_z = extended_bbox_dim_z
+        self.extended_bbox_same_xy = extended_bbox_same_xy
+        self.extended_bbox_prepatch_zoom_scales = extended_bbox_prepatch_zoom_scales
         _LBDSamplerWorkerBase.__init__(
             self,
             project=project,
             plan=plan,
             data_folder=data_folder,
             output_folder=output_folder,
-            tfms_keys="LoadT,Chan,Dev,Crop,Remap,Labels,Indx,Stats,E,L,H",
+            tfms_keys="LoadT,Chan,Dev,Crop,Remap,Labels,Indx,Stats,E,Ext,H",
         )
 
     def create_transforms(self):
         super().create_transforms()
-        plan = self.plan
-        patch_size = tuple(int(v) for v in plan["patch_size"])
         self.Stats = DetectionBBoxStatsd(
             image_key=self.image_key,
             lm_key=self.lm_key,
-            dusting_threshold=dusting_threshold(plan),
+            dusting_threshold=dusting_threshold(self.plan),
             ignore_labels=self.ignore_labels_cc,
-            gt_box_mode=plan["gt_box_mode"],
+            gt_box_mode=self.plan["gt_box_mode"],
         )
         self.E = StandardizeEmptyBoxd(
             box_keys=[self.box_key],
             box_ref_image_keys=self.image_key,
         )
-        self.L = GenerateExtendedBoxMask(
+        self.Ext = ExtendedBBoxesByPatchSizesd(
             keys=self.box_key,
+            box_key=self.box_key,
             image_key=self.image_key,
-            spatial_size=patch_size,
-            whole_box=True,
-            mask_image_key="mask_image"
+            dim_x=self.extended_bbox_dim_x,
+            dim_y=self.extended_bbox_dim_y,
+            dim_z=self.extended_bbox_dim_z,
+            same_xy=self.extended_bbox_same_xy,
+            whole_box=False,
+            prepatch_zoom_scales=self.extended_bbox_prepatch_zoom_scales,
         )
         self.H = Compose(
             [
@@ -92,8 +109,12 @@ class _LBDDetWorker(_LBDSamplerWorkerBase):
         )
         self.transforms_dict["Stats"] = self.Stats
         self.transforms_dict["E"] = self.E
-        self.transforms_dict["L"] = self.L
+        self.transforms_dict["Ext"] = self.Ext
         self.transforms_dict["H"] = self.H
+
+    def save_extended_bboxes(self, data, case_id):
+        out_fn = self.output_folder / "extended_bboxes" / f"{case_id}.json"
+        save_json(data["extended_bboxes"], out_fn)
 
     def save_bbox_sidecar(self, data, fn_name):
         stem = strip_extension(fn_name)
@@ -112,10 +133,6 @@ class _LBDDetWorker(_LBDSamplerWorkerBase):
             labels,
             ignore_labels=list(self.ignore_labels_cc),
         )
-
-    def save_mask_pt(self, mask, image):
-        mask = MetaTensor(mask, meta=dict(image.meta))
-        self.save_pt(mask, "masks")
 
     def _process_row(self, row: pd.Series):
 
@@ -139,19 +156,10 @@ class _LBDDetWorker(_LBDSamplerWorkerBase):
         save_meta["filename_or_obj"] = src_fn
         image.meta = save_meta
         lm.meta = save_meta
-        mask = torch.as_tensor(data["mask_image"], dtype=torch.uint8)
-        if mask.ndim == 3:
-            mask = mask.unsqueeze(0)
-        fg = volume_fg_flat_indices(mask)
-        inds = {
-            "fg_indices": fg,
-            "meta": image.meta,
-        }
-        self.save_indices(inds, self.indices_subfolder)
         self.save_pt(image[0], "images")
         self.save_pt(lm[0], "lms")
-        self.save_mask_pt(mask[0], image)
         self.save_bbox_sidecar(data, fn_name)
+        self.save_extended_bboxes(data, case_id)
         return {
             "case_id": case_id,
             "ok": True,
@@ -176,7 +184,23 @@ class LabelBoundedDetDataGenerator(LabelBoundedDataGenerator):
     actor_cls = LBDDetWorkerImpl
     local_worker_cls = LBDDetWorkerLocal
 
-    def __init__(self, project, plan, data_folder, output_folder=None):
+    def __init__(
+        self,
+        project,
+        plan,
+        data_folder,
+        output_folder=None,
+        extended_bbox_dim_x=(128, 160, 192),
+        extended_bbox_dim_y=(128, 160, 192),
+        extended_bbox_dim_z=(64, 96, 128),
+        extended_bbox_same_xy=True,
+        extended_bbox_prepatch_zoom_scales=(1.1, 1.2, 1.4),
+    ):
+        self.extended_bbox_dim_x = extended_bbox_dim_x
+        self.extended_bbox_dim_y = extended_bbox_dim_y
+        self.extended_bbox_dim_z = extended_bbox_dim_z
+        self.extended_bbox_same_xy = extended_bbox_same_xy
+        self.extended_bbox_prepatch_zoom_scales = extended_bbox_prepatch_zoom_scales
         LabelBoundedDataGenerator.__init__(
             self,
             project=project,
@@ -198,24 +222,32 @@ class LabelBoundedDetDataGenerator(LabelBoundedDataGenerator):
             return []
         if overwrite_hdf5_shards:
             self.df["hdf5_processed"] = None
+        _, linked = ensure_hdf5_shards_for_plan(
+            self.output_folder, self.plan["src_dims"]
+        )
         writer = DetHDF5ShardGenerator(
             project=self.project,
             plan=self.plan,
             data_folder=self.output_folder,
             output_folder=self.hdf5_output_folder,
-            indices_folder=self.indices_subfolder,
             cases_per_shard=cases_per_shard,
             compression=hdf5_compression,
             compression_opts=hdf5_compression_opts,
         )
         writer.setup(overwrite=overwrite_hdf5_shards)
-        writer.run(num_processes=num_processes, overwrite=overwrite_hdf5_shards)
+        if not linked:
+            writer.run(num_processes=num_processes, overwrite=overwrite_hdf5_shards)
 
     def extra_worker_kwargs(self, mean_std_mode="dataset"):
         plan = self.plan
         return {
             "dusting_threshold": dusting_threshold(plan),
             "ignore_labels_cc": plan["ignore_labels_cc"],
+            "extended_bbox_dim_x": self.extended_bbox_dim_x,
+            "extended_bbox_dim_y": self.extended_bbox_dim_y,
+            "extended_bbox_dim_z": self.extended_bbox_dim_z,
+            "extended_bbox_same_xy": self.extended_bbox_same_xy,
+            "extended_bbox_prepatch_zoom_scales": self.extended_bbox_prepatch_zoom_scales,
         }
 
     # def set_input_output_folders(self, data_folder, output_folder):
@@ -228,21 +260,20 @@ class LabelBoundedDetDataGenerator(LabelBoundedDataGenerator):
             [
                 self.output_folder / "images",
                 self.output_folder / "lms",
-                self.output_folder / "masks",
                 self.output_folder / "bboxes",
-                self.indices_subfolder,
+                self.output_folder / "extended_bboxes",
             ]
         )
 
     def _register_existing_pt_files(self):
         existing_img = {p.name for p in (self.output_folder / "images").glob("*.pt")}
         existing_lm = {p.name for p in (self.output_folder / "lms").glob("*.pt")}
-        existing_mask = {p.name for p in (self.output_folder / "masks").glob("*.pt")}
         bbox_stems = {p.stem for p in (self.output_folder / "bboxes").glob("*.json")}
+        ext_stems = {p.stem for p in (self.output_folder / "extended_bboxes").glob("*.json")}
         self.existing_pt_fnames = {
             fn
-            for fn in existing_img.intersection(existing_lm).intersection(existing_mask)
-            if strip_extension(fn) in bbox_stems
+            for fn in existing_img.intersection(existing_lm)
+            if strip_extension(fn) in bbox_stems and strip_extension(fn) in ext_stems
         }
         print("Output folder: ", self.output_folder)
         print(
@@ -261,15 +292,27 @@ class LabelBoundedDetDataGenerator(LabelBoundedDataGenerator):
             for bbox_fn in (self.output_folder / "bboxes").glob("*.json"):
                 sidecar = json.loads(bbox_fn.read_text())
                 labels_all.update(int(v) for v in sidecar["label"])
-            save_json(sorted(labels_all), self.output_folder / "labels_all.json")
+            manifest = build_extended_bboxes_manifest_payload(
+                self.extended_bbox_dim_x,
+                self.extended_bbox_dim_y,
+                self.extended_bbox_dim_z,
+                same_xy=self.extended_bbox_same_xy,
+                whole_box=False,
+                labels_all=labels_all,
+                prepatch_zoom_scales=self.extended_bbox_prepatch_zoom_scales,
+            )
+            save_json(manifest, self.output_folder / "manifest.json")
             write_dataset_details_csv(self.output_folder, overwrite=True)
         store_label_count(self.output_folder, num_processes=num_processes)
 
     def postprocess_artifacts_missing(self):
-        return (
-            not (self.output_folder / "labels_all.json").is_file()
-            or not (self.output_folder / "dataset_details.csv").is_file()
-        )
+        manifest_fn = self.output_folder / "manifest.json"
+        if not manifest_fn.is_file():
+            return True
+        manifest = json.loads(manifest_fn.read_text())
+        if "labels_all" not in manifest or "extended_bboxes_patch_sizes" not in manifest:
+            return True
+        return not (self.output_folder / "dataset_details.csv").is_file()
 
 
 # %%
