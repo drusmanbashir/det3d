@@ -604,7 +604,7 @@ def run_det3d_fast_pipeline(
 ) -> dict:
     #AI
     from det3d.detection.nndet_wandb import BENCHMARK_TRAIN_DET_LOSS
-    from det3d.extra.nndet_det3d_fast_lbd import run_det3d_fast_training_loop
+    from det3d.extra.nndet_det3d_fast_lbd_bk import run_det3d_fast_training_loop
 
     spec = PIPELINES["det3d_fast_lbd"]
     os.environ.setdefault("OMP_NUM_THREADS", "1")

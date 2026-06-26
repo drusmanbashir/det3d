@@ -37,6 +37,11 @@ def grid_shape_for_case_count(n_cases):
 
 
 def _case_ids_from_batch(batch):
+    if "keys" in batch:
+        case_ids = batch["keys"]
+        if isinstance(case_ids, (str, Path)):
+            case_ids = [case_ids]
+        return [str(c) for c in case_ids]
     fns = batch["image"].meta["filename_or_obj"]
     if isinstance(fns, (str, Path)):
         fns = [fns]
@@ -148,15 +153,14 @@ class WandbDetImageGridCallback(WandbImageGridCallback):
         super().reset_grid()
 
     def on_train_epoch_start(self, trainer, pl_module):
-        epoch = trainer.current_epoch + 1
-        if epoch % self.epoch_freq == 0:
-            self._cached_items = []
         super().on_train_epoch_start(trainer, pl_module)
 
     def on_validation_epoch_start(self, trainer, pl_module):
         super().on_validation_epoch_start(trainer, pl_module)
+        pl_module._nndet_wandb_grid_val_batches = []
         epoch = trainer.current_epoch + 1
         if epoch % self.epoch_freq == 0:
+            self._cached_items = []
             self._grid_collect_target = self.imgs_per_batch * self.grid_rows
         else:
             self._grid_collect_target = 0
@@ -169,12 +173,17 @@ class WandbDetImageGridCallback(WandbImageGridCallback):
             return
         if len(self._cached_items) >= self._grid_collect_target:
             return
-        self.populate_grid_val(pl_module, batch)
+        self.populate_grid_val(pl_module, batch, batch_idx)
 
     def populate_grid(self, pl_module, batch):
         return
 
-    def populate_grid_val(self, pl_module, batch):
+    def populate_grid_val(self, pl_module, batch, batch_idx=0):
+        stashed = getattr(pl_module, "_nndet_wandb_grid_val_batches", None)
+        if stashed and batch_idx < len(stashed):
+            batch = stashed[batch_idx]
+        if "pred" not in batch:
+            return
         self._append_det_batch(batch)
 
     def _append_det_batch(self, batch):
@@ -187,11 +196,9 @@ class WandbDetImageGridCallback(WandbImageGridCallback):
             )
         )
 
-    def on_train_epoch_end(self, trainer, pl_module):
-        epoch = trainer.current_epoch + 1
-        if epoch % self.epoch_freq != 0 or len(self._cached_items) == 0:
+    def _log_grid(self, trainer, epoch: int) -> None:
+        if len(self._cached_items) == 0:
             return
-
         rendered_image, triplet_case_ids, tile_w, tile_h, n_tiles = self._render_grid(
             self._cached_items
         )
@@ -217,6 +224,12 @@ class WandbDetImageGridCallback(WandbImageGridCallback):
                 {"images/grid": img},
                 step=trainer.global_step,
             )
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        epoch = trainer.current_epoch + 1
+        if epoch % self.epoch_freq != 0:
+            return
+        self._log_grid(trainer, epoch)
 
     def _draw_gt_panel(self, item, vol, slice_idx, gt_box, gt_label):
         if "gt_seg" in item:

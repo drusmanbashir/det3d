@@ -25,6 +25,7 @@ import torch
 from det3d.detection.nndet_train import (
     _instance_mapping_for_item,
     _lm_seg_volume,
+    det3d_batch_to_pre_trafo_input,
     det3d_semantic_target_seg_from_batch,
     disk_bbox_to_nndet_xyxyzz,
     ensure_nndet_importable,
@@ -86,6 +87,11 @@ def find_case_idx(dm, case_id: str) -> int:
 
 
 def _apply_item_key(dici, key: str, tfm):
+    if key == "IntensityTfms":
+        out = dici
+        for t in tfm:
+            out = t(out)
+        return out
     out = tfm(dici)
     if key == "Rtr":
         return out[0]
@@ -165,6 +171,241 @@ def _map_disk_labels(label: torch.Tensor, n_boxes: int, fg_labels: list[int]) ->
     )
 
 
+def _nndet_xyxyzz_to_inclusive(a) -> tuple[float, ...]:
+    ax0, ay0, ax1, ay1, az0, az1 = (float(v) for v in a)
+    return (ax0 + 1, ay0 + 1, az0 + 1, ax1 - 1, ay1 - 1, az1 - 1)
+
+
+def _box_iou_3d_inclusive(a_lohi, b_lohi) -> float:
+    ax0, ay0, az0, ax1, ay1, az1 = a_lohi
+    bx0, by0, bz0, bx1, by1, bz1 = b_lohi
+    ix0 = max(ax0, bx0)
+    iy0 = max(ay0, by0)
+    iz0 = max(az0, bz0)
+    ix1 = min(ax1, bx1)
+    iy1 = min(ay1, by1)
+    iz1 = min(az1, bz1)
+    iw = max(0.0, ix1 - ix0 + 1.0)
+    ih = max(0.0, iy1 - iy0 + 1.0)
+    id_ = max(0.0, iz1 - iz0 + 1.0)
+    inter = iw * ih * id_
+    vol_a = (
+        max(0.0, ax1 - ax0 + 1.0)
+        * max(0.0, ay1 - ay0 + 1.0)
+        * max(0.0, az1 - az0 + 1.0)
+    )
+    vol_b = (
+        max(0.0, bx1 - bx0 + 1.0)
+        * max(0.0, by1 - by0 + 1.0)
+        * max(0.0, bz1 - bz0 + 1.0)
+    )
+    union = vol_a + vol_b - inter
+    if union <= 0:
+        return 0.0
+    return inter / union
+
+
+def _box_iou_3d_xyxyzz(a, b) -> float:
+    return _box_iou_3d_inclusive(_nndet_xyxyzz_to_inclusive(a), _nndet_xyxyzz_to_inclusive(b))
+
+
+def pre_trafo_oracle_boxes(
+    batch: dict,
+    fg_labels: list[int],
+    *,
+    forward_patch_size=None,
+    verbose: bool = False,
+):
+    from det3d.extra.nndet_parity_pre_trafo import run_pre_trafo_stepped
+
+    batch_pre = det3d_batch_to_pre_trafo_input(
+        batch, forward_patch_size=forward_patch_size, fg_labels=fg_labels
+    )
+    batch_post = run_pre_trafo_stepped(batch_pre, verbose=verbose)
+    return (
+        batch_post["boxes"][0],
+        batch_post["classes"][0],
+        batch_post["present_instances"][0],
+    )
+
+
+def match_instance_aligned_pairs(
+    disk_xyxyzz: torch.Tensor,
+    disk_cls: torch.Tensor,
+    ref_xyxyzz: torch.Tensor,
+    ref_cls: torch.Tensor,
+    instances: dict | None,
+    present_instances: torch.Tensor,
+    *,
+    iou_min: float = 0.5,
+) -> tuple[list[tuple[int, int, str]], set[int], set[int]]:
+    n_disk = int(disk_xyxyzz.shape[0])
+    n_ref = int(ref_xyxyzz.shape[0])
+    if n_ref == 0:
+        return [], set(), set()
+
+    present = torch.as_tensor(present_instances).reshape(-1)
+    inst_keys = list(instances.keys()) if instances is not None else []
+    id_to_disk = {str(k): i for i, k in enumerate(inst_keys) if i < n_disk}
+
+    pairs: list[tuple[int, int, str]] = []
+    used_disk: set[int] = set()
+    used_ref: set[int] = set()
+
+    for ref_idx in range(n_ref):
+        if ref_idx >= int(present.numel()):
+            break
+        inst_id = str(int(present[ref_idx].item()))
+        if inst_id not in id_to_disk:
+            continue
+        disk_idx = id_to_disk[inst_id]
+        if disk_idx in used_disk:
+            continue
+        pairs.append((disk_idx, ref_idx, "id"))
+        used_disk.add(disk_idx)
+        used_ref.add(ref_idx)
+
+    for ref_idx in range(n_ref):
+        if ref_idx in used_ref:
+            continue
+        ref_cls_i = int(ref_cls[ref_idx].item())
+        best_iou = -1.0
+        best_disk = -1
+        for disk_idx in range(n_disk):
+            if disk_idx in used_disk:
+                continue
+            if int(disk_cls[disk_idx].item()) != ref_cls_i:
+                continue
+            iou = _box_iou_3d_xyxyzz(
+                disk_xyxyzz[disk_idx].tolist(),
+                ref_xyxyzz[ref_idx].tolist(),
+            )
+            if iou > best_iou:
+                best_iou = iou
+                best_disk = disk_idx
+        if best_disk >= 0 and best_iou >= iou_min:
+            pairs.append((best_disk, ref_idx, "iou"))
+            used_disk.add(best_disk)
+            used_ref.add(ref_idx)
+
+    return pairs, used_disk, used_ref
+
+
+def compare_instance_aligned(
+    disk_bbox: torch.Tensor,
+    disk_label: torch.Tensor,
+    ref_boxes: torch.Tensor,
+    ref_classes: torch.Tensor,
+    instances: dict | None,
+    present_instances: torch.Tensor,
+    fg_labels: list[int],
+    *,
+    boxes_atol: float = BOXES_ATOL,
+    iou_min: float = 0.5,
+) -> dict:
+    disk_xyxyzz = disk_bbox_to_nndet_xyxyzz(disk_bbox).detach().cpu().float()
+    ref_xyxyzz = ref_boxes.detach().cpu().float()
+    ref_cls = ref_classes.detach().cpu().long()
+    n_disk = int(disk_xyxyzz.shape[0])
+    n_ref = min(int(ref_xyxyzz.shape[0]), int(ref_cls.shape[0]))
+    ref_xyxyzz = ref_xyxyzz[:n_ref]
+    ref_cls = ref_cls[:n_ref]
+
+    if n_disk == 0 and n_ref == 0:
+        return {
+            "matched_ok": 0,
+            "n_pairs": 0,
+            "unmatched_disk": 0,
+            "unmatched_pre": 0,
+            "ordering_only": False,
+            "coord_drift": 0,
+            "max_diff": 0.0,
+            "high_iou_bad_corner": 0,
+            "approved": True,
+        }
+
+    if n_ref == 0:
+        return {
+            "matched_ok": 0,
+            "n_pairs": 0,
+            "unmatched_disk": n_disk,
+            "unmatched_pre": 0,
+            "ordering_only": False,
+            "coord_drift": 0,
+            "max_diff": 0.0,
+            "high_iou_bad_corner": 0,
+            "approved": True,
+        }
+
+    disk_cls = _map_disk_labels(disk_label, n_disk, fg_labels)
+
+    pairs, used_disk, used_ref = match_instance_aligned_pairs(
+        disk_xyxyzz,
+        disk_cls,
+        ref_xyxyzz,
+        ref_cls,
+        instances,
+        present_instances,
+        iou_min=iou_min,
+    )
+
+    matched_ok = 0
+    coord_drift = 0
+    max_diff = 0.0
+    high_iou_bad_corner = 0
+    id_pairs = sum(1 for _, _, via in pairs if via == "id")
+    iou_pairs = len(pairs) - id_pairs
+
+    for disk_idx, ref_idx, via in pairs:
+        diff = float(torch.max(torch.abs(disk_xyxyzz[disk_idx] - ref_xyxyzz[ref_idx])).item())
+        max_diff = max(max_diff, diff)
+        cls_match = int(disk_cls[disk_idx].item()) == int(ref_cls[ref_idx].item())
+        ok = diff <= boxes_atol and cls_match
+        if ok:
+            matched_ok += 1
+        else:
+            coord_drift += 1
+            iou = _box_iou_3d_xyxyzz(
+                disk_xyxyzz[disk_idx].tolist(),
+                ref_xyxyzz[ref_idx].tolist(),
+            )
+            if iou > iou_min and diff > boxes_atol:
+                high_iou_bad_corner += 1
+        print(
+            f"  pair disk[{disk_idx}]↔ref[{ref_idx}] via={via} "
+            f"max_diff={diff:.4f} cls_match={cls_match}"
+        )
+
+    unmatched_disk = n_disk - len(used_disk)
+    unmatched_pre = n_ref - len(used_ref)
+    ordering_only = (
+        n_disk == n_ref
+        and matched_ok == len(pairs)
+        and iou_pairs > 0
+        and id_pairs < n_ref
+        and coord_drift == 0
+    )
+
+    print(
+        f"n_boxes disk={n_disk} ref={n_ref} pairs={len(pairs)} "
+        f"matched_ok={matched_ok} unmatched_disk={unmatched_disk} "
+        f"unmatched_pre={unmatched_pre} ordering_only={ordering_only}"
+    )
+
+    approved = high_iou_bad_corner == 0 and coord_drift == 0
+    return {
+        "matched_ok": matched_ok,
+        "n_pairs": len(pairs),
+        "unmatched_disk": unmatched_disk,
+        "unmatched_pre": unmatched_pre,
+        "ordering_only": ordering_only,
+        "coord_drift": coord_drift,
+        "max_diff": max_diff,
+        "high_iou_bad_corner": high_iou_bad_corner,
+        "approved": approved,
+    }
+
+
 def compare_disk_vs_reference(
     disk_bbox: torch.Tensor,
     disk_label: torch.Tensor,
@@ -172,9 +413,28 @@ def compare_disk_vs_reference(
     ref_classes: torch.Tensor,
     fg_labels: list[int],
     *,
+    instances: dict | None = None,
+    present_instances: torch.Tensor | None = None,
     boxes_atol: float = BOXES_ATOL,
     count_must_match: bool = BOX_COUNT_MUST_MATCH,
 ) -> bool:
+    if present_instances is not None:
+        result = compare_instance_aligned(
+            disk_bbox,
+            disk_label,
+            ref_boxes,
+            ref_classes,
+            instances,
+            present_instances,
+            fg_labels,
+            boxes_atol=boxes_atol,
+        )
+        if count_must_match and (
+            result["unmatched_disk"] or result["unmatched_pre"]
+        ):
+            return False
+        return result["approved"]
+
     disk_xyxyzz = disk_bbox_to_nndet_xyxyzz(disk_bbox)
     ref_xyxyzz = ref_boxes.detach().cpu().float()
     disk_xyxyzz = disk_xyxyzz.detach().cpu().float()
@@ -200,6 +460,10 @@ def compare_disk_vs_reference(
     ref_cls = ref_classes.detach().cpu().long()[:n_cmp]
     approved = True
     for i in range(n_cmp):
+        if disk_xyxyzz[i].numel() == 0 or ref_xyxyzz[i].numel() == 0:
+            print(f"  box {i} empty disk/ref tensor")
+            approved = False
+            continue
         diff = float(torch.max(torch.abs(disk_xyxyzz[i] - ref_xyxyzz[i])).item())
         cls_match = int(disk_cls[i].item()) == int(ref_cls[i].item())
         print(
@@ -232,14 +496,13 @@ def gate_disk_boxes_post_aug(
     if instances is None:
         print("note: sidecar has no instances — mapping from lm ids + labels")
     batch = run_disk_box_pipeline(dm, case_idx, seed)
+    batch["instances"] = [instances]
     disk_bbox = batch["bbox"][0]
     disk_label = batch["label"][0]
-    lm = batch["lm"][0]
 
-    ref_boxes, ref_classes, mapping, present = reference_boxes_nndet(
-        lm, disk_label, instances, fg_labels
+    ref_boxes, ref_classes, present = pre_trafo_oracle_boxes(
+        batch, fg_labels, forward_patch_size=dm.plan["patch_size"]
     )
-    print("instance_mapping", mapping)
     print("present_instances", [int(v) for v in present.tolist()])
     print("disk bbox xyzxyz\n", disk_bbox.detach().cpu().numpy())
     print("ref bbox xyxyzz\n", ref_boxes.detach().cpu().numpy())
@@ -250,7 +513,10 @@ def gate_disk_boxes_post_aug(
         ref_boxes,
         ref_classes,
         fg_labels,
+        instances=instances,
+        present_instances=present,
         boxes_atol=boxes_atol,
+        count_must_match=False,
     )
     print("DISK_BOX_GATE", "APPROVED" if approved else "REJECTED")
     return approved

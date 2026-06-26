@@ -18,6 +18,7 @@ from det3d.transforms.crop_indices import (
     monai_crop_center_to_slices,
     sample_crop_center_from_extended_boxes,
 )
+from det3d.transforms.gpu_det import RandAffineBoxSyncd, RandFlipBoxSyncd, ResizeWithPadOrCropBoxSyncd
 from det3d.transforms.detection import patch_size_manifest_key
 from fran.managers.data.valid_patch_stream import _pad_tensor_to_patch_size
 from det3d.utils.bbox_sidecar import bbox_sidecar_path, load_detection_sidecar, valid_detection_box
@@ -37,7 +38,7 @@ from fran.managers.data.main import (
 from fran.preprocessing.helpers import import_h5py
 from fran.run.preproc.archive_preprocessed import ensure_rapid_data_folder
 from fran.transforms.imageio import TorchReader
-from monai.apps.detection.transforms.dictionary import AffineBoxToWorldCoordinated, ClipBoxToImaged
+from monai.apps.detection.transforms.dictionary import ClipBoxToImaged
 from monai.data import DataLoader, Dataset, MetaTensor
 from monai.transforms import (
     Compose,
@@ -48,8 +49,6 @@ from monai.transforms import (
     ScaleIntensityRanged,
 )
 from monai.transforms.croppad.dictionary import ResizeWithPadOrCropd
-from monai.transforms.spatial.dictionary import ConvertBoxToPointsd, ConvertPointsToBoxesd, RandAffined
-from monai.transforms.utility.dictionary import ApplyTransformToPointsd
 from fran.utils.folder_names import FolderNames
 from utilz.fileio import load_json
 from utilz.stringz import info_from_filename
@@ -677,7 +676,7 @@ class DataManagerDet(DataManager):
                 if not bbox_fn.is_file():
                     skipped += 1
                     continue
-                box_t, label_t, _instances = self._load_bbox_sidecar(bbox_fn)
+                box_t, label_t, instances = self._load_bbox_sidecar(bbox_fn)
                 row = {
                     "case_id": case_id,
                     "data_folder": str(self.data_folder),
@@ -685,6 +684,7 @@ class DataManagerDet(DataManager):
                     "hdf5_case_path": f"/cases/{case_id}",
                     self.box_key: box_t,
                     self.label_key: label_t,
+                    "instances": instances,
                 }
                 data.append(row)
         return data, skipped
@@ -716,8 +716,7 @@ class DataManagerDet(DataManager):
 
 class DataManagerDetSource(DataManagerDet, DataManagerSource):
     keys_tr = (
-        "Ld,Rtr,L2,E,Norm,BoxToWorld,ToPoints,Affine,AffinePts,ToBoxes,ResizePC,"
-        "BoxClip,IntensityTfms"
+        "Ld,Rtr,L2,E,Norm,F1,F2,Affine,ResizePC,BoxClip,IntensityTfms"
     )
 
     def __init__(self, project, configs: dict, batch_size=8, cache_rate=0.0, **kwargs):
@@ -756,11 +755,10 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
 
     def create_transforms(self):
         super().create_transforms()
-        ik, bk, lk, pk, lmk = (
+        ik, bk, lk, lmk = (
             self.image_key,
             self.box_key,
             self.label_key,
-            self.point_key,
             self.lm_key,
         )
         load_keys = [ik]
@@ -785,9 +783,11 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
                 f"patch_size_prezoom {patch_size_prezoom} not in manifest "
                 f"extended_bboxes_patch_sizes {manifest_patch_sizes}"
             )
-        affine_lps_to_ras = self.affine_lps_to_ras
         clip = self.dataset_params["intensity_clip_range"]
         affine3d = self.configs["affine3d"]
+
+        self.flip["prob"]= 0.8 #HACK: temporary for debugging
+        flip_prob = float(self.flip["prob"])
 
         self.Ld = LoadHDF5DetShardExtendedBBoxd(
             keys=["case_id"],
@@ -806,15 +806,30 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
         )
         self.L2 = LoadHDF5DetCropd(keys=load_keys, box_key=bk)
         self.E = EnsureChannelFirstd(keys=load_keys)
-        self.Affine = RandAffined(
-            keys=spatial_aug_keys,
+        self.F1 = RandFlipBoxSyncd(
+            spatial_keys=spatial_aug_keys,
+            box_key=bk,
+            prob=flip_prob,
+            spatial_axis=0,
+        )
+        self.F2 = RandFlipBoxSyncd(
+            spatial_keys=spatial_aug_keys,
+            box_key=bk,
+            prob=flip_prob,
+            spatial_axis=1,
+        )
+        self.Affine = RandAffineBoxSyncd(
+            spatial_keys=spatial_aug_keys,
+            box_key=bk,
             mode=affine_modes,
             prob=affine3d["p"],
             rotate_range=affine3d["rotate_range"],
             scale_range=affine3d["scale_range"],
         )
-        self.ResizePC = ResizeWithPadOrCropd(
+        self.ResizePC = ResizeWithPadOrCropBoxSyncd(
             keys=spatial_aug_keys,
+            box_key=bk,
+            label_key=lk,
             spatial_size=patch_size,
             lazy=False,
         )
@@ -826,16 +841,6 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
             b_max=1.0,
             clip=True,
         )
-        self.BoxToWorld = AffineBoxToWorldCoordinated(
-            box_keys=[bk],
-            box_ref_image_keys=ik,
-            affine_lps_to_ras=affine_lps_to_ras,
-        )
-        self.ToPoints = ConvertBoxToPointsd(keys=[bk])
-        self.AffinePts = ApplyTransformToPointsd(
-            keys=[pk], refer_keys=ik, affine_lps_to_ras=affine_lps_to_ras
-        )
-        self.ToBoxes = ConvertPointsToBoxesd(keys=[pk], box_key=bk)
         self.BoxClip = ClipBoxToImaged(
             box_keys=bk,
             label_keys=[lk],
@@ -846,13 +851,11 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
         self.transforms_dict["Rtr"] = self.Rtr
         self.transforms_dict["L2"] = self.L2
         self.transforms_dict["E"] = self.E
+        self.transforms_dict["Norm"] = self.Norm
+        self.transforms_dict["F1"] = self.F1
+        self.transforms_dict["F2"] = self.F2
         self.transforms_dict["Affine"] = self.Affine
         self.transforms_dict["ResizePC"] = self.ResizePC
-        self.transforms_dict["Norm"] = self.Norm
-        self.transforms_dict["BoxToWorld"] = self.BoxToWorld
-        self.transforms_dict["ToPoints"] = self.ToPoints
-        self.transforms_dict["AffinePts"] = self.AffinePts
-        self.transforms_dict["ToBoxes"] = self.ToBoxes
         self.transforms_dict["BoxClip"] = self.BoxClip
         if type(self.Ld) is not LoadHDF5DetShardExtendedBBoxd:
             raise RuntimeError(
@@ -977,13 +980,14 @@ class DataManagerDetLBD(DataManagerDetSource, DataManagerLBD):
             if not bbox_fn.is_file():
                 skipped += 1
                 continue
-            box_t, label_t, _instances = self._load_bbox_sidecar(bbox_fn)
+            box_t, label_t, instances = self._load_bbox_sidecar(bbox_fn)
             row = {
                 "case_id": case_id,
                 "data_folder": str(self.data_folder),
                 "image": str(img_fn),
                 self.box_key: box_t,
                 self.label_key: label_t,
+                "instances": instances,
             }
             if self.uses_lm_seg():
                 lm_fn = self.data_folder / "lms" / img_fn.name
@@ -1171,7 +1175,7 @@ if __name__ == "__main__":
     from det3d.managers.data.batch_tfms import DataManagerDualDetBTfms
 
     project_title = "lidca"
-    plan_id = 3
+    plan_id = 4
     conf_fold = 0
 
     P = Project(project_title)
@@ -1180,6 +1184,12 @@ if __name__ == "__main__":
     conf = C.configs
     conf["dataset_params"]["fold"] = conf_fold
     conf["plan_train"]["patch_size"]=[128,128,64]
+    conf["model_params"]["arch"] = "retinanet"
+    conf["model_params"]["arch"] = "retinaunet"
+    conf["affine3d"]["p"]=1.0
+    conf["affine3d"]["translate_factor"]=0.3
+    conf["affine3d"]["shear"]=0.5
+    
 
 #SECTION:--- dualdet datamanager ---
 # %%
@@ -1224,84 +1234,76 @@ if __name__ == "__main__":
     img = dat[0]['image']
     lm  = dat[0]['lm']
     bbox = dat[0]['bbox']
-    ImageMaskBboxViewer(img, lm, bbox)
-    ImageMaskViewer([img, lm],'im')
 # %%
 #SECTION:-------------------- ts--------------------------------------------------------------------------------------
 #SECTION:--- train dataloader ---
 # %%
 # %%
     tfms = tmt.transforms
-    tmt.keys
-    'Ld,Rtr,L2,E,Norm,BoxToWorld,ToPoints,Affine,AffinePts,ToBoxes,ResizePC,BoxClip,IntensityTfms'
+ 
     tfms = tmt.transforms_dict
 #%%
-
-    dici = tmt.data[0]
+    dici = dat[0]
     L = tfms["Ld"]
     dici = L(dici)
-    dici.keys()
 
     R = tfms["Rtr"]
     dici = R(dici)
-    dici = dici[0]
-    dici.keys()
-
+    dici2=dici[0]
 
     L2 = tfms["L2"]
-    dici = L2(dici)
-    dici.keys()
-    dici['image'].shape
-    mask = dici['mask']
-    lm = dici["lm"]
-    im  = dici['image']
-    print(dici["crop_center"])
-
-# %%
+    dici2 = L2(dici2)
+    img = dici2['image']
+    box = dici2['bbox']
+    img.meta['affine']
 
     E = tfms["E"]
-    dici = E(dici)
-
-    N = tfms["Norm"]
-    dici = N(dici)
-    dici.keys()
-
-    box = dici['bbox']
-    ImageBBoxViewer(im, box)
-
-    B = tfms["BoxToWorld"] # redundant
-    img = dici['image']
-    dici = B(dici)
-    box = dici['bbox']
-    print(box)
-
-    T = tfms["ToPoints"]
-    dici = T(dici)
-    dici['points']
-
-    Af = tfms["Affine"]
-    dici = Af(dici)
-
-    A = tfms["AffinePts"]
-    dici = A(dici)
-
-    To = tfms["ToBoxes"]
-    dici = To(dici)
-
-    RPC = tfms["ResizePC"]
-    dici = RPC(dici)
-    dici['image'].shape
-
-    dici['bbox']
+    dici2 = E(dici2)
 # %%
-    Bo = tfms["BoxClip"]
-    dici = Bo(dici)
-    print(dici['bbox'])
-    dici['mask'].shape
+    F1= tfms["F1"]
+    dici2 = F1(dici2)
+    print(dici2['image'].meta['affine'])
+    print(dici2['bbox'][0])
+    F2 = tfms["F2"]
+# %%
+    dici2=F2(dici2)
+    print(dici2['image'].meta['affine'])
+    img = dici2['image']
+    box = dici2['bbox']
+    print(dici2['bbox'][0])
+# %%
+    N = tfms["Norm"]
+    dici2 = N(dici2)
+    dici2['image'].min()
+    print(dici2['bbox'][0])
+
+    ImageBBoxViewer(img, box)
+    A = tfms["Affine"]
+# %%
+    dici3 = A(dici2)
+    img = dici3['image']
+    box = dici3['bbox']
+    print(img.meta['affine'])
+    print(dici3['bbox'][0])
+
+    ImageBBoxViewer(img,box)
+# %%
+
+    Re = tfms["ResizePC"]
+    dici4 = Re(dici3)
+
+    B = tfms["BoxClip"]
+    dici4 = B(dici4)
 
     I = tfms["IntensityTfms"]
-    dici = I(dici)
-#%%
+    dici4 = I(dici4)
+    img = dici4['image']
+    box = dici4['bbox']
+    
+    ImageBBoxViewer(img,box)
+# %%
+
+
 # %%
     print(dici.keys())
     tmt.setup()

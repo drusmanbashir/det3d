@@ -187,6 +187,43 @@ def materialize_lbd_nndet_task(
     )
 
 
+def compose_native_lbd_cfg(
+    *,
+    det_data: Path = SCRATCH_DET_DATA,
+    fold: int = FOLD,
+    max_epochs: int,
+    batch_size: int,
+    num_train_batches_per_epoch: int,
+    num_val_batches_per_epoch: int = 0,
+    precision: int | str = 16,
+):
+    #AI
+    from hydra import initialize_config_module
+    from hydra.core.global_hydra import GlobalHydra
+    from nndet.utils.config import compose
+
+    if GlobalHydra.instance().is_initialized():
+        GlobalHydra.instance().clear()
+    initialize_config_module(config_module="nndet.conf", version_base="1.1")
+    cfg = compose(
+        TASK,
+        "config.yaml",
+        overrides=[
+            f"host.parent_data={det_data}",
+            f"exp.fold={fold}",
+            f"+augment_cfg.batch_size={int(batch_size)}",
+            "augment_cfg.multiprocessing=False",
+            f"augment_cfg.num_train_batches_per_epoch={int(num_train_batches_per_epoch)}",
+            f"augment_cfg.num_val_batches_per_epoch={int(num_val_batches_per_epoch)}",
+            f"trainer_cfg.num_train_batches_per_epoch={int(num_train_batches_per_epoch)}",
+            f"trainer_cfg.num_val_batches_per_epoch={int(num_val_batches_per_epoch)}",
+            f"trainer_cfg.precision={precision}",
+            f"trainer_cfg.max_num_epochs={int(max_epochs)}",
+        ],
+    )
+    return cfg
+
+
 def scratch_compose_cfg(fold=FOLD, max_epochs=SCRATCH_MAX_EPOCHS):
     #AI
     from hydra import initialize_config_module
@@ -230,13 +267,21 @@ def run_native_training_loop(
     extra_callbacks=None,
     val_enabled: bool | None = None,
     permanent_checkpoint_every_n_epochs: int = 100,
+    check_val_every_n_epoch: int = 20,
+    wandb_grid_epoch_freq: int = 20,
+    det3d_configs: dict | None = None,
 ):
     #AI
     """pl.Trainer.fit with native Datamodule — W&B + checkpoint layout like TrainerDet."""
     from omegaconf import OmegaConf
     from scripts.train import init_train_dir
 
-    from det3d.detection.nndet_wandb import fit_nndet_module
+    from det3d.detection.nndet_train import patch_module_for_native_wandb_grid
+    from det3d.detection.nndet_wandb import (
+        build_nndet_retinaunet_wandb_grid_callback,
+        fit_nndet_module,
+    )
+    from fran.managers.project import Project
 
     trainer_cfg = deepcopy(trainer_cfg)
     trainer_cfg["num_train_batches_per_epoch"] = int(
@@ -257,6 +302,23 @@ def run_native_training_loop(
     )
     train_dir = init_train_dir(cfg)
 
+    callbacks = list(extra_callbacks) if extra_callbacks else []
+    log_folder = Project(project_title).log_folder
+    grid_patch = None
+    if wandb and val_enabled and det3d_configs is not None:
+        grid_cb = build_nndet_retinaunet_wandb_grid_callback(
+            det3d_configs,
+            log_folder,
+            wandb_grid_epoch_freq=int(wandb_grid_epoch_freq),
+        )
+        callbacks.append(grid_cb)
+        grid_patch = patch_module_for_native_wandb_grid
+        print(
+            f"native LBD wandb grid callback epoch_freq={wandb_grid_epoch_freq} "
+            f"local={Path(log_folder) / 'wandb_grid'}",
+            flush=True,
+        )
+
     return fit_nndet_module(
         module,
         datamodule,
@@ -271,11 +333,13 @@ def run_native_training_loop(
         wandb=wandb,
         tags=tags or ["native_lbd", "nndet", TASK],
         notes=notes,
-        extra_callbacks=extra_callbacks,
+        extra_callbacks=callbacks,
         val_enabled=val_enabled,
         permanent_checkpoint_every_n_epochs=permanent_checkpoint_every_n_epochs,
         patch_pl2=True,
         log_train_det_loss=False,
+        check_val_every_n_epoch=int(check_val_every_n_epoch),
+        after_pl2_patch=grid_patch,
     )
 
 

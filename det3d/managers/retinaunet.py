@@ -1,12 +1,8 @@
 import torch
 from det3d.detection.nndet_train import (
-    _batch_pre_for_semantic,
-    _center_crop_spatial,
-    _crop_boxes_to_patch,
-    _nndet_target_classes,
-    det3d_semantic_target_seg_from_batch,
-    disk_bbox_to_nndet_xyxyzz,
+    det3d_batch_to_nndet,
     ensure_nndet_importable,
+    maybe_store_batch_grid_preds,
     nndet_batch_pred_to_vis_list,
 )
 from det3d.utils.tensor import to_numpy
@@ -54,6 +50,7 @@ class RetinaUNetManager(LightningModule):
         from pathlib import Path
         ensure_nndet_importable()
         from nndet.ptmodule.retinaunet.v001 import RetinaUNetV001
+
         from det3d.configs.parser import resolve_nndet_plan_path
         from det3d.extra.trainer_nndet import (
             apply_det3d_plan_to_nndet_model_cfg,
@@ -84,57 +81,13 @@ class RetinaUNetManager(LightningModule):
         return module, plan
 
     def _det3d_batch_to_nndet(self, batch, seg_key="lm", use_disk_box_plug=True):
-        from det3d.detection.nndet_train import xyzxyz_exclusive_batch_to_nndet
-
-        data = batch["image"]
-        forward_patch_size = self.forward_patch_size
-        crop_starts = None
-        if forward_patch_size is not None:
-            forward_patch_size = tuple(int(v) for v in forward_patch_size)
-            spatial = tuple(int(v) for v in data.shape[-3:])
-            if any(s > p for s, p in zip(spatial, forward_patch_size)):
-                data, crop_starts = _center_crop_spatial(data, forward_patch_size)
-
-        lm_src = batch[seg_key]
-        n = int(data.shape[0])
-        target_boxes = []
-        target_classes_raw = []
-        instances_batch = batch["instances"] if "instances" in batch else None
-        if use_disk_box_plug:
-            box_to_nndet = disk_bbox_to_nndet_xyxyzz
-        else:
-            box_to_nndet = xyzxyz_exclusive_batch_to_nndet
-
-        for i in range(n):
-            box = batch["bbox"][i]
-            if crop_starts is not None:
-                box = _crop_boxes_to_patch(box, crop_starts, forward_patch_size)
-            target_boxes.append(box_to_nndet(box))
-
-            label = torch.as_tensor(batch["label"][i], dtype=torch.long).reshape(-1)
-            target_classes_raw.append(label)
-
-        target_classes = _nndet_target_classes(
-            target_boxes, target_classes_raw, self.plan["fg_labels"]
+        return det3d_batch_to_nndet(
+            batch,
+            forward_patch_size=self.forward_patch_size,
+            seg_key=seg_key,
+            fg_labels=self.plan["fg_labels"],
+            use_disk_box_plug=use_disk_box_plug,
         )
-        batch_pre = _batch_pre_for_semantic(
-            lm_src,
-            batch["label"],
-            instances_batch,
-            self.plan["fg_labels"],
-            crop_starts,
-            forward_patch_size,
-            n,
-        )
-        target_seg = det3d_semantic_target_seg_from_batch(
-            batch_pre, device=data.device if isinstance(data, torch.Tensor) else None
-        )
-        return {
-            "data": data,
-            "target_boxes": target_boxes,
-            "target_classes": target_classes,
-            "target_seg": target_seg,
-        }
 
     def _step_losses(self, batch, batch_idx, evaluation=False):
         nb = self._det3d_batch_to_nndet(batch)
@@ -211,7 +164,7 @@ class RetinaUNetManager(LightningModule):
             seg_probs=to_numpy(prediction["pred_seg"]),
             target=to_numpy(nb["target_seg"]),
         )
-        batch["pred"] = nndet_batch_pred_to_vis_list(prediction)
+        maybe_store_batch_grid_preds(self, batch, prediction)
 
     def on_validation_epoch_end(self):
         val_loss = self.val_loss_sum / self.val_loss_count

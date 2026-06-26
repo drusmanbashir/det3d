@@ -381,11 +381,8 @@ def build_nndet_pl_trainer_kwargs(
         n_val = int(trainer_cfg.get("num_val_batches_per_epoch", 0))
         if n_val > 0:
             trainer_kwargs["limit_val_batches"] = n_val
-    if ckpt_path is not None:
-        if pl_major >= 2:
-            trainer_kwargs["ckpt_path"] = str(ckpt_path)
-        else:
-            trainer_kwargs["resume_from_checkpoint"] = str(ckpt_path)
+    if ckpt_path is not None and pl_major < 2:
+        trainer_kwargs["resume_from_checkpoint"] = str(ckpt_path)
 
     num_gpus = int(trainer_cfg["gpus"])
     if pl_major >= 2:
@@ -501,7 +498,10 @@ def fit_nndet_module(
         trainer.limit_train_batches = int(limit_train_batches)
     if limit_val_batches is not None:
         trainer.limit_val_batches = int(limit_val_batches)
-    trainer.fit(module, datamodule=datamodule)
+    fit_kwargs = {}
+    if ckpt_path is not None and int(pl.__version__.split(".")[0]) >= 2:
+        fit_kwargs["ckpt_path"] = str(ckpt_path)
+    trainer.fit(module, datamodule=datamodule, **fit_kwargs)
     return {
         "trainer": trainer,
         "train_dir": train_dir,

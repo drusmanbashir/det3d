@@ -27,6 +27,7 @@ from fran.managers.data.main import DataManagerRBD
 from fran.preprocessing.helpers import import_h5py
 from monai.data import MetaTensor
 from monai.transforms import EnsureChannelFirstd, EnsureTyped, ScaleIntensityRanged
+from monai.transforms.spatial.dictionary import RandAffined, RandFlipd
 from utilz.fileio import load_json
 from utilz.stringz import info_from_filename
 
@@ -116,7 +117,7 @@ class DataManagerDetPreTrafo(DataManagerDetPreTrafoMixin, DataManagerDet):
 
 
 class DataManagerDetSourcePreTrafo(DataManagerDetPreTrafoMixin, DataManagerDetSource):
-    keys_tr = "Ld,Rtr,L2,E,Norm,Affine,ResizePC,IntensityTfms"
+    keys_tr = "Ld,Rtr,L2,E,Norm,F1,F2,Affine,ResizePC,IntensityTfms"
 
     def create_data_dicts(self, case_ids):
         case_ids = set(str(case_id) for case_id in case_ids)
@@ -154,7 +155,7 @@ class DataManagerDetSourcePreTrafo(DataManagerDetPreTrafoMixin, DataManagerDetSo
                 f"DataManagerDetSourcePreTrafo: skipped {skipped} cases "
                 "(missing sidecar)"
             )
-        return data, skipped
+        return data
 
     def create_transforms(self):
         super().create_transforms()
@@ -183,16 +184,31 @@ class DataManagerDetSourcePreTrafo(DataManagerDetPreTrafoMixin, DataManagerDetSo
                 f"extended_bboxes_patch_sizes {manifest_patch_sizes}"
             )
         affine3d = self.configs["affine3d"]
+        flip_prob = float(self.flip["prob"])
         for key in ("BoxToWorld", "ToPoints", "AffinePts", "ToBoxes", "BoxClip"):
             self.transforms_dict.pop(key, None)
         self.L2 = LoadHDF5DetCropLmOnlyd(keys=load_keys)
         self.transforms_dict["L2"] = self.L2
-        self.Affine = self.transforms_dict["Affine"]
-        self.Affine.keys = spatial_aug_keys
-        self.Affine.mode = affine_modes
-        self.Affine.prob = affine3d["p"]
-        self.Affine.rotate_range = affine3d["rotate_range"]
-        self.Affine.scale_range = affine3d["scale_range"]
+        self.F1 = RandFlipd(
+            keys=spatial_aug_keys,
+            prob=flip_prob,
+            spatial_axis=0,
+        )
+        self.F2 = RandFlipd(
+            keys=spatial_aug_keys,
+            prob=flip_prob,
+            spatial_axis=1,
+        )
+        self.transforms_dict["F1"] = self.F1
+        self.transforms_dict["F2"] = self.F2
+        self.Affine = RandAffined(
+            keys=spatial_aug_keys,
+            mode=affine_modes,
+            prob=affine3d["p"],
+            rotate_range=affine3d["rotate_range"],
+            scale_range=affine3d["scale_range"],
+        )
+        self.transforms_dict["Affine"] = self.Affine
         self.ResizePC = self.transforms_dict["ResizePC"]
         self.ResizePC.keys = spatial_aug_keys
 
@@ -221,6 +237,7 @@ class DataManagerDetSourcePreTrafoBTfms(DataManagerDetSourcePreTrafo):
                 intensity_tfms=self.transforms_dict["IntensityTfms"],
                 affine3d=self.configs["affine3d"],
                 patch_size=self.plan["patch_size"],
+                flip_prob=self.flip["prob"],
             ),
             image_key=ik,
             label_key=lk,
@@ -234,7 +251,7 @@ class DataManagerDetSourcePreTrafoBTfms(DataManagerDetSourcePreTrafo):
         if self.uses_train_keys():
             self.install_gpu_tail_pre_trafo()
             self.keys = self.keys_tr
-            for key in ("Affine", "ResizePC", "IntensityTfms"):
+            for key in ("F1", "F2", "Affine", "ResizePC", "IntensityTfms"):
                 self.transforms_dict.pop(key, None)
 
 

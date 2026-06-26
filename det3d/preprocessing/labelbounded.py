@@ -1,4 +1,4 @@
-from pathlib import Path
+erom pathlib import Path
 import json
 import ipdb
 
@@ -22,6 +22,7 @@ from utilz.fileio import maybe_makedirs, save_json
 from utilz.imageviewers import ImageBBoxViewer, ImageMaskViewer
 from utilz.stringz import info_from_filename, strip_extension
 
+from det3d.geometry.lmg import instances_mapping_from_lm
 from det3d.preprocessing.dataset_details import write_dataset_details_csv
 from det3d.preprocessing.helpers import dusting_threshold
 from det3d.preprocessing.hdf5_shards_det import (
@@ -132,6 +133,7 @@ class _LBDDetWorker(_LBDSamplerWorkerBase):
             boxes,
             labels,
             ignore_labels=list(self.ignore_labels_cc),
+            instances=None, #HACK: re-visit this when you have actual ignore_labels like ignoring liver 
         )
 
     def _process_row(self, row: pd.Series):
@@ -374,6 +376,8 @@ if __name__ == "__main__":
     L._process_row(G.df.iloc[0])
 # %%  # T:block_start|_LBDDetWorker._process_row
 
+# %%
+
     tfms_keys="LoadT,Chan,Dev,Crop,Remap,Labels,Indx,Stats,E,L,H",
     tfms = L.transforms_dict
 
@@ -469,76 +473,17 @@ if __name__ == "__main__":
 
 # %%
 #%%
-# SECTION:-------------------- _process_row--------------------------------------------------------------------------------------  # T:block_meta|_LBDDetWorker._process_row <CR>
     # requires L = LabelBoundedDetDataGenerator(...) in __main__  # T:requires_alias|L = LabelBoundedDetDataGenerator(...)
     case_id = row["case_id"]
     data = row.to_dict()
     data = L.apply_transforms(data)  # T:self_ref|data = self.apply_transforms(data)
+    print(data.keys())
+    img =     data['image']
+    L = data['LMG']
+    print(L.nbrhoods)
     image = data["image"]
+    bbox = data["bbox"]
     lm = data["lm"]
-    assert image.shape == lm.shape, "mismatch in shape"
-    assert image.dim() == 4, "images should be cxhxwxd"
-
-    fn_name = strip_extension(Path(str(row["image"])).name) + ".pt"
-    src_fn = str(row["image"])
-    save_meta = dict(image.meta)
-    save_meta["filename_or_obj"] = src_fn
-    image.meta = save_meta
-    lm.meta = save_meta
-    mask = data["mask_image"]
-    fg, bg = map_binary_to_indices(mask, image=None, image_threshold=0.0)
-    inds = {
-        "fg_indices": fg,
-        "bg_indices": bg,
-        "meta": image.meta,
-    }
-    L.save_indices(
-        inds, L.indices_subfolder
-    )  # T:self_ref|self.save_indices(inds, self.indices_subfolder)
-    L.save_pt(image[0], "images")  # T:self_ref|self.save_pt(image[0], "images")
-    L.save_pt(lm[0], "lms")  # T:self_ref|self.save_pt(lm[0], "lms")
-    L.save_mask_pt(data, image)  # T:self_ref|self.save_mask_pt(data, image)
-    L.save_bbox_sidecar(
-        data, fn_name
-    )  # T:self_ref|self.save_bbox_sidecar(data, fn_name)
-    # return {  # T:early_return|return {
-    #     "case_id": case_id,
-    #     "ok": True,
-    #     "shape": list(image.shape),
-    #     "n_boxes": int(data[L.box_key].shape[0]),  # T:self_ref|    "n_boxes": int(data[self.box_key].shape[0]),
-    # }
-
-# %
-
-    ImageMaskViewer([img, lm], "im")
-    ImageBBoxViewer(img, bbox)
-
-    image = data["image"]
-    lm = data["lm"]
-    assert image.shape == lm.shape, "mismatch in shape"
-    assert image.dim() == 4, "images should be cxhxwxd"
-    if image.numel() <= MIN_SIZE**3:
-        pass  # T:early_return|image too small after label crop
-    fn_name = strip_extension(Path(str(row["image"])).name) + ".pt"
-    fg, bg = volume_fg_bg_flat_indices(data["mask_image"])
-    inds = {
-        "fg_indices": fg,
-        "bg_indices": bg,
-        "meta": image.meta,
-    }
-    L.save_indices(
-        inds, L.indices_subfolder
-    )  # T:self_ref|self.save_indices(inds, self.indices_subfolder)
-    L.save_pt(image[0], "images")  # T:self_ref|self.save_pt(image[0], "images")
-    L.save_pt(lm[0], "lms")  # T:self_ref|self.save_pt(lm[0], "lms")
-    L.save_mask_pt(data, image)  # T:self_ref|self.save_mask_pt(data, image)
-    L.save_bbox_sidecar(
-        data, fn_name
-    )  # T:self_ref|self.save_bbox_sidecar(data, fn_name)
-    pass  # T:early_return|_process_row ok
-    # end PythonMethodScratch  # T:block_end|_LBDDetWorker._process_row
-# %%
-    L._process_row(row)
 
 # %%
     cfg = ConfigMakerDet(project=project, plan=plan_id).cfg
@@ -552,8 +497,87 @@ if __name__ == "__main__":
 
 # %%
     row = None
+
+# %%
+# %%  # T:block_start|_LBDDetWorker._process_row
+# /home/ub/code/det3d/det3d/preprocessing/labelbounded.py  # T:block_donor|/home/ub/code/det3d/det3d/preprocessing/labelbounded.py
+#SECTION:-------------------- _process_row --------------------------------------------------------------------------------------  # T:block_meta|_LBDDetWorker._process_row
+    # requires L = _LBDDetWorker(...) in __main__  # T:requires_alias|L = _LBDDetWorker(...)
+    case_id = row["case_id"]
+    data = row.to_dict()
+    data = L.apply_transforms(data)  # T:self_ref|data = self.apply_transforms(data)
+    image = data["image"]
+    lm = data["lm"]
+    assert image.shape == lm.shape, "mismatch in shape"
+    assert image.dim() == 4, "images should be cxhxwxd"
+    if image.numel() <= MIN_SIZE**3:
+        # return {  # T:early_return|    return {
+            "case_id": case_id,
+            "ok": False,
+            "err": "image too small after label crop",
+        }
+    fn_name = strip_extension(Path(str(row["image"])).name) + ".pt"
+    src_fn = str(row["image"])
+    save_meta = dict(image.meta)
+    save_meta["filename_or_obj"] = src_fn
+    image.meta = save_meta
+    lm.meta = save_meta
+    L.save_pt(image[0], "images")  # T:self_ref|self.save_pt(image[0], "images")
+    L.save_pt(lm[0], "lms")  # T:self_ref|self.save_pt(lm[0], "lms")
+    L.save_bbox_sidecar(data, fn_name)  # T:self_ref|self.save_bbox_sidecar(data, fn_name)
+    L.save_extended_bboxes(data, case_id)  # T:self_ref|self.save_extended_bboxes(data, case_id)
+    # return {  # T:early_return|return {
+        "case_id": case_id,
+        "ok": True,
+        "shape": list(image.shape),
+        "n_boxes": int(data[L.box_key].shape[0]),  # T:self_ref|    "n_boxes": int(data[self.box_key].shape[0]),
+    }
+
+# %%
+    data = data
+    fn_name = fn_name
+# %%  # T:block_start|LabelBoundedDetDataGenerator.save_bbox_sidecar
+# /home/ub/code/det3d/det3d/preprocessing/labelbounded.py  # T:block_donor|/home/ub/code/det3d/det3d/preprocessing/labelbounded.py
+#SECTION:-------------------- save_bbox_sidecar --------------------------------------------------------------------------------------  # T:block_meta|LabelBoundedDetDataGenerator.save_bbox_sidecar
+    stem = strip_extension(fn_name)
+    out_fn = bbox_sidecar_path(L.output_folder / "bboxes", stem)  # T:self_ref|out_fn = bbox_sidecar_path(self.output_folder / "bboxes", stem)
+    box = data[L.box_key]  # T:self_ref|box = data[self.box_key]
+    label = data[L.label_key]  # T:self_ref|label = data[self.label_key]
+    if box.shape[0] == 0:
+        boxes = []
+        labels = []
+    else:
+        boxes = [box[i] for i in range(box.shape[0])]
+        labels = [label[i] for i in range(label.shape[0])]
+    save_detection_sidecar(
+        out_fn,
+        boxes,
+        labels,
+        ignore_labels=list(L.ignore_labels_cc),  # T:self_ref|    ignore_labels=list(self.ignore_labels_cc),
+    )
+#SECTION:-------------------- save_bbox_sidecar end --------------------------------------------------------------------------------------  # T:block_meta_end|LabelBoundedDetDataGenerator.save_bbox_sidecar
+    # end PythonMethodScratch  # T:block_end|LabelBoundedDetDataGenerator.save_bbox_sidecar
+    if not isinstance(boxes, list):
+        boxes = [boxes]
+    if not isinstance(labels, list):
+        labels = [labels]
+    labels  = [_label_to_int(label) for label in labels]
+    instances = {x:x for x in labels}
+    payload = {
+        "bbox": [_box_to_list(box) for box in boxes],
+        "label": [_label_to_int(label) for label in labels],
+    }
+    if ignore_labels is not None:
+        payload["ignore_labels"] = [int(x) for x in ignore_labels]
+    if instances is not None:
+        payload["instances"] = instances
+    save_json(payload, out_fn)
+
+
+# %%
+
+# %%
+#SECTION:-------------------- _process_row end --------------------------------------------------------------------------------------  # T:block_meta_end|_LBDDetWorker._process_row
+    # end PythonMethodScratch  # T:block_end|_LBDDetWorker._process_row
 # %%  # T:block_start|LabelBoundedDetDataGenerator._process_row
 # /home/ub/code/det3d/det3d/preprocessing/labelbounded.py  # T:block_donor|/home/ub/code/det3d/det3d/preprocessing/labelbounded.py
-# SECTION:-------------------- _process_row end --------------------------------------------------------------------------------------  # T:block_meta_end|LabelBoundedDetDataGenerator._process_row <CR>
-# end PythonMethodScratch  # T:block_end|LabelBoundedDetDataGenerator._process_row
-# %%

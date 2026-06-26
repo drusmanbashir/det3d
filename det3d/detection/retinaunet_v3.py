@@ -378,3 +378,36 @@ def arch_from_conf(configs) -> str:
     if is_excel_None(arch):
         arch = "retinanet"
     return str(arch).lower()
+
+
+# %%
+if __name__ == '__main__':
+#SECTION:-------------------- setup --------------------------------------------------------------------------------------
+    from fran.managers import Project
+    from torch import Tensor
+    from utilz.imageviewers import ImageBBoxViewer
+
+    from det3d.configs.parser import ConfigMakerDet
+
+    project_title = "lidca"
+    plan_id = 4
+
+    P = Project(project_title)
+    C = ConfigMakerDet(P)
+    C.setup(plan_id)
+    conf = C.configs
+    conf["dataset_params"]["fold"] = 0
+    plan = conf["plan_train"]
+    plan["fg_labels"]= [1,2,3]
+    val_patch_size=[128,128,64]
+    detector = create_retinaunet_v3_from_conf(plan, script=False, debug=True)
+
+    wire_retinaunet_v3_detector(detector, conf, val_patch_size)
+    R = detector
+# %%
+    head_maps, all_maps = R.feature_extractor(images)
+    pred_seg = R.segmenter(all_maps)
+    classification = R.classification_head(head_maps)
+    box_regression = R.regression_head(head_maps)
+
+

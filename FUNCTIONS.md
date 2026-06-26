@@ -4,6 +4,7 @@
 
 - `build_detection_json.py` — build MONAI detection JSON from lesion_stats.csv and fran fold splits
 - `nndet_lidc_prep.py` — native nnDetection LIDC prep: FRAN nifti (`/media/UB/datasets/lidc_all`) → `Task012_LIDC` raw_splitted + fran splits + `nndet_prep` crop/analyze/plan/process (`--det-data`, `--skip-convert`, `--skip-prep`)
+- `backfill_sidecar_instances.py` — add ``instances`` {lm_cc_id: semantic_label} to existing `bboxes/*.json` from matching `lms/*.pt` (`--project`, `--plan-id`, `--lbd-folder`, `--dry-run`)
 
 ## run/preproc
 
@@ -67,6 +68,8 @@
 - `nndet_env_dl.sh` — env vars for native nnDetection in conda `dl` (`det_data`, `det_models`, MLflow)
 - `nndet_train_lidc.sh` — native nnDet LIDC training (`nndet_train Task012_LIDC`, forwards `-o` / `--sweep`)
 - `benchmark_det_pipelines.py` — benchmark pipelines (native nnDet + `retinaunet_v3`); det loss cls+reg; refs `LIDCA-HOSS`/`LIDCA-IMPS`; `run|report|all|sweep`
+- `train_hybrid_fast_lbd.py` — hybrid fast LBD → nnDet RetinaUNetV001 (GpuTail + disk boxes); `--train-mode overwrite|resume`, `--n-train`/`--n-val`, `--train-equals-val`, `--case-ids`, `--exp-id`, `--gpu`
+- `train_native_lbd.py` — native nnDet LBD (materialize instance seg → Datamodule → pre_trafo); W&B image grid via `--wandb-grid-epoch-freq`; same resume/limited-n/train-equals-val flags as hybrid CLI
 
 ## det3d/inference
 

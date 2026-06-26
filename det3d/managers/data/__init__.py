@@ -41,7 +41,12 @@ from det3d.managers.data.main import (
     PadDetPatchd,
 )
 from det3d.managers.data.nifti import DataManagerNiftiDet
-from det3d.managers.data.run_through import DataManagerRTDet, DataManagerRTDetBTfms
+from det3d.managers.data.tfm_debug import (
+    DataManagerDualDetBTfmsTfmDebug,
+    DataManagerDualDetTfmDebug,
+    KEYS_CPU_NO_SPATIAL,
+    KEYS_ITEM_NO_SPATIAL,
+)
 from det3d.managers.data.valid_patch_stream import PatchStreamDatasetDet
 
 try:
@@ -112,6 +117,8 @@ __all__ = [
     "DataManagerDetWholePreTrafo",
     "DataManagerDualDet",
     "DataManagerDualDetBTfms",
+    "DataManagerDualDetBTfmsTfmDebug",
+    "DataManagerDualDetTfmDebug",
     "DataManagerDualDetPreTrafo",
     "DataManagerDualDetPreTrafoBTfms",
     "DataManagerDualDetShardBTfms",

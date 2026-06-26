@@ -44,6 +44,7 @@ class DataManagerDetBTfms(DataManagerDet):
                 intensity_tfms=self.transforms_dict["IntensityTfms"],
                 affine3d=self.configs["affine3d"],
                 patch_size=self.plan["patch_size"],
+                flip_prob=self.flip["prob"],
             ),
             image_key=ik,
             box_key=bk,
@@ -62,7 +63,7 @@ class DataManagerDetBTfms(DataManagerDet):
 
 
 class DataManagerDetSourceBTfms(DataManagerDetSource, DataManagerDetBTfms):
-    keys_tr = "Ld,Rtr,L2,E,Norm,BoxToWorld,ToPoints"
+    keys_tr = "Ld,Rtr,L2,E,Norm"
     keys_tr_batch = "GpuTail"
     keys_val = "L,E,Norm,DtypeVal"
     keys_val_batch = None
@@ -126,6 +127,11 @@ class DataManagerDetPatchBTfms(DataManagerDetPatch, DataManagerDetBTfms):
 
 
 class DataManagerDualDetBTfms(DataManagerDualDet, DataManagerDualBTfms):
+    def on_after_batch_transfer(self, batch, dataloader_idx):
+        if not isinstance(batch, dict) or "image" not in batch:
+            return batch
+        return super().on_after_batch_transfer(batch, dataloader_idx)
+
     def infer_manager_classes(self, configs):
         train_mode = configs["plan_train"]["mode"]
         valid_mode = configs["plan_valid"]["mode"]

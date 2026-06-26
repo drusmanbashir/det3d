@@ -4,10 +4,166 @@ import torch
 from monai.apps.detection.transforms.dictionary import ClipBoxToImaged
 from monai.data import MetaTensor
 from monai.transforms import Compose
+from monai.transforms.croppad.array import Crop
 from monai.transforms.croppad.dictionary import ResizeWithPadOrCropd
-from monai.transforms.spatial.dictionary import ConvertPointsToBoxesd, RandAffined
+from monai.transforms.spatial.dictionary import ConvertPointsToBoxesd, ConvertBoxToPointsd, RandAffined, RandFlipd
+from monai.transforms.utility.array import ApplyTransformToPoints
 from monai.transforms.utils import to_affine_nd
+from monai.utils import fall_back_tuple
 from monai.utils.type_conversion import convert_to_dst_type
+
+
+def _resize_pad_crop_voxel_shift(pre_spatial, spatial_size):
+    """Voxel-index shift for boxes when ResizeWithPadOrCrop center-crops then pads."""
+    # AI
+    pre = tuple(int(v) for v in pre_spatial)
+    target = fall_back_tuple(tuple(int(v) for v in spatial_size), pre)
+    roi_center = [i // 2 for i in pre]
+    slices = Crop.compute_slices(roi_center=roi_center, roi_size=target)
+    crop_start = [int(s.start) for s in slices]
+    cropped_shape = [int(s.stop - s.start) for s in slices]
+    pad_before = [(int(target[i]) - cropped_shape[i]) // 2 for i in range(3)]
+    shift = torch.tensor(
+        [pad_before[i] - crop_start[i] for i in range(3)], dtype=torch.float64
+    )
+    return shift
+
+
+def _warp_box_corners(corners, a0, aff):
+    dev = corners.device
+    a0 = a0.to(device=dev, dtype=torch.float64)
+    aff = aff.to(device=dev, dtype=torch.float64)
+    final_affine = torch.linalg.inv(aff) @ a0
+    return apply_affine_to_points_gpu(corners, final_affine, dtype=torch.float32)
+
+
+class ResizeWithPadOrCropBoxSyncd(MapTransform):
+    """ResizeWithPadOrCropd + shift box coords by center-crop / symmetric-pad offset."""
+
+    def __init__(
+        self,
+        keys,
+        box_key,
+        label_key,
+        spatial_size,
+        mode=None,
+        lazy=False,
+        allow_missing_keys=False,
+    ):
+        super().__init__(keys, allow_missing_keys)
+        self.box_key = box_key
+        self.label_key = label_key
+        self.spatial_size = tuple(int(v) for v in spatial_size)
+        self.resize = ResizeWithPadOrCropd(
+            keys=keys,
+            spatial_size=self.spatial_size,
+            lazy=lazy,
+        )
+
+    def __call__(self, data):
+        d = dict(data)
+        ref = d[self.keys[0]]
+        pre = tuple(int(v) for v in ref.shape[-3:])
+        d = self.resize(d)
+        shift = _resize_pad_crop_voxel_shift(pre, self.spatial_size)
+        if float(shift.abs().sum()) == 0.0:
+            return d
+        box = torch.as_tensor(d[self.box_key], dtype=torch.float32)
+        if box.numel() == 0:
+            return d
+        shift = shift.to(device=box.device, dtype=box.dtype)
+        box = box.clone()
+        for i in range(3):
+            box[:, i] += shift[i]
+            box[:, i + 3] += shift[i]
+        d[self.box_key] = box
+        return d
+
+
+class RandAffineBoxSyncd(MapTransform):
+    """RandAffine on spatial keys + warp patch-voxel boxes via 8-corner affine delta."""
+
+    _corner_key = "__box_corners__"
+
+    def __init__(
+        self,
+        spatial_keys,
+        box_key,
+        mode,
+        prob,
+        rotate_range,
+        scale_range,
+    ):
+        super().__init__(spatial_keys)
+        self.box_key = box_key
+        self.ref_key = spatial_keys[0]
+        self.rand_affine = RandAffined(
+            keys=spatial_keys,
+            mode=mode,
+            prob=prob,
+            rotate_range=rotate_range,
+            scale_range=scale_range,
+        )
+
+    def __call__(self, data):
+        d = dict(data)
+        a0 = d[self.ref_key].meta["affine"].clone()
+        d = self.rand_affine(d)
+        d = SyncMetaAffined(keys=self.keys)(d)
+        box = d[self.box_key]
+        if box.numel() == 0:
+            return d
+        d = ConvertBoxToPointsd(
+            keys=[self.box_key], point_key=self._corner_key
+        )(d)
+        corners = d[self._corner_key].to(d[self.ref_key].device)
+        warped = _warp_box_corners(
+            corners, a0, d[self.ref_key].meta["affine"]
+        )
+        d[self._corner_key] = MetaTensor(warped, meta=corners.meta)
+        d = ConvertPointsToBoxesd(
+            keys=[self._corner_key], box_key=self.box_key
+        )(d)
+        del d[self._corner_key]
+        return d
+
+
+class RandFlipBoxSyncd(MapTransform):
+    """RandFlip on spatial keys + sync patch-voxel boxes via 8-corner affine delta."""
+
+    _corner_key = "__box_corners__"
+
+    def __init__(self, spatial_keys, box_key, prob, spatial_axis):
+        super().__init__(spatial_keys)
+        self.box_key = box_key
+        self.ref_key = spatial_keys[0]
+        self.rand_flip = RandFlipd(
+            keys=spatial_keys,
+            prob=prob,
+            spatial_axis=spatial_axis,
+        )
+
+    def __call__(self, data):
+        d = dict(data)
+        a0 = d[self.ref_key].meta["affine"].clone()
+        d = self.rand_flip(d)
+        d = SyncMetaAffined(keys=self.keys)(d)
+        box = d[self.box_key]
+        if box.numel() == 0:
+            return d
+        d = ConvertBoxToPointsd(
+            keys=[self.box_key], point_key=self._corner_key
+        )(d)
+        corners = d[self._corner_key].to(d[self.ref_key].device)
+        warped = _warp_box_corners(
+            corners, a0, d[self.ref_key].meta["affine"]
+        )
+        d[self._corner_key] = MetaTensor(warped, meta=corners.meta)
+        d = ConvertPointsToBoxesd(
+            keys=[self._corner_key], box_key=self.box_key
+        )(d)
+        del d[self._corner_key]
+        return d
 
 
 def apply_affine_to_points_gpu(data, affine, dtype=torch.float64):
@@ -91,7 +247,12 @@ class GpuApplyTransformToPointsd(MapTransform):
     def __init__(self, keys, refer_keys, affine_lps_to_ras=False):
         super().__init__(keys)
         self.refer_keys = refer_keys if isinstance(refer_keys, tuple) else (refer_keys,)
-        self.affine_lps_to_ras = affine_lps_to_ras
+        from monai.transforms.utility.array import ApplyTransformToPoints
+
+        self.converter = ApplyTransformToPoints(
+            invert_affine=True,
+            affine_lps_to_ras=affine_lps_to_ras,
+        )
 
     def __call__(self, data):
         d = dict(data)
@@ -99,11 +260,7 @@ class GpuApplyTransformToPointsd(MapTransform):
             coords = d[key]
             refer = d[refer_key]
             affine = refer.meta["affine"]
-            applied = coords.meta["affine"]
-            affine = affine.to(device=coords.device, dtype=torch.float64)
-            applied = applied.to(device=coords.device, dtype=torch.float64)
-            final = torch.linalg.inv(affine) @ applied
-            d[key] = apply_affine_to_points_gpu(coords, final)
+            d[key] = self.converter(coords, affine)
         return d
 
 
@@ -141,6 +298,8 @@ class BatchItemCompose:
             passthrough_keys = (*passthrough_keys, self.mask_key)
         if self.lm_key is not None:
             passthrough_keys = (*passthrough_keys, self.lm_key)
+        if "instances" in d:
+            passthrough_keys = (*passthrough_keys, "instances")
         for i in range(n):
             item = {self.image_key: d[self.image_key][i]}
             for key in passthrough_keys:
@@ -153,6 +312,13 @@ class BatchItemCompose:
                     item[key] = val[i]
                 else:
                     item[key] = val
+            ref = item[self.image_key]
+            dev = ref.device if torch.is_tensor(ref) else None
+            if dev is not None:
+                for key in passthrough_keys:
+                    t = item.get(key)
+                    if torch.is_tensor(t):
+                        item[key] = t.to(dev)
             items.append(self.tfms(item))
         d[self.image_key] = torch.stack([it[self.image_key] for it in items], 0)
         d[self.box_key] = [it[self.box_key] for it in items]
@@ -161,6 +327,16 @@ class BatchItemCompose:
             d[self.mask_key] = torch.stack([it[self.mask_key] for it in items], 0)
         if self.lm_key is not None and self.lm_key in items[0]:
             d[self.lm_key] = torch.stack([it[self.lm_key] for it in items], 0)
+        if "instances" in d:
+            inst_in = d["instances"]
+            d["instances"] = [
+                it["instances"]
+                if "instances" in it
+                else inst_in[i]
+                if isinstance(inst_in, list)
+                else inst_in
+                for i, it in enumerate(items)
+            ]
         if self.point_key in d:
             del d[self.point_key]
         return attach_targets(d, self.box_key, self.label_key)
@@ -213,12 +389,24 @@ def build_train_gpu_tail_compose_pre_trafo(
     intensity_tfms,
     affine3d,
     patch_size,
+    flip_prob,
     spatial_prob=1.0,
 ):
     p = float(spatial_prob)
     spatial_keys = [image_key, lm_key]
+    flip_p = float(flip_prob)
     return Compose(
         [
+            RandFlipd(
+                keys=spatial_keys,
+                prob=flip_p,
+                spatial_axis=0,
+            ),
+            RandFlipd(
+                keys=spatial_keys,
+                prob=flip_p,
+                spatial_axis=1,
+            ),
             RandAffined(
                 keys=spatial_keys,
                 mode=["bilinear", "nearest"],
@@ -250,6 +438,7 @@ def build_train_gpu_tail_compose(
     intensity_tfms,
     affine3d,
     patch_size,
+    flip_prob,
     spatial_prob=1.0,
 ):
     p = float(spatial_prob)
@@ -261,28 +450,33 @@ def build_train_gpu_tail_compose(
     if lm_key is not None:
         spatial_keys.append(lm_key)
         affine_mode.append("nearest")
-    sync_meta_keys = [image_key, point_key]
-    if lm_key is not None:
-        sync_meta_keys.insert(1, lm_key)
+    flip_p = float(flip_prob)
     return Compose(
         [
-            SyncPointsMetaToImaged(point_key=point_key, image_key=image_key),
-            RandAffined(
-                keys=spatial_keys,
+            RandFlipBoxSyncd(
+                spatial_keys=spatial_keys,
+                box_key=box_key,
+                prob=flip_p,
+                spatial_axis=0,
+            ),
+            RandFlipBoxSyncd(
+                spatial_keys=spatial_keys,
+                box_key=box_key,
+                prob=flip_p,
+                spatial_axis=1,
+            ),
+            RandAffineBoxSyncd(
+                spatial_keys=spatial_keys,
+                box_key=box_key,
                 mode=affine_mode,
                 prob=float(affine3d["p"]) * p,
                 rotate_range=affine3d["rotate_range"],
                 scale_range=affine3d["scale_range"],
             ),
-            SyncMetaAffined(keys=sync_meta_keys),
-            GpuApplyTransformToPointsd(
-                keys=[point_key],
-                refer_keys=image_key,
-                affine_lps_to_ras=affine_lps_to_ras,
-            ),
-            ConvertPointsToBoxesd(keys=[point_key], box_key=box_key),
-            ResizeWithPadOrCropd(
+            ResizeWithPadOrCropBoxSyncd(
                 keys=spatial_keys,
+                box_key=box_key,
+                label_key=label_key,
                 spatial_size=tuple(int(v) for v in patch_size),
                 lazy=False,
             ),

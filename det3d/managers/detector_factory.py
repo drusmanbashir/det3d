@@ -21,12 +21,10 @@ def resolve_detector_manager(configs: dict):
     detector = arch_from_conf(configs)
     if detector == "retinaunet_v3":
         from det3d.managers.retinaunet_v3 import RetinaUNetManagerV3
-
         return RetinaUNetManagerV3
     if detector == "retinaunet":
         if configs["model_params"].get("pre_trafo", False):
             from det3d.managers.retinaunet_v2 import RetinaUNetManagerV2
-
             return RetinaUNetManagerV2
         from det3d.managers.retinaunet import RetinaUNetManager
 

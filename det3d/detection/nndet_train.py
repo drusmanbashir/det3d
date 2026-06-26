@@ -15,7 +15,6 @@ from utilz.stringz import ast_literal_eval
 NNDET_ROOT = Path("/home/ub/code/nnDetection")
 NNDET_TRAIN_CFG = NNDET_ROOT / "nndet/conf/train/v001.yaml"
 
-
 def ensure_nndet_importable():
     if str(NNDET_ROOT) not in sys.path:
         sys.path.insert(0, str(NNDET_ROOT))
@@ -27,7 +26,9 @@ def ensure_nndet_importable():
 
 def _center_crop_starts(full_shape, patch_size):
     patch_size = tuple(int(v) for v in patch_size)
-    return tuple(max(0, (int(full) - int(ps)) // 2) for full, ps in zip(full_shape, patch_size))
+    return tuple(
+        max(0, (int(full) - int(ps)) // 2) for full, ps in zip(full_shape, patch_size)
+    )
 
 
 def _center_crop_spatial(x, patch_size, starts=None):
@@ -72,7 +73,7 @@ def forward_patch_size_from_configs(configs):
 
 
 def _lm_seg_volume(lm_item):
-  #AI
+    # AI
     t = torch.as_tensor(lm_item).long()
     while t.dim() > 3 and int(t.shape[0]) == 1:
         t = t.squeeze(0)
@@ -114,12 +115,12 @@ def xyzxyz_exclusive_to_nndet(box):
     """det3d xyzxyz half-open sidecar -> nnDet xyxyzz (training targets only)."""
     b = torch.as_tensor(box, dtype=torch.float32).reshape(-1)
     out = torch.empty(6, dtype=b.dtype, device=b.device)
-    out[0] = b[0] 
+    out[0] = b[0]
     out[1] = b[1]
-    out[2] = b[3]      # x2: exclusive upper -> nnDet max+1
-    out[3] = b[4]      # y2
+    out[2] = b[3]  # x2: exclusive upper -> nnDet max+1
+    out[3] = b[4]  # y2
     out[4] = b[2]
-    out[5] = b[5]      # z2
+    out[5] = b[5]  # z2
     return out
 
 
@@ -139,6 +140,40 @@ def disk_bbox_to_nndet_xyxyzz(disk_bbox: torch.Tensor) -> torch.Tensor:
     if out.numel():
         out[:, [0, 1, 4]] -= 1
     return out
+
+
+def _semantic_lm_to_nndet_target_seg(lm_vol, fg_labels):
+    # AI
+    """Semantic disk lm (class ids) -> nnDet target_seg (0=bg, 1..K fg)."""
+    lm_vol = lm_vol.long()
+    label_to_idx = {int(v): i for i, v in enumerate(fg_labels)}
+    out = torch.zeros_like(lm_vol, dtype=torch.long)
+    for sem_val, idx in label_to_idx.items():
+        out[lm_vol == sem_val] = idx + 1
+    return out
+
+
+def _target_seg_from_semantic_lm_batch(
+    lm_src,
+    fg_labels,
+    crop_starts,
+    forward_patch_size,
+    n: int,
+    device=None,
+):
+    # AI
+    """Crop aug'd semantic lm batch -> nnDet target_seg [N,D,H,W]."""
+    segs = []
+    for i in range(n):
+        lm_item = lm_src[i] if isinstance(lm_src, list) else lm_src[i]
+        vol = _lm_seg_volume(lm_item)
+        if crop_starts is not None:
+            vol, _ = _center_crop_spatial(vol, forward_patch_size, crop_starts)
+        segs.append(_semantic_lm_to_nndet_target_seg(vol, fg_labels))
+    target_seg = torch.stack(segs, 0)
+    if device is not None:
+        target_seg = target_seg.to(device)
+    return target_seg
 
 
 def det3d_semantic_target_seg_from_batch(
@@ -194,7 +229,7 @@ def _batch_pre_for_semantic(
 
 
 def _nndet_target_classes(target_boxes, target_classes_raw, fg_labels):
-  #AI
+    # AI
     """Map semantic box labels to nnDetection fg indices (0..K-1)."""
     label_to_idx = {int(v): i for i, v in enumerate(fg_labels)}
     out = []
@@ -213,7 +248,7 @@ def _nndet_target_classes(target_boxes, target_classes_raw, fg_labels):
 
 
 def _instance_mapping_for_item(lm_item, labels, instances=None, fg_labels=None):
-  #AI
+    # AI
     """Map lm instance ids to nnDet fg class indices."""
     if instances is not None:
         label_to_idx = {int(v): i for i, v in enumerate(fg_labels)}
@@ -236,7 +271,7 @@ def _instance_mapping_for_item(lm_item, labels, instances=None, fg_labels=None):
 
 
 def det3d_batch_to_pre_trafo_input(batch, forward_patch_size=None, fg_labels=None):
-  #AI
+    # AI
     """det3d collate batch -> nnDet pre_trafo input: data, target, instance_mapping."""
     data = batch["image"].float()
     crop_starts = None
@@ -281,7 +316,7 @@ def det3d_batch_to_nndet(
     *,
     use_disk_box_plug=True,
 ):
-  #AI
+    # AI
     """det3d collate → nnDetection train_step targets (disk boxes + semantic seg)."""
     data = batch["image"]
     crop_starts = None
@@ -296,9 +331,12 @@ def det3d_batch_to_nndet(
 
     target_boxes = []
     target_classes_raw = []
-    instances_batch = batch["instances"] if "instances" in batch else None
 
-    box_to_nndet = disk_bbox_to_nndet_xyxyzz if use_disk_box_plug else xyzxyz_exclusive_batch_to_nndet
+    box_to_nndet = (
+        disk_bbox_to_nndet_xyxyzz
+        if use_disk_box_plug
+        else xyzxyz_exclusive_batch_to_nndet
+    )
 
     for i in range(n):
         box = batch["bbox"][i]
@@ -309,21 +347,15 @@ def det3d_batch_to_nndet(
         label = torch.as_tensor(batch["label"][i], dtype=torch.long).reshape(-1)
         target_classes_raw.append(label)
 
-    target_classes = _nndet_target_classes(
-        target_boxes, target_classes_raw, fg_labels
-    )
+    target_classes = _nndet_target_classes(target_boxes, target_classes_raw, fg_labels)
 
-    batch_pre = _batch_pre_for_semantic(
+    target_seg = _target_seg_from_semantic_lm_batch(
         lm_src,
-        batch["label"],
-        instances_batch,
         fg_labels,
         crop_starts,
         forward_patch_size,
         n,
-    )
-    target_seg = det3d_semantic_target_seg_from_batch(
-        batch_pre, device=data.device if isinstance(data, torch.Tensor) else None
+        device=data.device if isinstance(data, torch.Tensor) else None,
     )
 
     out = {
@@ -378,7 +410,9 @@ def plan_architecture_from_det3d(plan_train):
 def apply_det3d_overrides_to_nndet_plan(plan, plan_train):
     plan = deepcopy(plan)
     fps = plan_train.get("nndet_forward_patch_size")
-    plan["patch_size"] = [int(v) for v in (fps if fps is not None else plan_train["patch_size"])]
+    plan["patch_size"] = [
+        int(v) for v in (fps if fps is not None else plan_train["patch_size"])
+    ]
     arch = plan["architecture"]
     arch["classifier_classes"] = len(plan_train["fg_labels"])
     arch["seg_classes"] = 1
@@ -393,7 +427,9 @@ def plan_from_det3d(plan_train, plan_path=None):
         plan = load_pickle(plan_path)
     else:
         fps = plan_train.get("nndet_forward_patch_size")
-        patch_size = [int(v) for v in (fps if fps is not None else plan_train["patch_size"])]
+        patch_size = [
+            int(v) for v in (fps if fps is not None else plan_train["patch_size"])
+        ]
         plan = {
             "architecture": plan_architecture_from_det3d(plan_train),
             "anchors": plan_anchors_from_det3d(plan_train),
@@ -474,7 +510,7 @@ def offset_nndet_xyxyzz_boxes(boxes, origin):
 
 
 def nndet_predict_plan_for_inference(nndet_plan, plan_train):
-  #AI
+    # AI
     arch = nndet_plan["architecture"]
     plan = deepcopy(nndet_plan)
     plan["network_dim"] = 3
@@ -490,7 +526,7 @@ def nndet_predict_plan_for_inference(nndet_plan, plan_train):
 
 
 def nndet_identity_properties(spatial_shape, spacing):
-  #AI
+    # AI
     import numpy as np
 
     shape = tuple(int(v) for v in spatial_shape)
@@ -511,8 +547,10 @@ def nndet_identity_properties(spatial_shape, spacing):
 
 
 @torch.no_grad()
-def nndet_predict_case(net, nndet_plan, plan_train, image, device, overlap=0.25, do_seg=True, num_tta=0):
-  #AI
+def nndet_predict_case(
+    net, nndet_plan, plan_train, image, device, overlap=0.25, do_seg=True, num_tta=0
+):
+    # AI
     """Full-volume nnDetection predict_case (BoxEnsemblerSelective + SegmentationEnsembler)."""
     ensure_nndet_importable()
     from nndet.ptmodule.retinaunet.v001 import RetinaUNetV001
@@ -555,7 +593,9 @@ def nndet_predict_case(net, nndet_plan, plan_train, image, device, overlap=0.25,
     return out
 
 
-def nndet_pred_to_vis(pred, box_key="bbox", label_key="label", score_key="label_scores"):
+def nndet_pred_to_vis(
+    pred, box_key="bbox", label_key="label", score_key="label_scores"
+):
     boxes = pred["pred_boxes"][0]
     labels = pred["pred_labels"][0]
     scores = pred["pred_scores"][0]
@@ -588,6 +628,53 @@ def nndet_batch_pred_to_vis_list(pred):
     return vis_preds
 
 
+def native_nndet_batch_to_wandb_grid_batch(batch_pt, *, keys=None):
+    # AI
+    """Native post-pre_trafo batch -> det3d wandb grid batch (image/bbox/label/lm)."""
+    grid_batch = {
+        "image": batch_pt["data"],
+        "lm": batch_pt["target"],
+        "bbox": [nndet_batch_to_xyzxyz(boxes) for boxes in batch_pt["boxes"]],
+        "label": [cls.long() + 1 for cls in batch_pt["classes"]],
+    }
+    if keys is not None:
+        grid_batch["keys"] = keys
+    return grid_batch
+
+
+def patch_module_for_native_wandb_grid(module):
+    # AI
+    """Wrap native RetinaUNet validation_step to stash preds for wandb grid."""
+    import types
+
+    def validation_step(self, batch, batch_idx):
+        keys = batch["keys"]
+        with torch.no_grad():
+            batch_pt = self.pre_trafo(**batch)
+            targets = {
+                "target_boxes": batch_pt["boxes"],
+                "target_classes": batch_pt["classes"],
+                "target_seg": batch_pt["target"][:, 0],
+            }
+            losses, prediction = self.model.train_step(
+                images=batch_pt["data"],
+                targets=targets,
+                evaluation=True,
+                batch_num=batch_idx,
+            )
+            loss = sum(losses.values())
+        self.evaluation_step(prediction=prediction, targets=targets)
+        grid_batch = native_nndet_batch_to_wandb_grid_batch(batch_pt, keys=keys)
+        maybe_store_batch_grid_preds(self, grid_batch, prediction)
+        return {
+            "loss": loss.detach().item(),
+            **{key: l.detach().item() for key, l in losses.items()},
+        }
+
+    module.validation_step = types.MethodType(validation_step, module)
+    return module
+
+
 def maybe_store_batch_grid_preds(pl_module, batch, preds):
     """Stash validation preds on batch for wandb det grid (no extra forward)."""
     if isinstance(preds, list):
@@ -598,8 +685,11 @@ def maybe_store_batch_grid_preds(pl_module, batch, preds):
             }
             for p in preds
         ]
-        return
-    batch["pred"] = nndet_batch_pred_to_vis_list(preds)
+    else:
+        batch["pred"] = nndet_batch_pred_to_vis_list(preds)
+    if not hasattr(pl_module, "_nndet_wandb_grid_val_batches"):
+        pl_module._nndet_wandb_grid_val_batches = []
+    pl_module._nndet_wandb_grid_val_batches.append(batch)
 
 
 def nndet_val_targets_from_batch(batch, seg_key="lm"):
@@ -619,3 +709,4 @@ def nndet_val_targets_from_batch(batch, seg_key="lm"):
         "target_classes": target_classes,
         "target_seg": target_seg,
     }
+

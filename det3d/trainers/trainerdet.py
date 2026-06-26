@@ -9,6 +9,7 @@ from det3d.detection.nndet_train import nndet_batch_to_xyzxyz, xyzxyz_exclusive_
 from det3d.detection.preprocess_images import check_training_targets
 from det3d.detection.retinanet_detector2 import RetinaNetDetector2
 from det3d.detection.retinanet_train import forward_train_joint
+from det3d.detection.retinaunet_v3 import RetinaUNetV3
 from fran.callback.debug_epoch_limit import DebugEpochBatchLimit
 from fran.callback.incremental import LRFloorStop
 from fran.configs.helpers import normalize_logging_payload
@@ -114,6 +115,7 @@ class TrainerDet(Trainer):
         wandb=True,
         profiler=False,
         debug: bool = False,
+        debug_tfm_keys: str | None = None,
         val_every_n_epochs: int = 5,
         cbs=[],
         tags=[],
@@ -138,6 +140,7 @@ class TrainerDet(Trainer):
         self.val_indices = val_indices
         self.val_sampling = float(val_sampling)
         self.debug = bool(debug)
+        self.debug_tfm_keys = debug_tfm_keys
         self.batch_tfms = bool(batch_tfms)
         self._resolve_run_ckpt(wandb=wandb)
         self.maybe_alter_configs(batch_size, compiled, nndet_forward_patch_size)
@@ -204,6 +207,17 @@ class TrainerDet(Trainer):
     def resolve_orchestrator_class(self, batch_tfms=None):
         if batch_tfms is None:
             batch_tfms = self.batch_tfms
+        if self.debug and self.debug_tfm_keys:
+            from det3d.managers.data.tfm_debug import (
+                DataManagerDualDetBTfmsTfmDebug,
+                DataManagerDualDetTfmDebug,
+            )
+
+            return (
+                DataManagerDualDetBTfmsTfmDebug
+                if batch_tfms
+                else DataManagerDualDetTfmDebug
+            )
         if self.configs["model_params"].get("pre_trafo", False):
             from det3d.managers.data.pre_trafo import (
                 DataManagerDualDetPreTrafo,
@@ -251,6 +265,10 @@ class TrainerDet(Trainer):
             debug=self.debug,
             batch_tfms=self.batch_tfms,
         )
+        if self.debug and self.debug_tfm_keys:
+            dm_kwargs["debug_tfm_keys"] = self.debug_tfm_keys
+            n = self.train_indices if isinstance(self.train_indices, int) else 50
+            dm_kwargs["debug_n_cases"] = int(n)
         self.D = dm_class(**dm_kwargs)
         from det3d.managers.data.labels import infer_det_labels_from_data_folder
 
@@ -320,7 +338,7 @@ class TrainerDet(Trainer):
         cbs = []
         if extra_cbs:
             cbs += list(extra_cbs)
-        if self.debug:
+        if self.debug and not self.debug_tfm_keys:
             cbs += [DebugEpochBatchLimit(n=2)]
 
         cbs += [
@@ -455,29 +473,30 @@ if __name__ == "__main__":
 
 # %%
 # SECTION:-------------------- TRAINING --------------------------------------------------------------------------------------
-    conf["model_params"]["arch"] = "retinanet"
-    conf["model_params"]["arch"] = "retinaunet_v3"
+    from det3d.managers.data.tfm_debug import KEYS_ITEM_NO_SPATIAL
+
+    conf["model_params"]["arch"] = "retinaunet"
+    conf["affine3d"]["p"] = 0.0
     print(conf["dataset_params"]["prezoom_scale"])
 
-    bs = 2
-    device_id = 1
+    bs = 6
+    device_id = 0
     batch_tfms = True
-    batch_tfms = False
     wandb = True
-    run_name = "LIDCA-V3-BS2-B"
     run_name = None
 
 # %%
-    tags = []
-    description = "TrainerDet lidca retinanet"
+    tags = ["tfm-debug", "no-spatial", "instances-fix"]
+    description = "TrainerDet tfm debug n=50 no spatial aug + sidecar instances"
     lr = None
-    debug_ = False
+    debug_ = True
+    debug_tfm_keys = KEYS_ITEM_NO_SPATIAL
     profiler = False
     compiled = False
     cbs = []
-    wandb_grid_epoch_freq = 40
-    val_every_n_epochs = 5
-    train_indices = None
+    wandb_grid_epoch_freq = 20
+    val_every_n_epochs = 2
+    train_indices = 50
     val_indices = None
     val_sampling = 1.0
     epochs = 500
@@ -492,6 +511,7 @@ if __name__ == "__main__":
         val_every_n_epochs=val_every_n_epochs,
         cbs=cbs,
         debug=debug_,
+        debug_tfm_keys=debug_tfm_keys,
         batch_size=bs,
         batch_tfms=batch_tfms,
         devices=[device_id],
@@ -538,53 +558,40 @@ if __name__ == "__main__":
     print(batch.keys())
 # %%
     images = batch["image"]
-    targets = batch["lm"]
-        targets = check_training_targets(
-            images,
-            targets,
-            N.detector.spatial_dims,
-            N.detector.target_label_key,
-            N.detector.target_box_key,
-        )
-        N.detector._check_detector_training_components()
-        head_outputs = N._forward_network_head(images)
-        seg_key = N.detector.network.seg_key
-        seg_logits = head_outputs.pop(seg_key)
-        if isinstance(seg_logits, list):
-            seg_logits = seg_logits[0]
-        head_outputs, num_anchor_locs_per_level = N._build_train_anchors(
-            images, head_outputs
-        )
-        det_losses = N.detector.compute_loss(
-            head_outputs, targets, N.detector.anchors, num_anchor_locs_per_level
-        )
-        seg_total = N.seg_loss_fnc(seg_logits, lm_batch)
-        cls_key = N.detector.cls_key
-        box_key = N.detector.box_reg_key
-        cls_loss = det_losses[cls_key]
-        box_loss = det_losses[box_key]
-        total = N.w_cls * cls_loss + N.w_reg * box_loss + seg_total
-        return {
-            "loss": total,
-            cls_key: cls_loss.detach(),
-            box_key: box_loss.detach(),
-            "loss_ce": N.seg_loss_fnc.loss_dict["loss_ce"],
-            "loss_dice": N.seg_loss_fnc.loss_dict["loss_dice"],
-        }
-
 
 # %%
-    det = N.detector
+    R = N.detector
     debug = False
     script=None
     plan = Tm.configs["plan_train"]
 
 
-    det= create_retinaunet_v3_from_conf(plan, script=script, debug=debug)
+    R= create_retinaunet_v3_from_conf(plan, script=script, debug=debug)
 
 
+# %%
+    images = batch["image"]
+    R = N
+# %%  # T:block_start|RetinaUNetV3.forward
+    A = N.detector
+    R = N.detector.network
 
-
+# /home/ub/code/det3d/det3d/detection/retinaunet_v3.py  # T:block_donor|/home/ub/code/det3d/det3d/detection/retinaunet_v3.py
+#SECTION:-------------------- forward --------------------------------------------------------------------------------------  # T:block_meta|RetinaUNetV3.forward
+    # requires R = RetinaUNetV3(...) in __main__  # T:requires_alias|R = RetinaUNetV3(...)
+    head_maps, all_maps = R.feature_extractor(images)  # T:self_ref|head_maps, all_maps = self.feature_extractor(images)
+    [print(a.shape) for a in head_maps]
+    [print(a.shape) for a in all_maps]
+    pred_seg = R.segmenter(all_maps)  # T:self_ref|pred_seg = self.segmenter(all_maps)
+    classification = R.classification_head(head_maps)  # T:self_ref|classification = self.classification_head(head_maps)
+    box_regression = R.regression_head(head_maps)  # T:self_ref|box_regression = self.regression_head(head_maps)
+    # return {
+    #     R.cls_key: classification,
+    #     R.box_reg_key: box_regression,
+    #     R.seg_key: pred_seg["seg_logits"],
+    # }
+#SECTION:-------------------- forward end --------------------------------------------------------------------------------------  # T:block_meta_end|RetinaUNetV3.forward
+    # end PythonMethodScratch  # T:block_end|RetinaUNetV3.forward
 # %%
     from det3d.architectures.create_detector import _anchor_generator
 

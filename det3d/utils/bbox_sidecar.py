@@ -36,7 +36,30 @@ def migrate_detection_sidecar_file(bbox_fn) -> bool:
     return True
 
 
-def save_detection_sidecar(out_fn, boxes, labels, ignore_labels=None, instances=None):
+def save_detection_sidecar(out_fn, boxes, labels, ignore_labels=None, instances:dict =None):
+    if not isinstance(boxes, list):
+        boxes = [boxes]
+    if not isinstance(labels, list):
+        labels = [labels]
+    labels  = [_label_to_int(label) for label in labels]
+    labels_unique = set(labels)
+    boxes = [_box_to_list(box) for box in boxes]
+    if not instances:
+        instances = {str(x):x for x in labels_unique}
+    payload = {
+        "bbox": boxes,
+        "label": labels,
+        "instances": instances
+
+    }
+    if ignore_labels is not None:
+        payload["ignore_labels"] = [int(x) for x in ignore_labels]
+    save_json(payload, out_fn)
+
+
+
+
+
     if not isinstance(boxes, list):
         boxes = [boxes]
     if not isinstance(labels, list):
