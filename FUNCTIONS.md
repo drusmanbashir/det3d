@@ -14,9 +14,9 @@
 ## det/preprocessing
 
 - `object_bounded.py` — `ObjectBoundedDataGenerator` + `_OBJWorker`: fixed_spacing PT in; strict bbox crop (`expand_by=0`); compose `LoadT,Chan,Dev,Stats,N2P,AttachGT,Int`; patch size native — train `batch_size=1`, no collate/pad → `images/`, `lms/`, `bboxes/*_bboxN.json`
-- `labelbounded.py` — `LabelBoundedDetDataGenerator` + `_LBDDetWorker`: fixed_spacing PT in → label crop/remap → `DetectionBBoxStatsd` (standard boxes) → `Stats,E,L,H` → `images/`, `masks/`, `bboxes/{case}.json` per case; postprocess writes `labels_all.json` + `dataset_details.csv`
+- `labelbounded.py` — `LabelBoundedDetDataGenerator` + `_LBDDetWorker`: fixed_spacing PT in → label crop/remap → `DetectionBBoxStatsd` → `Stats,E,Ext,H` → `images/`, `lms/`, `bboxes/{case}.csv` (LMG nbrhoods + `bbox_xyzxyz` + `bbox_extended_{Dx}_{Dy}_{Dz}` extended cols); postprocess writes `manifest.json` + `dataset_details.csv`
 - `dataset_details.py` — `dataset_details_from_mask_file`, `create_results_df_from_det_folder` (fran: `dataset_details_from_lm_file`, `create_results_df_from_lms_folder`); `write_dataset_details_csv`
-- `bbox_sidecar.py` — `save_detection_sidecar` / `load_detection_sidecar`; `save_inference_sidecar` / `load_inference_sidecar`; `valid_detection_box` / `sidecar_bbox_empty`
+- `bbox_sidecar.py` — `save_detection_sidecar` / `load_detection_sidecar` (JSON + LBD CSV); `save_nbrhood_sidecar` / `load_nbrhood_sidecar`; `extended_bbox_df_column`; `save_inference_sidecar` / `load_inference_sidecar`; `valid_detection_box` / `sidecar_bbox_empty`
 
 ## det/utils
 

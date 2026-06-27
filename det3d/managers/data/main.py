@@ -1,5 +1,6 @@
 import json
 import resource
+from ast import literal_eval
 from functools import partial
 from pathlib import Path
 from utilz.imageviewers import ImageBBoxViewer, ImageMaskBboxViewer, ImageMaskViewer
@@ -18,10 +19,16 @@ from det3d.transforms.crop_indices import (
     monai_crop_center_to_slices,
     sample_crop_center_from_extended_boxes,
 )
+from det3d.transforms.detection import ClipBoxToImagedWithDf, patch_size_manifest_key
 from det3d.transforms.gpu_det import RandAffineBoxSyncd, RandFlipBoxSyncd, ResizeWithPadOrCropBoxSyncd
-from det3d.transforms.detection import patch_size_manifest_key
 from fran.managers.data.valid_patch_stream import _pad_tensor_to_patch_size
-from det3d.utils.bbox_sidecar import bbox_sidecar_path, load_detection_sidecar, valid_detection_box
+from det3d.utils.bbox_sidecar import (
+    bbox_sidecar_path,
+    extended_bbox_df_column,
+    load_detection_sidecar,
+    nbrhood_df_to_detection_records,
+    valid_detection_box,
+)
 from fran.configs.helpers import is_excel_None
 from fran.managers.data.main import (
     DataManager,
@@ -38,7 +45,6 @@ from fran.managers.data.main import (
 from fran.preprocessing.helpers import import_h5py
 from fran.run.preproc.archive_preprocessed import ensure_rapid_data_folder
 from fran.transforms.imageio import TorchReader
-from monai.apps.detection.transforms.dictionary import ClipBoxToImaged
 from monai.data import DataLoader, Dataset, MetaTensor
 from monai.transforms import (
     Compose,
@@ -110,9 +116,11 @@ class LoadHDF5DetShardExtendedBBoxd(MapTransform):
         with h5py.File(shard_path, "r") as h5f:
             case_grp = h5f[case_path]
             src_dims = tuple(int(v) for v in case_grp["image"].shape)
-        ext_fn = self.data_folder / "extended_bboxes" / f"{case_id}.json"
-        ext_all = json.loads(ext_fn.read_text(encoding="utf-8"))
-        center_boxes = ext_all[self.patch_size_key]
+        col = extended_bbox_df_column(self.patch_size_key)
+        raw = d["df"][col]
+        center_boxes = [
+            literal_eval(v) if isinstance(v, str) else v for v in raw
+        ]
         d["hdf5_shard_path"] = str(shard_path)
         d["hdf5_case_path"] = case_path
         # Volume bounds for RandCrop (Rtr runs before L2 loads pixels). Per-case HDF5 dataset shape, not plan or manifest tag.
@@ -504,14 +512,8 @@ class DataManagerDet(DataManager):
 
         return arch_from_conf(self.configs) in ("retinaunet", "retinaunet_v3")
 
-    def _rand_crop_patch_size(self):
-        if self.uses_lm_seg():
-            from det3d.detection.nndet_train import forward_patch_size_from_configs
-
-            ps = forward_patch_size_from_configs(self.configs)
-            if ps is not None:
-                return tuple(int(v) for v in ps)
-        return self._patch_size()
+    def _rand_crop_patch_size(self): # garbage AI slop
+                return self._patch_size()
 
     def _set_collate_fn(self):
         if self.is_eval_split():
@@ -592,8 +594,11 @@ class DataManagerDet(DataManager):
             raise FileNotFoundError(
                 f"Legacy bbox .pt sidecars under {bboxes_dir}; re-preproc to JSON"
             )
-        if len(list(bboxes_dir.glob("*.json"))) == 0:
-            raise FileNotFoundError(f"No bbox JSON sidecars under {bboxes_dir}")
+        if (
+            len(list(bboxes_dir.glob("*.csv"))) == 0
+            and len(list(bboxes_dir.glob("*.json"))) == 0
+        ):
+            raise FileNotFoundError(f"No bbox sidecars under {bboxes_dir}")
         csv_fn = data_folder / "dataset_details.csv"
         if not csv_fn.is_file():
             raise FileNotFoundError(f"Missing dataset_details.csv under {data_folder}")
@@ -629,21 +634,42 @@ class DataManagerDet(DataManager):
             if str(case_id) in fg_case_ids and str(case_id) in bbox_ok
         ]
 
+    def _bbox_sidecar_ext_col(self):
+        patch_size = self._patch_size()
+        scale = float(self.dataset_params["prezoom_scale"])
+        patch_size_prezoom = tuple(int(v * scale) for v in patch_size)
+        return extended_bbox_df_column(patch_size_manifest_key(patch_size_prezoom))
+
     def _load_bbox_sidecar(self, bbox_fn):
-        boxes, labels, _instances = load_detection_sidecar(bbox_fn)
+        bbox_fn = Path(bbox_fn)
+        if bbox_fn.suffix == ".csv":
+            ext_col = self._bbox_sidecar_ext_col()
+            usecols = ["label_org", "bbox_xyzxyz", "cent", ext_col]
+            df = pd.read_csv(bbox_fn, usecols=usecols)
+            # df = pd.read_csv(bbox_fn
+            boxes, labels, _instances = nbrhood_df_to_detection_records(df)
+        else:
+            df = None
+            boxes, labels, _instances = load_detection_sidecar(bbox_fn)
         valid_boxes = []
         valid_labels = []
-        for box, label in zip(boxes, labels):
+        keep_idx = []
+        for i, (box, label) in enumerate(zip(boxes, labels)):
             if valid_detection_box(box):
                 valid_boxes.append(box.reshape(-1))
                 valid_labels.append(label.reshape(-1))
+                keep_idx.append(i)
+        if df is not None and len(keep_idx) != len(df):
+            df = df.iloc[keep_idx].reset_index(drop=True)
         if len(valid_boxes) == 0:
             box_t = torch.zeros((0, 6), dtype=torch.float32)
             label_t = torch.zeros((0,), dtype=torch.long)
         else:
             box_t = torch.stack(valid_boxes)
             label_t = torch.stack(valid_labels).reshape(-1)
-        return box_t, label_t, _instances
+        labels_int = [int(v) for v in label_t.reshape(-1).tolist()]
+        instances = {str(x): x for x in set(labels_int)}
+        return box_t, label_t, instances, df
 
     @property
     def hdf5_manifest_fn(self):
@@ -676,7 +702,7 @@ class DataManagerDet(DataManager):
                 if not bbox_fn.is_file():
                     skipped += 1
                     continue
-                box_t, label_t, instances = self._load_bbox_sidecar(bbox_fn)
+                box_t, label_t, instances, df = self._load_bbox_sidecar(bbox_fn)
                 row = {
                     "case_id": case_id,
                     "data_folder": str(self.data_folder),
@@ -685,6 +711,7 @@ class DataManagerDet(DataManager):
                     self.box_key: box_t,
                     self.label_key: label_t,
                     "instances": instances,
+                    "df": df,
                 }
                 data.append(row)
         return data, skipped
@@ -786,7 +813,6 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
         clip = self.dataset_params["intensity_clip_range"]
         affine3d = self.configs["affine3d"]
 
-        self.flip["prob"]= 0.8 #HACK: temporary for debugging
         flip_prob = float(self.flip["prob"])
 
         self.Ld = LoadHDF5DetShardExtendedBBoxd(
@@ -841,7 +867,7 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
             b_max=1.0,
             clip=True,
         )
-        self.BoxClip = ClipBoxToImaged(
+        self.BoxClip = ClipBoxToImagedWithDf(
             box_keys=bk,
             label_keys=[lk],
             box_ref_image_keys=ik,
@@ -980,7 +1006,7 @@ class DataManagerDetLBD(DataManagerDetSource, DataManagerLBD):
             if not bbox_fn.is_file():
                 skipped += 1
                 continue
-            box_t, label_t, instances = self._load_bbox_sidecar(bbox_fn)
+            box_t, label_t, instances, df = self._load_bbox_sidecar(bbox_fn)
             row = {
                 "case_id": case_id,
                 "data_folder": str(self.data_folder),
@@ -988,6 +1014,7 @@ class DataManagerDetLBD(DataManagerDetSource, DataManagerLBD):
                 self.box_key: box_t,
                 self.label_key: label_t,
                 "instances": instances,
+                "df": df,
             }
             if self.uses_lm_seg():
                 lm_fn = self.data_folder / "lms" / img_fn.name
@@ -1049,7 +1076,7 @@ class DataManagerDetLBD(DataManagerDetSource, DataManagerLBD):
             ),
             "DtypeVal": Compose(dtype_val),
         }
-        box_clip = ClipBoxToImaged(
+        box_clip = ClipBoxToImagedWithDf(
             box_keys=bk,
             label_keys=[lk],
             box_ref_image_keys=ik,

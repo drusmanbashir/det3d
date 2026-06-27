@@ -140,7 +140,7 @@ class DataManagerDetSourcePreTrafo(DataManagerDetPreTrafoMixin, DataManagerDetSo
                 if not bbox_fn.is_file():
                     skipped += 1
                     continue
-                _box_t, label_t, instances = self._load_bbox_sidecar(bbox_fn)
+                _box_t, label_t, instances, df = self._load_bbox_sidecar(bbox_fn)
                 row = {
                     "case_id": case_id,
                     "data_folder": str(self.data_folder),
@@ -148,6 +148,7 @@ class DataManagerDetSourcePreTrafo(DataManagerDetPreTrafoMixin, DataManagerDetSo
                     "hdf5_case_path": f"/cases/{case_id}",
                     self.label_key: label_t,
                     "instances": instances,
+                    "df": df,
                 }
                 data.append(row)
         if skipped:
@@ -290,7 +291,7 @@ class DataManagerDetLBDPreTrafo(DataManagerDetLBD, DataManagerDetSourcePreTrafo)
             if not bbox_fn.is_file():
                 skipped += 1
                 continue
-            box_t, label_t, instances = self._load_bbox_sidecar(bbox_fn)
+            box_t, label_t, instances, df = self._load_bbox_sidecar(bbox_fn)
             lm_fn = self.data_folder / "lms" / img_fn.name
             if not lm_fn.is_file():
                 skipped += 1
@@ -302,6 +303,7 @@ class DataManagerDetLBDPreTrafo(DataManagerDetLBD, DataManagerDetSourcePreTrafo)
                 self.box_key: box_t,
                 self.label_key: label_t,
                 "instances": instances,
+                "df": df,
                 self.lm_key: str(lm_fn),
             }
             data.append(row)

@@ -2,7 +2,6 @@ import torch
 from det3d.detection.nndet_train import (
     build_nndet_retinaunet_module,
     det3d_batch_to_pre_trafo_input,
-    forward_patch_size_from_configs,
     maybe_store_batch_grid_preds,
 )
 from det3d.managers.retinaunet import RetinaUNetManager
@@ -15,8 +14,8 @@ class RetinaUNetManagerV2(RetinaUNetManager):
     def _nndet_targets(self, batch):
         batch_pre = det3d_batch_to_pre_trafo_input(
             batch,
-            forward_patch_size=self.forward_patch_size,
-            fg_labels=self.plan["fg_labels"],
+            self.forward_patch_size,
+            self.plan["fg_labels"],
         )
         for key in ("data", "target"):
             batch_pre[key] = batch_pre[key].to(self.device)

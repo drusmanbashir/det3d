@@ -808,7 +808,6 @@ def run_nndet_pipeline(
         extra_callbacks=[metrics_cb],
         val_enabled=True,
         permanent_checkpoint_every_n_epochs=int(epochs) + 1,
-        patch_pl2=True,
         log_train_det_loss=True,
         limit_val_batches=int(DEFAULT_VAL_BATCHES_PER_EPOCH),
     )

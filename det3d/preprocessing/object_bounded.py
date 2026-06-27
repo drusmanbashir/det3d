@@ -97,7 +97,7 @@ class _OBJWorker(RayWorkerBase):
         image = patch[self.image_key]
         fn = Path(image[0].meta["filename_or_obj"])
         stem = strip_extension(fn.name) + "_" + suffix
-        out_fn = bbox_sidecar_path(self.output_folder / "bboxes", stem)
+        out_fn = bbox_sidecar_path(self.output_folder / "bboxes", stem, ext=".json")
         save_detection_sidecar(
             out_fn,
             patch["box"],

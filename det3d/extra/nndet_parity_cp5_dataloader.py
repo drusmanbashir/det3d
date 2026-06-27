@@ -202,7 +202,6 @@ if __name__ == '__main__':
     assert int(native_batch["data"].shape[0]) == 1
     bridged_a = det3d_batch_to_nndet(
         det_batch,
-        forward_patch_size=[int(v) for v in plan["patch_size"]],
         fg_labels=_fg_labels_for_batch(det_batch),
     )
     print("bridged keys", sorted(bridged_a.keys()))
@@ -217,7 +216,6 @@ if __name__ == '__main__':
     det_batch_b = _item_to_collated_batch(dici)
     bridged = det3d_batch_to_nndet(
         det_batch_b,
-        forward_patch_size=[int(v) for v in plan["patch_size"]],
         fg_labels=_fg_labels_for_batch(det_batch_b),
     )
     bridged_data = bridged["data"].detach().cpu().numpy()

@@ -1,7 +1,7 @@
 from det3d.managers.data.collate import attach_targets
+from det3d.transforms.detection import ClipBoxToImagedWithDf
 from monai.transforms.transform import MapTransform
 import torch
-from monai.apps.detection.transforms.dictionary import ClipBoxToImaged
 from monai.data import MetaTensor
 from monai.transforms import Compose
 from monai.transforms.croppad.array import Crop
@@ -300,6 +300,8 @@ class BatchItemCompose:
             passthrough_keys = (*passthrough_keys, self.lm_key)
         if "instances" in d:
             passthrough_keys = (*passthrough_keys, "instances")
+        if "df" in d:
+            passthrough_keys = (*passthrough_keys, "df")
         for i in range(n):
             item = {self.image_key: d[self.image_key][i]}
             for key in passthrough_keys:
@@ -337,6 +339,8 @@ class BatchItemCompose:
                 else inst_in
                 for i, it in enumerate(items)
             ]
+        if "df" in items[0]:
+            d["df"] = [it["df"] for it in items]
         if self.point_key in d:
             del d[self.point_key]
         return attach_targets(d, self.box_key, self.label_key)
@@ -480,7 +484,7 @@ def build_train_gpu_tail_compose(
                 spatial_size=tuple(int(v) for v in patch_size),
                 lazy=False,
             ),
-            ClipBoxToImaged(
+            ClipBoxToImagedWithDf(
                 box_keys=box_key,
                 label_keys=[label_key],
                 box_ref_image_keys=image_key,

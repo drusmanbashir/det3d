@@ -443,7 +443,6 @@ def dual_pipeline_oracle(
     targets_pre = pre_trafo_train_targets(batch_post)
     targets_disk = det3d_batch_to_nndet(
         batch,
-        forward_patch_size=dm.plan["patch_size"],
         fg_labels=fg_labels,
         use_disk_box_plug=True,
     )

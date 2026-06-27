@@ -8,7 +8,6 @@ from det3d.detection.nndet_train import (
 from det3d.utils.tensor import to_numpy
 from fran.managers.project import Project
 from lightning.pytorch import LightningModule
-from utilz.stringz import ast_literal_eval
 
 
 class RetinaUNetManager(LightningModule):
@@ -23,7 +22,7 @@ class RetinaUNetManager(LightningModule):
         self.plan = configs["plan_train"]
         self.lr = float(lr if lr is not None else self.configs["model_params"]["lr"])
         self.class_names = [self.plan["class_name"]]
-        self.forward_patch_size = self._forward_patch_size_from_configs(configs)
+        self.forward_patch_size = [int(v) for v in configs["plan_train"]["patch_size"]]
         self.val_patch_size = self.forward_patch_size
         self.nndet_module, self.nndet_plan = self._build_nndet_module(
             configs, num_train_batches=2500
@@ -31,20 +30,11 @@ class RetinaUNetManager(LightningModule):
         self.val_loss_sum = 0.0
         self.val_loss_count = 0
         self._val_patch_stream = False
+        self._nndet_wandb_grid_val_batches = []
 
     @property
     def net(self):
         return self.nndet_module.model
-
-    def _forward_patch_size_from_configs(self, configs):
-        fps = configs["model_params"].get("nndet_forward_patch_size")
-        if fps is None:
-            fps = configs["plan_train"]["patch_size"]
-        if fps is None:
-            return None
-        if isinstance(fps, str):
-            fps = ast_literal_eval(fps)
-        return [int(v) for v in fps]
 
     def _build_nndet_module(self, configs, num_train_batches):
         from pathlib import Path
@@ -59,13 +49,9 @@ class RetinaUNetManager(LightningModule):
         )
 
         plan_train = configs["plan_train"]
-        plan_path = configs["model_params"].get("nndet_plan_path")
-        if plan_path is None:
-            plan_path = resolve_nndet_plan_path(
-                configs["mnemonic"], Path(configs["configurations_dir"])
-            )
-        else:
-            plan_path = Path(plan_path)
+        plan_path = resolve_nndet_plan_path(
+            configs["mnemonic"], Path(configs["configurations_dir"])
+        )
         if not plan_path.is_file():
             raise FileNotFoundError(plan_path)
         model_cfg, trainer_cfg = load_nndet_train_cfgs()
@@ -83,9 +69,8 @@ class RetinaUNetManager(LightningModule):
     def _det3d_batch_to_nndet(self, batch, seg_key="lm", use_disk_box_plug=True):
         return det3d_batch_to_nndet(
             batch,
-            forward_patch_size=self.forward_patch_size,
+            self.plan["fg_labels"],
             seg_key=seg_key,
-            fg_labels=self.plan["fg_labels"],
             use_disk_box_plug=use_disk_box_plug,
         )
 

@@ -9,7 +9,7 @@ from fran.managers import Project
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Label-bounded detection preprocessing to images/masks/bboxes/*.json per case"
+        description="Label-bounded detection preprocessing to images/lms/bboxes/*.csv per case"
     )
     parser.add_argument("--project", required=True, dest="project_title")
     parser.add_argument("--plan", required=True, type=int)

@@ -76,6 +76,7 @@ def det_val_collate(batch, box_key="bbox", label_key="label", lm_key="lm"):
     boxes = []
     labels = []
     lms = []
+    dfs = []
     for item in batch:
         images.append(torch.as_tensor(item["image"]).contiguous())
         if box_key in item:
@@ -86,6 +87,8 @@ def det_val_collate(batch, box_key="bbox", label_key="label", lm_key="lm"):
         labels.append(as_label_tensor(item[label_key]))
         if lm_key in item:
             lms.append(torch.as_tensor(item[lm_key]).contiguous())
+        if "df" in item:
+            dfs.append(item["df"])
     out = {
         "image": torch.stack(images, 0),
         box_key: boxes,
@@ -93,6 +96,8 @@ def det_val_collate(batch, box_key="bbox", label_key="label", lm_key="lm"):
     }
     if lms:
         out[lm_key] = lms
+    if dfs:
+        out["df"] = dfs
     if "validation_impl" in batch[0]:
         out["validation_impl"] = batch[0]["validation_impl"]
     return attach_targets(out, box_key, label_key)
@@ -122,6 +127,7 @@ def obd_det_collate(
     points = []
     masks = []
     lms = []
+    dfs = []
     for item in batch:
         shape = spatial_shape(item["image"])
         offsets = pad_offsets(shape, target_shape)
@@ -139,6 +145,8 @@ def obd_det_collate(
             masks.append(pad_image_to_shape(item[mask_key], target_shape))
         if lm_key in item:
             lms.append(pad_image_to_shape(item[lm_key], target_shape))
+        if "df" in item:
+            dfs.append(item["df"])
     images_out = torch.stack(images, 0)
     out = {
         "image": images_out,
@@ -152,6 +160,8 @@ def obd_det_collate(
         out[mask_key] = masks
     if lms:
         out[lm_key] = lms
+    if dfs:
+        out["df"] = dfs
     if "validation_impl" in batch[0]:
         out["validation_impl"] = batch[0]["validation_impl"]
     return attach_targets(out, box_key, "label")
@@ -175,6 +185,7 @@ def lbd_det_collate_train_pre_trafo(batch):
     instances = []
     fns_imgs = []
     fns_lms = []
+    dfs = []
 
     for itemlist in batch:
         for item in itemlist:
@@ -184,6 +195,8 @@ def lbd_det_collate_train_pre_trafo(batch):
             classes.append(item["label"])
             instances.append(item["instances"])
             fns_lms.append(item["lm"].meta["filename_or_obj"])
+            if "df" in item:
+                dfs.append(item["df"])
 
     images_out = torch.stack(imgs, 0)
     lms_out = torch.stack(lms, 0)
@@ -199,6 +212,8 @@ def lbd_det_collate_train_pre_trafo(batch):
         "lm": lms_out,
         "instances": instances,
     }
+    if dfs:
+        dici["df"] = dfs
     return dici
 
 
@@ -210,6 +225,7 @@ def lbd_det_collate_val_pre_trafo(batch):
     instances = []
     fns_imgs = []
     fns_lms = []
+    dfs = []
 
     for item in batch:
         imgs.append(item["image"])
@@ -218,6 +234,8 @@ def lbd_det_collate_val_pre_trafo(batch):
         classes.append(item["label"])
         instances.append(item["instances"])
         fns_lms.append(item["lm"].meta["filename_or_obj"])
+        if "df" in item:
+            dfs.append(item["df"])
 
     images_out = torch.stack(imgs, 0)
     lms_out = torch.stack(lms, 0)
@@ -233,6 +251,8 @@ def lbd_det_collate_val_pre_trafo(batch):
         "lm": lms_out,
         "instances": instances,
     }
+    if dfs:
+        dici["df"] = dfs
     if "validation_impl" in batch[0]:
         dici["validation_impl"] = batch[0]["validation_impl"]
     return dici
@@ -252,6 +272,7 @@ def lbd_det_collate_train(batch):
     instances = []
     fns_imgs = []
     fns_lms = []
+    dfs = []
 
     for itemlist in batch:
         for item in itemlist:
@@ -264,6 +285,8 @@ def lbd_det_collate_train(batch):
             if "points" in item:
                 points.append(item["points"])
             fns_lms.append(item["lm"].meta["filename_or_obj"])
+            if "df" in item:
+                dfs.append(item["df"])
 
     images_out = torch.stack(imgs, 0)
     lms_out = torch.stack(lms, 0)
@@ -282,6 +305,8 @@ def lbd_det_collate_train(batch):
     }
     if points:
         dici["points"] = points
+    if dfs:
+        dici["df"] = dfs
     return dici
 
 def lbd_det_collate_val(batch):
@@ -296,6 +321,7 @@ def lbd_det_collate_val(batch):
 
     classes = []
     instances = []
+    dfs = []
     for item in batch:
         imgs.append(item["image"])
         fns_imgs.append(item["image"].meta["filename_or_obj"])
@@ -304,6 +330,8 @@ def lbd_det_collate_val(batch):
         classes.append(item["label"])
         instances.append(item["instances"])
         fns_lms.append(item["lm"].meta["filename_or_obj"])
+        if "df" in item:
+            dfs.append(item["df"])
 
     images_out = torch.stack(imgs, 0)
     lms_out = torch.stack(lms, 0)
@@ -320,6 +348,8 @@ def lbd_det_collate_val(batch):
         "lm": lms_out,
         "instances": instances,
     }
+    if dfs:
+        dici["df"] = dfs
     if "validation_impl" in batch[0]:
         dici["validation_impl"] = batch[0]["validation_impl"]
     return attach_targets(dici, "bbox", "label")

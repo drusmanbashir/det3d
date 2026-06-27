@@ -1,16 +1,25 @@
 import json
+from ast import literal_eval
 from pathlib import Path
 
+import pandas as pd
 import torch
 from utilz.fileio import save_json
 
+NBRHOOD_SIDECAR_EXT = ".csv"
+DETECTION_JSON_EXT = ".json"
 
-def bbox_sidecar_path(bboxes_dir, image_stem):
-    return Path(bboxes_dir) / f"{image_stem}.json"
+
+def bbox_sidecar_path(bboxes_dir, image_stem, ext=NBRHOOD_SIDECAR_EXT):
+    return Path(bboxes_dir) / f"{image_stem}{ext}"
 
 
 def _box_to_list(box):
     return [float(x) for x in torch.as_tensor(box).reshape(-1).tolist()]
+
+
+def _box_to_int_list(box):
+    return [int(x) for x in torch.as_tensor(box).reshape(-1).tolist()]
 
 
 def _label_to_int(label):
@@ -36,42 +45,53 @@ def migrate_detection_sidecar_file(bbox_fn) -> bool:
     return True
 
 
-def save_detection_sidecar(out_fn, boxes, labels, ignore_labels=None, instances:dict =None):
+def save_nbrhood_sidecar(out_fn, df):
+    df.to_csv(Path(out_fn), index=False)
+
+
+def load_nbrhood_sidecar(bbox_fn, usecols=None):
+    path = Path(bbox_fn)
+    if usecols is None:
+        return pd.read_csv(path)
+    return pd.read_csv(path, usecols=usecols)
+
+
+def extended_bbox_df_column(patch_size_key):
+    return "bbox_extended_" + patch_size_key.replace(",", "_")
+
+
+def nbrhood_df_to_detection_records(df):
+    if df.empty:
+        return [], [], {}
+    boxes = []
+    labels = []
+    for _, row in df.iterrows():
+        raw = row["bbox_xyzxyz"]
+        box = literal_eval(raw) if isinstance(raw, str) else raw
+        boxes.append(torch.tensor(box, dtype=torch.float32))
+        labels.append(torch.tensor(int(row["label_org"]), dtype=torch.long))
+    labels_int = [int(v) for v in labels]
+    instances = {str(x): x for x in set(labels_int)}
+    return boxes, labels, instances
+
+
+def save_detection_sidecar(out_fn, boxes, labels, ignore_labels=None, instances: dict = None):
     if not isinstance(boxes, list):
         boxes = [boxes]
     if not isinstance(labels, list):
         labels = [labels]
-    labels  = [_label_to_int(label) for label in labels]
+    labels = [_label_to_int(label) for label in labels]
     labels_unique = set(labels)
     boxes = [_box_to_list(box) for box in boxes]
     if not instances:
-        instances = {str(x):x for x in labels_unique}
+        instances = {str(x): x for x in labels_unique}
     payload = {
         "bbox": boxes,
         "label": labels,
-        "instances": instances
-
+        "instances": instances,
     }
     if ignore_labels is not None:
         payload["ignore_labels"] = [int(x) for x in ignore_labels]
-    save_json(payload, out_fn)
-
-
-
-
-
-    if not isinstance(boxes, list):
-        boxes = [boxes]
-    if not isinstance(labels, list):
-        labels = [labels]
-    payload = {
-        "bbox": [_box_to_list(box) for box in boxes],
-        "label": [_label_to_int(label) for label in labels],
-    }
-    if ignore_labels is not None:
-        payload["ignore_labels"] = [int(x) for x in ignore_labels]
-    if instances is not None:
-        payload["instances"] = instances
     save_json(payload, out_fn)
 
 
@@ -85,6 +105,18 @@ def valid_detection_box(box):
 
 
 def sidecar_bbox_empty(bbox_fn):
+    path = Path(bbox_fn)
+    if path.suffix == ".csv":
+        df = load_nbrhood_sidecar(path)
+        if df.empty:
+            return True
+        boxes, _labels, _instances = nbrhood_df_to_detection_records(df)
+        if len(boxes) == 0:
+            return True
+        for box in boxes:
+            if valid_detection_box(box):
+                return False
+        return True
     boxes, _labels, _instances = load_detection_sidecar(bbox_fn)
     if len(boxes) == 0:
         return True
@@ -96,6 +128,8 @@ def sidecar_bbox_empty(bbox_fn):
 
 def load_detection_sidecar(bbox_fn):
     path = Path(bbox_fn)
+    if path.suffix == ".csv":
+        return nbrhood_df_to_detection_records(load_nbrhood_sidecar(path))
     sidecar = json.loads(path.read_text())
     normalized = normalize_detection_sidecar(sidecar)
     if normalized != sidecar:

@@ -9,8 +9,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import yaml
-from det3d.utils.tensor import plain_tensor as _plain_tensor, to_numpy
-from utilz.stringz import ast_literal_eval
+from det3d.utils.tensor import plain_tensor as _plain_tensor, sanitize_for_numpy, sanitize_tensor_for_numpy, to_numpy
 
 NNDET_ROOT = Path("/home/ub/code/nnDetection")
 NNDET_TRAIN_CFG = NNDET_ROOT / "nndet/conf/train/v001.yaml"
@@ -59,17 +58,6 @@ def _crop_boxes_to_patch(boxes, starts, patch_size):
         shifted[:, i + 3] -= starts[i]
     clipped, _ = clip_boxes_to_image(shifted, patch_size, remove_empty=True)
     return clipped
-
-
-def forward_patch_size_from_configs(configs):
-    fps = configs["model_params"].get("nndet_forward_patch_size")
-    if fps is None:
-        fps = configs["plan_train"]["patch_size"]
-    if fps is None:
-        return None
-    if isinstance(fps, str):
-        fps = ast_literal_eval(fps)
-    return [int(v) for v in fps]
 
 
 def _lm_seg_volume(lm_item):
@@ -142,40 +130,6 @@ def disk_bbox_to_nndet_xyxyzz(disk_bbox: torch.Tensor) -> torch.Tensor:
     return out
 
 
-def _semantic_lm_to_nndet_target_seg(lm_vol, fg_labels):
-    # AI
-    """Semantic disk lm (class ids) -> nnDet target_seg (0=bg, 1..K fg)."""
-    lm_vol = lm_vol.long()
-    label_to_idx = {int(v): i for i, v in enumerate(fg_labels)}
-    out = torch.zeros_like(lm_vol, dtype=torch.long)
-    for sem_val, idx in label_to_idx.items():
-        out[lm_vol == sem_val] = idx + 1
-    return out
-
-
-def _target_seg_from_semantic_lm_batch(
-    lm_src,
-    fg_labels,
-    crop_starts,
-    forward_patch_size,
-    n: int,
-    device=None,
-):
-    # AI
-    """Crop aug'd semantic lm batch -> nnDet target_seg [N,D,H,W]."""
-    segs = []
-    for i in range(n):
-        lm_item = lm_src[i] if isinstance(lm_src, list) else lm_src[i]
-        vol = _lm_seg_volume(lm_item)
-        if crop_starts is not None:
-            vol, _ = _center_crop_spatial(vol, forward_patch_size, crop_starts)
-        segs.append(_semantic_lm_to_nndet_target_seg(vol, fg_labels))
-    target_seg = torch.stack(segs, 0)
-    if device is not None:
-        target_seg = target_seg.to(device)
-    return target_seg
-
-
 def det3d_semantic_target_seg_from_batch(
     batch_pre: dict,
     *,
@@ -199,35 +153,6 @@ def det3d_semantic_target_seg_from_batch(
     return semantic[:, 0]
 
 
-def _batch_pre_for_semantic(
-    lm_src,
-    labels,
-    instances_batch,
-    fg_labels,
-    crop_starts,
-    forward_patch_size,
-    n: int,
-) -> dict:
-    targets = []
-    mappings = []
-    for i in range(n):
-        lm_item = lm_src[i] if isinstance(lm_src, list) else lm_src[i]
-        vol = _lm_seg_volume(lm_item)
-        if crop_starts is not None:
-            vol, _ = _center_crop_spatial(vol, forward_patch_size, crop_starts)
-        targets.append(vol.float().unsqueeze(0).unsqueeze(0))
-        inst = instances_batch[i] if instances_batch is not None else None
-        mappings.append(
-            _instance_mapping_for_item(
-                lm_item, labels[i], instances=inst, fg_labels=fg_labels
-            )
-        )
-    return {
-        "target": torch.cat(targets, 0),
-        "instance_mapping": mappings,
-    }
-
-
 def _nndet_target_classes(target_boxes, target_classes_raw, fg_labels):
     # AI
     """Map semantic box labels to nnDetection fg indices (0..K-1)."""
@@ -237,17 +162,16 @@ def _nndet_target_classes(target_boxes, target_classes_raw, fg_labels):
         cls = torch.as_tensor(cls, dtype=torch.long).reshape(-1)
         n = int(boxes.shape[0])
         cls = cls[:n]
-        device = boxes.device if boxes.numel() else cls.device
         mapped = torch.tensor(
             [label_to_idx[int(v.item())] for v in cls],
             dtype=torch.long,
-            device=device,
+            device=boxes.device,
         )
         out.append(mapped)
     return out
 
 
-def _instance_mapping_for_item(lm_item, labels, instances=None, fg_labels=None):
+def _instance_mapping_for_item(lm_item, labels, *, fg_labels, instances=None):
     # AI
     """Map lm instance ids to nnDet fg class indices."""
     if instances is not None:
@@ -270,16 +194,15 @@ def _instance_mapping_for_item(lm_item, labels, instances=None, fg_labels=None):
     return mapping
 
 
-def det3d_batch_to_pre_trafo_input(batch, forward_patch_size=None, fg_labels=None):
+def det3d_batch_to_pre_trafo_input(batch, patch_size, fg_labels):
     # AI
     """det3d collate batch -> nnDet pre_trafo input: data, target, instance_mapping."""
     data = batch["image"].float()
+    patch_size = tuple(int(v) for v in patch_size)
+    spatial = tuple(int(v) for v in data.shape[-3:])
     crop_starts = None
-    if forward_patch_size is not None:
-        forward_patch_size = tuple(int(v) for v in forward_patch_size)
-        spatial = tuple(int(v) for v in data.shape[-3:])
-        if any(s > p for s, p in zip(spatial, forward_patch_size)):
-            data, crop_starts = _center_crop_spatial(data, forward_patch_size)
+    if any(s > p for s, p in zip(spatial, patch_size)):
+        data, crop_starts = _center_crop_spatial(data, patch_size)
 
     lm_src = batch["lm"]
     n = int(data.shape[0])
@@ -288,15 +211,13 @@ def det3d_batch_to_pre_trafo_input(batch, forward_patch_size=None, fg_labels=Non
     instances_batch = batch["instances"]
     labels = batch["label"]
     for i in range(n):
-        lm_item = lm_src[i] if isinstance(lm_src, list) else lm_src[i]
-        vol = _lm_seg_volume(lm_item)
+        vol = _lm_seg_volume(lm_src[i])
         if crop_starts is not None:
-            vol, _ = _center_crop_spatial(vol, forward_patch_size, crop_starts)
+            vol, _ = _center_crop_spatial(vol, patch_size, crop_starts)
         targets.append(vol.float().unsqueeze(0).unsqueeze(0))
-        inst = instances_batch[i]
         mappings.append(
             _instance_mapping_for_item(
-                lm_item, labels[i], instances=inst, fg_labels=fg_labels
+                lm_src[i], labels[i], instances=instances_batch[i], fg_labels=fg_labels
             )
         )
 
@@ -310,23 +231,14 @@ def det3d_batch_to_pre_trafo_input(batch, forward_patch_size=None, fg_labels=Non
 
 def det3d_batch_to_nndet(
     batch,
-    forward_patch_size=None,
-    seg_key="lm",
-    fg_labels=None,
+    fg_labels,
     *,
+    seg_key="lm",
     use_disk_box_plug=True,
 ):
     # AI
     """det3d collate → nnDetection train_step targets (disk boxes + semantic seg)."""
     data = batch["image"]
-    crop_starts = None
-    if forward_patch_size is not None:
-        forward_patch_size = tuple(int(v) for v in forward_patch_size)
-        spatial = tuple(int(v) for v in data.shape[-3:])
-        if any(s > p for s, p in zip(spatial, forward_patch_size)):
-            data, crop_starts = _center_crop_spatial(data, forward_patch_size)
-
-    lm_src = batch[seg_key]
     n = int(data.shape[0])
 
     target_boxes = []
@@ -340,24 +252,13 @@ def det3d_batch_to_nndet(
 
     for i in range(n):
         box = batch["bbox"][i]
-        if crop_starts is not None:
-            box = _crop_boxes_to_patch(box, crop_starts, forward_patch_size)
         target_boxes.append(box_to_nndet(box))
-
         label = torch.as_tensor(batch["label"][i], dtype=torch.long).reshape(-1)
         target_classes_raw.append(label)
 
     target_classes = _nndet_target_classes(target_boxes, target_classes_raw, fg_labels)
-
-    target_seg = _target_seg_from_semantic_lm_batch(
-        lm_src,
-        fg_labels,
-        crop_starts,
-        forward_patch_size,
-        n,
-        device=data.device if isinstance(data, torch.Tensor) else None,
-    )
-
+    lm = batch[seg_key]
+    target_seg = lm.squeeze(1).long()
     out = {
         "data": data,
         "target_boxes": target_boxes,
@@ -374,12 +275,8 @@ def load_nndet_train_cfgs(cfg_path=NNDET_TRAIN_CFG):
 
 
 def plan_anchors_from_det3d(plan_train):
-    shapes = plan_train.get("base_anchor_shapes")
-    if shapes is None:
-        shapes = [[6, 8, 4], [8, 6, 5], [10, 10, 6]]
-    n_levels = len(plan_train.get("decoder_levels", (1, 2, 3, 4)))
-    if isinstance(n_levels, str):
-        n_levels = ast_literal_eval(n_levels)
+    shapes = plan_train["base_anchor_shapes"]
+    n_levels = len(plan_train["decoder_levels"])
     while len(shapes) < n_levels:
         shapes = shapes + [shapes[-1]]
     zsizes = tuple(int(s[2]) for s in shapes[:n_levels])
@@ -399,20 +296,17 @@ def plan_architecture_from_det3d(plan_train):
     n_fg = len(plan_train["fg_labels"])
     arch["classifier_classes"] = n_fg
     arch["seg_classes"] = 1
-    arch["score_thresh"] = float(plan_train.get("score_thresh", 0.02))
-    arch["nms_thresh"] = float(plan_train.get("nms_thresh", 0.22))
-    arch["detections_per_img"] = int(plan_train.get("detections_per_img", 25))
-    arch["topk_candidates"] = int(plan_train.get("topk_candidates_per_level", 1000))
+    arch["score_thresh"] = float(plan_train["score_thresh"])
+    arch["nms_thresh"] = float(plan_train["nms_thresh"])
+    arch["detections_per_img"] = int(plan_train["detections_per_img"])
+    arch["topk_candidates"] = int(plan_train["topk_candidates_per_level"])
     arch["remove_small_boxes"] = float(plan_train.get("remove_small_boxes", 0.01))
     return arch
 
 
 def apply_det3d_overrides_to_nndet_plan(plan, plan_train):
     plan = deepcopy(plan)
-    fps = plan_train.get("nndet_forward_patch_size")
-    plan["patch_size"] = [
-        int(v) for v in (fps if fps is not None else plan_train["patch_size"])
-    ]
+    plan["patch_size"] = [int(v) for v in plan_train["patch_size"]]
     arch = plan["architecture"]
     arch["classifier_classes"] = len(plan_train["fg_labels"])
     arch["seg_classes"] = 1
@@ -426,14 +320,10 @@ def plan_from_det3d(plan_train, plan_path=None):
 
         plan = load_pickle(plan_path)
     else:
-        fps = plan_train.get("nndet_forward_patch_size")
-        patch_size = [
-            int(v) for v in (fps if fps is not None else plan_train["patch_size"])
-        ]
         plan = {
             "architecture": plan_architecture_from_det3d(plan_train),
             "anchors": plan_anchors_from_det3d(plan_train),
-            "patch_size": patch_size,
+            "patch_size": [int(v) for v in plan_train["patch_size"]],
         }
     return apply_det3d_overrides_to_nndet_plan(plan, plan_train)
 
@@ -441,23 +331,21 @@ def plan_from_det3d(plan_train, plan_path=None):
 def apply_det3d_plan_to_nndet_model_cfg(model_cfg, plan_train):
     model_cfg = deepcopy(model_cfg)
     model_cfg["matcher_kwargs"]["num_candidates"] = int(
-        plan_train.get("matcher_num_candidates", 4)
+        plan_train["matcher_num_candidates"]
     )
     model_cfg["matcher_kwargs"]["center_in_gt"] = bool(
-        plan_train.get("matcher_center_in_gt", False)
+        plan_train["matcher_center_in_gt"]
     )
     model_cfg["head_sampler_kwargs"]["batch_size_per_image"] = int(
-        plan_train.get("sampler_batch_size_per_image", 32)
+        plan_train["sampler_batch_size_per_image"]
     )
     model_cfg["head_sampler_kwargs"]["positive_fraction"] = float(
-        plan_train.get("balanced_sampler_pos_fraction", 0.33)
+        plan_train["balanced_sampler_pos_fraction"]
     )
     model_cfg["head_sampler_kwargs"]["pool_size"] = int(
-        plan_train.get("sampler_pool_size", 20)
+        plan_train["sampler_pool_size"]
     )
-    model_cfg["head_sampler_kwargs"]["min_neg"] = int(
-        plan_train.get("sampler_min_neg", 1)
-    )
+    model_cfg["head_sampler_kwargs"]["min_neg"] = int(plan_train["sampler_min_neg"])
     return model_cfg
 
 
@@ -468,19 +356,14 @@ def build_nndet_retinaunet_module(configs, num_train_batches):
     from det3d.configs.parser import resolve_nndet_plan_path
 
     plan_train = configs["plan_train"]
-    plan_path = configs["model_params"].get("nndet_plan_path")
-    if plan_path is None:
-        plan_path = resolve_nndet_plan_path(
-            configs["mnemonic"], Path(configs["configurations_dir"])
-        )
-    else:
-        plan_path = Path(plan_path)
+    plan_path = resolve_nndet_plan_path(
+        configs["mnemonic"], Path(configs["configurations_dir"])
+    )
     if not plan_path.is_file():
         raise FileNotFoundError(plan_path)
     model_cfg, trainer_cfg = load_nndet_train_cfgs()
     model_cfg = apply_det3d_plan_to_nndet_model_cfg(model_cfg, plan_train)
     trainer_cfg["num_train_batches_per_epoch"] = int(num_train_batches)
-    trainer_cfg["max_num_epochs"] = int(configs["model_params"].get("max_epochs", 600))
     plan = plan_from_det3d(plan_train, plan_path=str(plan_path))
     module = RetinaUNetV001(
         model_cfg=model_cfg,
@@ -621,7 +504,7 @@ def nndet_batch_pred_to_vis_list(pred):
         vis = nndet_pred_to_vis(item)
         vis_preds.append(
             {
-                k: v.detach().cpu() if isinstance(v, torch.Tensor) else v
+                k: sanitize_tensor_for_numpy(v) if isinstance(v, torch.Tensor) else v
                 for k, v in vis.items()
             }
         )
@@ -663,6 +546,8 @@ def patch_module_for_native_wandb_grid(module):
                 batch_num=batch_idx,
             )
             loss = sum(losses.values())
+        prediction = sanitize_for_numpy(prediction)
+        targets = sanitize_for_numpy(targets)
         self.evaluation_step(prediction=prediction, targets=targets)
         grid_batch = native_nndet_batch_to_wandb_grid_batch(batch_pt, keys=keys)
         maybe_store_batch_grid_preds(self, grid_batch, prediction)
@@ -672,6 +557,7 @@ def patch_module_for_native_wandb_grid(module):
         }
 
     module.validation_step = types.MethodType(validation_step, module)
+    module._nndet_wandb_grid_val_batches = []
     return module
 
 
@@ -680,33 +566,12 @@ def maybe_store_batch_grid_preds(pl_module, batch, preds):
     if isinstance(preds, list):
         batch["pred"] = [
             {
-                k: v.detach().cpu() if isinstance(v, torch.Tensor) else v
+                k: sanitize_tensor_for_numpy(v) if isinstance(v, torch.Tensor) else v
                 for k, v in p.items()
             }
             for p in preds
         ]
     else:
         batch["pred"] = nndet_batch_pred_to_vis_list(preds)
-    if not hasattr(pl_module, "_nndet_wandb_grid_val_batches"):
-        pl_module._nndet_wandb_grid_val_batches = []
     pl_module._nndet_wandb_grid_val_batches.append(batch)
-
-
-def nndet_val_targets_from_batch(batch, seg_key="lm"):
-    target_boxes = list(batch["bbox"])
-    target_classes = list(batch["label"])
-    target_seg = None
-    if seg_key in batch:
-        seg_source = batch[seg_key]
-        if isinstance(seg_source, list):
-            target_seg = torch.stack(seg_source, 0)
-        else:
-            target_seg = seg_source
-        if target_seg.dim() == 5:
-            target_seg = target_seg[:, 0]
-    return {
-        "target_boxes": target_boxes,
-        "target_classes": target_classes,
-        "target_seg": target_seg,
-    }
 

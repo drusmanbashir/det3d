@@ -129,7 +129,6 @@ class TrainerDet(Trainer):
         wandb_grid_epoch_freq: int = 5,
         permanent_checkpoint_every_n_epochs: int = 100,
         batch_tfms: bool = True,
-        nndet_forward_patch_size=None,
     ):
         self.val_every_n_epochs = int(val_every_n_epochs)
         self.max_epochs = int(epochs)
@@ -143,7 +142,7 @@ class TrainerDet(Trainer):
         self.debug_tfm_keys = debug_tfm_keys
         self.batch_tfms = bool(batch_tfms)
         self._resolve_run_ckpt(wandb=wandb)
-        self.maybe_alter_configs(batch_size, compiled, nndet_forward_patch_size)
+        self.maybe_alter_configs(batch_size, compiled)
         self.set_lr(lr)
 
         has_cuda = torch.cuda.is_available()
@@ -307,19 +306,11 @@ class TrainerDet(Trainer):
                 self.ckpt, map_location=map_location, strict=True, **kwargs
             )
 
-    def maybe_alter_configs(self, batch_size, compiled, nndet_forward_patch_size=None):
+    def maybe_alter_configs(self, batch_size, compiled):
         if batch_size is not None:
             self.configs["dataset_params"]["batch_size"] = int(batch_size)
         if compiled is not None:
             self.configs["model_params"]["compiled"] = bool(compiled)
-        if nndet_forward_patch_size is not None:
-            fps = [int(v) for v in nndet_forward_patch_size]
-            plan = self.configs["plan_train"]
-            plan["patch_size"] = fps
-            plan["patch_dim0"] = fps[0]
-            plan["patch_dim1"] = fps[1]
-            self.configs["model_params"]["nndet_forward_patch_size"] = fps
-            ConfigMakerDet(self.project)._assert_patch_fits_src_dims(plan)
 
     def init_cbs(
         self,

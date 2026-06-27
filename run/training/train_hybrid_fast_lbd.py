@@ -118,6 +118,7 @@ def main(args) -> None:
         val_enabled=val_enabled,
         debug=args.debug,
         use_gpu_tail=args.gpu_tail,
+        precision=args.precision,
     )
     print("done", fit_out["train_dir"], flush=True)
 
@@ -146,6 +147,11 @@ if __name__ == "__main__":
     )
     parser.add_argument("--epochs", type=int, default=500)
     parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument(
+        "--precision",
+        default="bf16-mixed",
+        help="Lightning precision (bf16-mixed, 16-mixed, 32, ...)",
+    )
     parser.add_argument(
         "--n-train",
         type=int,

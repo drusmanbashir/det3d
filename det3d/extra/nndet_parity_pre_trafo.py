@@ -407,7 +407,6 @@ if __name__ == '__main__':
 #SECTION:--- branch B — det3d adapter (skip pre_trafo) ---
     targets_det = det3d_batch_to_nndet(
         det3d_batch,
-        forward_patch_size=FORWARD_PATCH_SIZE,
         fg_labels=FG_LABELS,
     )
     print_train_targets("train_step targets from det3d_batch_to_nndet", targets_det)
@@ -423,7 +422,6 @@ if __name__ == '__main__':
     batch_lm_boxes = batch_with_adapter_boxes_from_pre_trafo(det3d_batch, batch_post, FG_LABELS)
     targets_det_lm = det3d_batch_to_nndet(
         batch_lm_boxes,
-        forward_patch_size=FORWARD_PATCH_SIZE,
         fg_labels=FG_LABELS,
     )
     assert_post_parity(

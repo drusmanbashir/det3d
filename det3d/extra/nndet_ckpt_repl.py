@@ -382,7 +382,8 @@ if __name__ == "__main__":
         dm.setup()
         det3d_batch = dm.transforms_batch(next(iter(dm.train_dataloader())))
         det3d_nb = det3d_batch_to_nndet(
-            det3d_batch, forward_patch_size=list(plan["patch_size"])
+            det3d_batch,
+            plan["fg_labels"],
         )
         with torch.no_grad():
             det3d_losses, det3d_pred = net.train_step(

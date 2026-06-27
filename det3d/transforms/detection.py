@@ -12,6 +12,7 @@ from monai.apps.detection.transforms.dictionary import (
     StandardizeEmptyBoxd,
 )
 from monai.config import KeysCollection
+from monai.apps.detection.transforms.array import select_labels
 from monai.data.box_utils import clip_boxes_to_image
 from monai.transforms import (
     Compose,
@@ -37,6 +38,7 @@ from monai.transforms.spatial.dictionary import (
     ConvertPointsToBoxesd,
 )
 from monai.transforms.utility.dictionary import ApplyTransformToPointsd
+from monai.utils import ensure_tuple
 from monai.utils.type_conversion import convert_data_type
 
 
@@ -220,6 +222,53 @@ def patch_size_manifest_key(patch_size):
     # AI
     result = ",".join(str(int(v)) for v in patch_size)
     return result
+
+
+class ClipBoxToImagedWithDf(MapTransform):
+    """ClipBoxToImaged plus filter df rows with the same keep mask."""
+
+    def __init__(
+        self,
+        box_keys,
+        label_keys,
+        box_ref_image_keys,
+        remove_empty=True,
+        allow_missing_keys=False,
+        df_key="df",
+    ):
+        box_keys_tuple = ensure_tuple(box_keys)
+        if len(box_keys_tuple) != 1:
+            raise ValueError("ClipBoxToImagedWithDf expects a single box_keys entry")
+        box_ref_image_keys_tuple = ensure_tuple(box_ref_image_keys)
+        if len(box_ref_image_keys_tuple) != 1:
+            raise ValueError(
+                "ClipBoxToImagedWithDf expects a single box_ref_image_keys entry"
+            )
+        self.label_keys = ensure_tuple(label_keys)
+        super().__init__(box_keys_tuple, allow_missing_keys)
+        self.box_keys = box_keys_tuple[0]
+        self.box_ref_image_keys = box_ref_image_keys_tuple[0]
+        self.remove_empty = remove_empty
+        self.df_key = df_key
+
+    def __call__(self, data):
+        d = dict(data)
+        spatial_size = d[self.box_ref_image_keys].shape[1:]
+        labels = [d[label_key] for label_key in self.label_keys]
+        boxes_clip, keep = clip_boxes_to_image(
+            d[self.box_keys], spatial_size, self.remove_empty
+        )
+        d[self.box_keys] = boxes_clip
+        clipped_labels = select_labels(labels, keep)
+        if isinstance(clipped_labels, tuple):
+            for label_key, clipped_labels_i in zip(self.label_keys, clipped_labels):
+                d[label_key] = clipped_labels_i
+        else:
+            d[self.label_keys[0]] = clipped_labels
+        if self.df_key in d:
+            df = d[self.df_key]
+            d[self.df_key] = df.iloc[keep.cpu().numpy()].reset_index(drop=True)
+        return d
 
 
 def ExtendedBBoxesByPatchSizes(

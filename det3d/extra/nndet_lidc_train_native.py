@@ -7,11 +7,13 @@ Run blocks in IPython / VS Code interactive — do not run the full file at once
 """
 from __future__ import annotations
 
+import csv
 import os
 import sys
+from collections import defaultdict
 from copy import deepcopy
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 from nndet.core.retina import BaseRetinaNet
 import torch
@@ -23,6 +25,9 @@ from utilz.imageviewers import ImageBBoxViewer, ImageMaskViewer
 NNDET_ROOT = Path("/home/ub/code/nnDetection")
 DEFAULT_DET_DATA = Path("/r/datasets/nndet_data")
 DEFAULT_DET_MODELS = Path("/s/agent_rw/nndet_models")
+DEFAULT_LIDC_SOURCE = Path("/media/UB/datasets/lidc_all")
+LIDC_LESION_STATS = DEFAULT_LIDC_SOURCE / "label_analysis" / "lesion_stats.csv"
+LIDC_LMS_DIR = DEFAULT_LIDC_SOURCE / "lms"
 TASK = "Task012_LIDC"
 FOLD = 0
 SCRATCH_BATCH_SIZE = 1
@@ -75,6 +80,86 @@ def nndet_batch_to_device(batch, device):
     out["data"] = out["data"].float().to(device)
     out["target"] = out["target"].float().to(device)
     return out
+
+
+def group_lidc_lesion_rows(lesion_stats_csv: Path) -> dict[str, list[dict]]:
+    """#AI Group lesion_stats.csv rows by case_id (same filter as nndet_lidc_prep)."""
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    with lesion_stats_csv.open(newline="") as handle:
+        for row in csv.DictReader(handle):
+            if row["processing_error"] in {"True", "true", "1"}:
+                continue
+            grouped[row["case_id"]].append(row)
+    return grouped
+
+
+def lidc_multiclass_mapping_from_lm(lm_arr, lesion_rows: list[dict]) -> dict[str, int]:
+    """#AI Instance order matches nndet_lidc_prep; class index = label_org - 1."""
+    from scipy import ndimage
+
+    mapping: dict[str, int] = {}
+    rix = 1
+    for row in lesion_rows:
+        org = int(row["label_org"])
+        cc_id = int(row["label_cc"])
+        mask = lm_arr == org
+        cc, n = ndimage.label(mask)
+        if cc_id < 1 or cc_id > n:
+            continue
+        inst = cc == cc_id
+        if inst.sum() == 0:
+            continue
+        mapping[str(rix)] = org - 1
+        rix += 1
+    return mapping
+
+
+def lidc_multiclass_mapping_for_case(
+    case_id: str,
+    grouped_rows: dict[str, list[dict]],
+    lms_dir: Path,
+    cache: dict[str, dict[str, int]],
+) -> dict[str, int]:
+    """#AI Per-case instance_id -> 0-indexed lm label class."""
+    if case_id not in cache:
+        import SimpleITK as sitk
+
+        lm_arr = sitk.GetArrayFromImage(sitk.ReadImage(str(lms_dir / f"{case_id}.nii.gz")))
+        cache[case_id] = lidc_multiclass_mapping_from_lm(lm_arr, grouped_rows[case_id])
+    return cache[case_id]
+
+
+def apply_lidc_multiclass_mapping(
+    batch,
+    grouped_rows: dict[str, list[dict]],
+    lms_dir: Path,
+    cache: dict[str, dict[str, int]],
+):
+    """#AI Replace native single-class instance_mapping with label_org classes."""
+    case_ids = batch["keys"]
+    mappings = []
+    for case_id in case_ids:
+        full_map = lidc_multiclass_mapping_for_case(case_id, grouped_rows, lms_dir, cache)
+        patch_map = batch["instance_mapping"][len(mappings)]
+        mappings.append({str(iid): full_map[str(iid)] for iid in patch_map})
+    batch["instance_mapping"] = mappings
+    return batch
+
+
+def lidc_semantic_from_instance_target(target, mapping: dict[str, int], add_background: bool = False):
+    """#AI Instance-id target -> semantic labels (for inspection; pre_trafo does this internally)."""
+    from nndet.io.transforms.instances import instances_to_segmentation
+
+    inst = target.reshape(-1, *target.shape[-3:])
+    semantic = torch.zeros_like(inst)
+    for batch_idx in range(inst.shape[0]):
+        instances_to_segmentation(
+            inst[batch_idx],
+            mapping,
+            add_background=add_background,
+            out=semantic[batch_idx],
+        )
+    return semantic
 
 
 # %%
@@ -131,16 +216,70 @@ if __name__ == "__main__":
     print("val cases", len(datamodule.dataset_val))
 
     iteri = iter(train_gen)
+    lidc_grouped_rows = group_lidc_lesion_rows(LIDC_LESION_STATS)
+    lidc_mapping_cache: Dict[str, dict[str, int]] = {}
 # %%
 #SECTION:--- stage 2 — inspect one native batch (pre pre_trafo) ---
-    train_batch = next(iteri)
-    pp(inspect_nndet_batch(train_batch))
-    lm= train_batch["target"]
-    train_batch.keys()
-    pp(train_batch["instance_mapping"])
-    print(lm.unique())
-    img = train_batch["data"]
+    tb = next(iteri)
+    print(tb.keys())
+    print(tb['instance_mapping'])
+    print(tb['target'].unique())
+    img = tb['data']
+    print(tb["properties"])
+    lm = tb['target']
     ImageMaskViewer([img, lm],'im')
+# %%
+    pp(inspect_nndet_batch(tb))
+    print("case", tb["keys"])
+    print("native instance_mapping (0 = nnDet class index, not bg):", tb["instance_mapping"])
+    print("target unique = instance ids in patch (0=bg, 1..N=instances):", tb["target"].unique())
+    apply_lidc_multiclass_mapping(tb, lidc_grouped_rows, LIDC_LMS_DIR, lidc_mapping_cache)
+    print("multiclass instance_mapping (label_org-1):", tb["instance_mapping"])
+    lm = tb["target"]
+    lm_sem = lidc_semantic_from_instance_target(lm, tb["instance_mapping"][0])
+    print("semantic unique after mapping (0=bg, 1..5=lm labels):", lm_sem.unique())
+    img = tb["data"]
+
+# %%
+    """#AI Instance-id target -> semantic labels (for inspection; pre_trafo does this internally)."""
+    from nndet.io.transforms.instances import instances_to_segmentation
+    target = lm
+    mapping = tb["instance_mapping"][0]
+
+    inst = target.reshape(-1, *target.shape[-3:])
+    semantic = torch.zeros_like(inst)
+    for batch_idx in range(inst.shape[0]):
+        instances_to_segmentation(
+            inst[batch_idx],
+            mapping,
+            add_background=False,
+            out=semantic[batch_idx],
+
+        )
+# %%
+    add_background: bool = True
+    instance_idx =None
+    instances = inst[batch_idx]
+    out  = semantic[0]
+
+
+#SECTION:-------------------- instance to seg--------------------------------------------------------------------------------------
+    mapping = {int(key): int(item) for key, item in mapping.items()}
+
+    if instance_idx is None:
+        instance_idx = instances.unique(sorted=True)
+        instance_idx = instance_idx[instance_idx > 0]
+    print(instance_idx)
+
+    for instance_id in instance_idx:
+        _cls = mapping[instance_id.item()]
+        if add_background:
+            _cls += 1
+        out[instances == instance_id] = _cls
+
+# %%
+    ImageMaskViewer([img, out],'im')
+    ImageMaskViewer([img, lm_se],'im')
 
 # %%
 
@@ -164,7 +303,7 @@ if __name__ == "__main__":
 #SECTION:--- stage 4 — training_step on one batch (includes pre_trafo) ---
     clear_cuda_scratch()
     module.train()
-    train_batch_gpu = nndet_batch_to_device(train_batch, device)
+    train_batch_gpu = nndet_batch_to_device(tb, device)
     
     pp(train_batch_gpu.keys())
     ba = train_batch_gpu

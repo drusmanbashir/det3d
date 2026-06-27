@@ -1,7 +1,6 @@
 """Backfill ``instances`` on detection sidecar JSON.
 
 Uses identity mapping ``{str(x): x for x in labels}`` (same as
-``save_detection_sidecar`` when ``instances`` is omitted).
 """
 from __future__ import annotations
 

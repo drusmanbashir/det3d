@@ -598,6 +598,8 @@ def attach_det3d_dataloaders_to_module(module, train_manager, val_manager, forwa
     """Patch RetinaUNetV001 training_step/validation_step for det3d DM batches."""
     import types
 
+    from det3d.utils.tensor import sanitize_for_numpy
+
     def training_step(self, batch, batch_idx):
         batch = apply_batch_transforms(train_manager, batch)
         nb = det3d_batch_to_nndet(batch, forward_patch_size=forward_patch_size)
@@ -635,6 +637,8 @@ def attach_det3d_dataloaders_to_module(module, train_manager, val_manager, forwa
                 "target_classes": nb["target_classes"],
                 "target_seg": nb["target_seg"],
             }
+        prediction = sanitize_for_numpy(prediction)
+        targets = sanitize_for_numpy(targets)
         self.evaluation_step(prediction=prediction, targets=targets)
         out = {"loss": loss.detach().item(), **{key: l.detach().item() for key, l in losses.items()}}
         return out

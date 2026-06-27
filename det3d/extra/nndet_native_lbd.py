@@ -1,6 +1,6 @@
 """Native nnDetection on det3d LBD — shared helpers and APIs.
 
-Interactive run-through: ``nndet_native_lbd_runthrough.py``
+Step through ``# %%`` blocks below (same pattern as ``nndet_lidc_train_native.py``).
 Parity CP-0..4: ``nndet_parity_cp0_4.py``
 W&B + checkpoints: ``det3d/detection/nndet_wandb.py`` (``run_native_training_loop(..., wandb=True)``).
 """
@@ -50,9 +50,6 @@ SCRATCH_WANDB = True
 SCRATCH_RUN_NAME: Optional[str] = None  # default EXP_ID
 SCRATCH_WANDB_PROJECT = "lidca"
 PARITY_CASE_ID = "lidc_0067"
-
-
-# Legacy inline stages: nndet_native_lbd_runthrough.py
 
 
 def _nndet_import_shim():
@@ -302,7 +299,7 @@ def run_native_training_loop(
     )
     train_dir = init_train_dir(cfg)
 
-    callbacks = list(extra_callbacks) if extra_callbacks else []
+    callbacks = list(extra_callbacks or [])
     log_folder = Project(project_title).log_folder
     grid_patch = None
     if wandb and val_enabled and det3d_configs is not None:
@@ -337,7 +334,6 @@ def run_native_training_loop(
         extra_callbacks=callbacks,
         val_enabled=val_enabled,
         permanent_checkpoint_every_n_epochs=permanent_checkpoint_every_n_epochs,
-        patch_pl2=True,
         log_train_det_loss=False,
         check_val_every_n_epoch=int(check_val_every_n_epoch),
         after_pl2_patch=grid_patch,
@@ -358,3 +354,144 @@ def append_metrics_log(train_dir: Path, tag: str, trainer) -> None:
                 row[str(key)] = float(val.item())
     with log_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row) + "\n")
+
+
+# %%
+if __name__ == "__main__":
+    setup_nndet_env()
+
+# %%
+#SECTION:--- stage 0 — materialize LBD -> nnDet imagesTr ---
+    scratch_case_ids = select_scratch_case_ids(DEFAULT_LBD_FOLDER)
+    mat = materialize_lbd_nndet_task(case_ids=scratch_case_ids)
+    print("materialized", len(mat["case_ids"]), "->", mat["images_tr"])
+    if mat["sidecar_drift"]:
+        print("sidecar drift (lm truth used):", mat["sidecar_drift"])
+
+# %%
+#SECTION:--- stage 1 — compose cfg + load plan ---
+    from nndet.io.load import load_pickle
+
+    cfg = scratch_compose_cfg()
+    plan_path = Path(str(cfg.host.plan_path))
+    plan = load_pickle(plan_path)
+    data_dir = Path(cfg.host.preprocessed_output_dir) / plan["data_identifier"] / "imagesTr"
+    print("plan_path", plan_path)
+    print("data_dir", data_dir)
+    print("patch_size", plan["patch_size"], "batch_size", plan["batch_size"])
+
+# %%
+#SECTION:--- stage 2 — native Datamodule + train loader ---
+    from omegaconf import OmegaConf
+
+    from nndet.io.datamodule.bg_module import Datamodule
+    from utilz.helpers import pp
+    from utilz.imageviewers import ImageBBoxViewer, ImageMaskViewer
+
+    augment_cfg = OmegaConf.to_container(cfg.augment_cfg, resolve=True)
+    datamodule = Datamodule(
+        augment_cfg=augment_cfg,
+        plan=plan,
+        data_dir=data_dir,
+        fold=FOLD,
+    )
+    datamodule.setup()
+    train_gen = datamodule.train_dataloader()
+    val_gen = datamodule.val_dataloader()
+    print("train cases", len(datamodule.dataset_tr))
+    print("val cases", len(datamodule.dataset_val))
+
+    iteri = iter(train_gen)
+
+# %%
+#SECTION:--- stage 3 — inspect one native batch (pre pre_trafo) ---
+    tb = next(iteri)
+    print(tb.keys())
+    print(tb["instance_mapping"])
+    print(tb["target"].unique())
+    img = tb["data"]
+    print(tb["properties"])
+    lm = tb["target"]
+    pp(inspect_nndet_batch(tb))
+    print("case", tb["keys"])
+    print("native instance_mapping (0 = nnDet class index):", tb["instance_mapping"])
+    print("target unique = instance ids in patch (0=bg, 1..N=instances):", tb["target"].unique())
+    ImageMaskViewer([img, lm], "im")
+
+# %%
+#SECTION:--- stage 4 — build RetinaUNetV001 ---
+    from nndet.ptmodule.retinaunet.v001 import RetinaUNetV001
+
+    model_cfg, trainer_cfg = load_nndet_train_cfgs()
+    trainer_cfg["num_train_batches_per_epoch"] = int(cfg.trainer_cfg.num_train_batches_per_epoch)
+    clear_cuda_scratch()
+    module = RetinaUNetV001(
+        model_cfg=model_cfg,
+        trainer_cfg=trainer_cfg,
+        plan=plan,
+    )
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    module = module.to(device)
+    n_params = sum(p.numel() for p in module.parameters())
+    print(type(module.model).__name__, "params", n_params)
+
+# %%
+#SECTION:--- stage 5 — training_step on one batch (includes pre_trafo) ---
+    clear_cuda_scratch()
+    module.train()
+    train_batch_gpu = nndet_batch_to_device(tb, device)
+
+    pp(train_batch_gpu.keys())
+    img = train_batch_gpu["data"]
+    lm = train_batch_gpu["target"]
+    print(img.shape)
+    print(lm.shape)
+    print(lm.unique())
+    ImageMaskViewer([img, lm])
+
+# %%
+    bb2 = module.pre_trafo(**train_batch_gpu)
+    print(bb2.keys())
+    print(bb2["classes"])
+    bbox = bb2["boxes"][0]
+    lms = bb2["target"]
+    print(lms.unique())
+    img2 = bb2["data"].to("cpu")
+    bbox_viz = torch.stack(
+        [bbox[:, 0], bbox[:, 1], bbox[:, 4], bbox[:, 2], bbox[:, 3], bbox[:, 5]], dim=1
+    ).cpu()
+    bbox_list = [int(a) for a in bbox_viz[0].tolist()]
+    slcs = (
+        slice(bbox_list[0], bbox_list[3]),
+        slice(bbox_list[1], bbox_list[4]),
+        slice(bbox_list[2], bbox_list[5]),
+    )
+    im2 = img2[slcs]
+    ImageMaskViewer([im2, im2], "im")
+    ImageBBoxViewer(img2, bbox_viz)
+
+# %%
+#SECTION:--- stage 6 — manual backward + optimizer step ---
+    step_out = module.training_step(train_batch_gpu, batch_idx=0)
+    print("loss", float(step_out["loss"]))
+    opt_cfgs = module.configure_optimizers()
+    optimizer = opt_cfgs[0][0]
+    scheduler = opt_cfgs[1]["scheduler"]
+    optimizer.zero_grad(set_to_none=True)
+    step_out["loss"].backward()
+    optimizer.step()
+    scheduler.step()
+    print("lr", optimizer.param_groups[0]["lr"])
+    clear_cuda_scratch()
+
+# %%
+#SECTION:--- stage 7 — validation_step on one val batch ---
+    val_batch = next(iter(val_gen))
+    clear_cuda_scratch()
+    module.eval()
+    with torch.no_grad():
+        val_out = module.validation_step(nndet_batch_to_device(val_batch, device), batch_idx=0)
+    print("val", {k: val_out[k] for k in val_out if k != "loss"})
+    print("val total", float(val_out["loss"]))
+    clear_cuda_scratch()
+# end PythonMethodScratch

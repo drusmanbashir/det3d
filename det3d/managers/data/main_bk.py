@@ -464,11 +464,8 @@ class DataManagerDet(DataManager):
 
     def _rand_crop_patch_size(self):
         if self.uses_lm_seg():
-            from det3d.detection.nndet_train import forward_patch_size_from_configs
-
-            ps = forward_patch_size_from_configs(self.configs)
-            if ps is not None:
-                return tuple(int(v) for v in ps)
+            ps = self.configs["plan_train"]["patch_size"]
+            return tuple(int(v) for v in ps)
         return self._patch_size()
 
     def _set_collate_fn(self):

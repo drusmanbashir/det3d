@@ -22,7 +22,7 @@ from det3d.detection.visualize_image import (
     pick_slice_index,
     count_boxes_on_slice,
 )
-from det3d.utils.tensor import to_numpy
+from det3d.utils.tensor import sanitize_tensor_for_numpy, to_numpy
 
 _PRED_BOX_KEY = "bbox"
 _PRED_LABEL_KEY = "label"
@@ -60,7 +60,7 @@ def _panel_rgb(panel_bgr):
 def _resize_panel_tensor(panel, height, width):
     if panel.shape[1] == height and panel.shape[2] == width:
         return panel
-    arr = panel.permute(1, 2, 0).numpy()
+    arr = to_numpy(panel.permute(1, 2, 0))
     arr = cv2.resize(arr, (width, height))
     return torch.from_numpy(arr).permute(2, 0, 1)
 
@@ -78,7 +78,10 @@ def _items_from_batch(batch, preds, score_min, top_k, retinaunet=False, adapt_nn
         case_ids.append(str(len(case_ids)))
     items = []
     for b in range(batch_size):
-        pred_cpu = {k: v.detach().cpu() for k, v in preds[b].items()}
+        pred_cpu = {
+            k: sanitize_tensor_for_numpy(v) if isinstance(v, torch.Tensor) else v
+            for k, v in preds[b].items()
+        }
         pred = filter_detection_pred(pred_cpu, score_min=score_min, top_k=top_k)
         if retinaunet and adapt_nndet_boxes:
             pred = adapt_retinaunet_pred_boxes(pred)
@@ -372,7 +375,7 @@ class WandbDetImageGridCallback(WandbImageGridCallback):
             nrow=n_tiles * 3,
             padding=padding,
         )
-        grid = grid.permute(1, 2, 0).cpu().numpy()
+        grid = to_numpy(grid.permute(1, 2, 0))
         grid = np.clip(grid, 0, 255).astype(np.uint8)
         grid = annotate_snippet_grid(
             grid, triplet_case_ids, tile_w, tile_h, n_tiles, padding=padding

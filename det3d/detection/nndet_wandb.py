@@ -7,7 +7,7 @@ import types
 from collections import defaultdict
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Sequence
 
 import numpy as np
 import torch
@@ -124,8 +124,6 @@ def install_nndet_pl2_val_hooks(module) -> None:
 
 def patch_nndet_module_pl2(module, *, log_train_det_loss: bool = False) -> None:
     """nnDetection targets PL 1.x; dl env uses Lightning 2.x epoch-end hooks."""
-    from nndet.ptmodule.retinaunet.v001 import RetinaUNetV001
-
     pl_major = int(pl.__version__.split(".")[0])
     if pl_major < 2:
         return
@@ -134,8 +132,11 @@ def patch_nndet_module_pl2(module, *, log_train_det_loss: bool = False) -> None:
     module.validation_epoch_end = None
     module.configure_callbacks = lambda: []
 
+    _cls_step = module.__class__.training_step
+    _user_training_step = getattr(_cls_step, "__func__", _cls_step)
+
     def training_step(self, batch, batch_idx):
-        out = RetinaUNetV001.training_step(self, batch, batch_idx)
+        out = _user_training_step(self, batch, batch_idx)
         self._nndet_epoch_outputs.append(out)
         return out
 
@@ -376,7 +377,7 @@ def build_nndet_pl_trainer_kwargs(
         trainer_kwargs["check_val_every_n_epoch"] = 0
     else:
         trainer_kwargs["check_val_every_n_epoch"] = int(check_val_every_n_epoch)
-        n_val = int(trainer_cfg.get("num_val_batches_per_epoch", 0))
+        n_val = int(trainer_cfg["num_val_batches_per_epoch"])
         if n_val > 0:
             trainer_kwargs["limit_val_batches"] = n_val
     if ckpt_path is not None and pl_major < 2:
@@ -401,9 +402,8 @@ def build_nndet_pl_trainer_kwargs(
 
 def fit_nndet_module(
     module,
-    datamodule=None,
     *,
-    train_dataloaders=None,
+    train_dataloaders,
     val_dataloaders=None,
     train_dir: Path,
     trainer_cfg: dict,
@@ -419,7 +419,6 @@ def fit_nndet_module(
     extra_callbacks: Sequence | None = None,
     val_enabled: bool | None = None,
     permanent_checkpoint_every_n_epochs: int | None = 100,
-    patch_pl2: bool = True,
     log_train_det_loss: bool = False,
     limit_train_batches: int | None = None,
     limit_val_batches: int | None = None,
@@ -428,9 +427,6 @@ def fit_nndet_module(
 ):
     """Lightning fit with local + W&B checkpoint parity (TrainerDet-style)."""
     from nndet.io.load import save_pickle
-
-    if datamodule is None and train_dataloaders is None:
-        raise ValueError("fit_nndet_module needs datamodule or train_dataloaders")
 
     trainer_cfg = deepcopy(trainer_cfg)
     if max_epochs is not None:
@@ -441,16 +437,14 @@ def fit_nndet_module(
     train_dir.mkdir(parents=True, exist_ok=True)
     save_pickle(module.plan, train_dir / "plan.pkl")
 
-    if patch_pl2:
-        patch_nndet_module_pl2(module, log_train_det_loss=log_train_det_loss)
-
+    patch_nndet_module_pl2(module, log_train_det_loss=log_train_det_loss)
     if after_pl2_patch is not None:
         after_pl2_patch(module)
 
     if val_enabled is None:
-        val_enabled = int(trainer_cfg.get("num_val_batches_per_epoch", 0)) > 0
+        val_enabled = int(trainer_cfg["num_val_batches_per_epoch"]) > 0
 
-    if val_enabled and patch_pl2:
+    if val_enabled:
         install_nndet_pl2_val_hooks(module)
 
     run_name = run_name or exp_id
@@ -474,8 +468,6 @@ def fit_nndet_module(
             logger,
             wandb_run_is_new=wandb_run_is_new,
         )
-        if ckpt_path is None and (train_dir / "model_last.ckpt").is_file():
-            ckpt_path = train_dir / "model_last.ckpt"
 
     callbacks = build_nndet_trainer_callbacks(
         train_dir,
@@ -503,15 +495,12 @@ def fit_nndet_module(
     fit_kwargs = {}
     if ckpt_path is not None and int(pl.__version__.split(".")[0]) >= 2:
         fit_kwargs["ckpt_path"] = str(ckpt_path)
-    if datamodule is not None:
-        trainer.fit(module, datamodule=datamodule, **fit_kwargs)
-    else:
-        trainer.fit(
-            module,
-            train_dataloaders=train_dataloaders,
-            val_dataloaders=val_dataloaders,
-            **fit_kwargs,
-        )
+    trainer.fit(
+        module,
+        train_dataloaders=train_dataloaders,
+        val_dataloaders=val_dataloaders,
+        **fit_kwargs,
+    )
     return {
         "trainer": trainer,
         "train_dir": train_dir,

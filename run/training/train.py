@@ -23,11 +23,6 @@ def main():
     parser.add_argument("--batch-size", dest="batch_size", type=int, default=4)
     parser.add_argument("--fold", type=int, default=None)
     parser.add_argument("--arch", default=None, help="Override configs['model_params']['arch']")
-    parser.add_argument(
-        "--nndet-forward-patch-size",
-        default=None,
-        help="Train RandCrop patch_size (mask-guided); keeps src_dims/shards, e.g. 128,128,64",
-    )
     parser.add_argument("--devices", default="0")
     parser.add_argument("--wandb", type=str2bool, default=True)
     parser.add_argument("--debug", type=str2bool, default=False)
@@ -58,11 +53,6 @@ def main():
         configs["dataset_params"]["fold"] = args.fold
     if args.arch is not None:
         configs["model_params"]["arch"] = args.arch
-    nndet_forward_patch_size = None
-    if args.nndet_forward_patch_size is not None:
-        nndet_forward_patch_size = [
-            int(v) for v in args.nndet_forward_patch_size.split(",")
-        ]
 
     if not args.skip_json_build:
         _, configs = build_from_plan(args.project_title, args.plan, configs=configs)
@@ -85,7 +75,6 @@ def main():
         val_every_n_epochs=args.val_every_n_epochs,
         wandb_grid_epoch_freq=args.wandb_grid_epoch_freq,
         batch_tfms=args.batch_tfms,
-        nndet_forward_patch_size=nndet_forward_patch_size,
     )
     trainer.fit()
 
