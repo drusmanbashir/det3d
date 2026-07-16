@@ -8,7 +8,7 @@ import wandb
 from fran.callback.wandb.wandb import WandbImageGridCallback, _annotate_wandb_grid_image
 from utilz.stringz import info_from_filename
 
-from det3d.detection.nndet_train import nndet_batch_to_xyzxyz
+from det3d.managers.helpers.nndet_retinaunet import nndet_batch_to_xyzxyz
 from det3d.detection.visualize_image import (
     annotate_snippet_grid,
     draw_slice_boxes,
@@ -220,11 +220,11 @@ class WandbDetImageGridCallback(WandbImageGridCallback):
             fig_fname = self.local_folder / f"grid_epoch{epoch - 1}.png"
             cv2.imwrite(str(fig_fname), cv2.cvtColor(rendered_image, cv2.COLOR_RGB2BGR))
 
-        if trainer.logger is not None:
+        if trainer.logger is not None and hasattr(trainer.logger, "log_image"):
             caption = f"epoch {epoch} cases={len(triplet_case_ids)}"
-            img = wandb.Image(rendered_image, caption=caption)
-            trainer.logger.experiment.log(
-                {"images/grid": img},
+            trainer.logger.log_image(
+                key="images/grid",
+                images=[wandb.Image(rendered_image, caption=caption)],
                 step=trainer.global_step,
             )
 
@@ -383,8 +383,113 @@ class WandbDetImageGridCallback(WandbImageGridCallback):
         return grid, triplet_case_ids, tile_w, tile_h, n_tiles
 
 
+class WandbDetImageGridTrainCallback(WandbDetImageGridCallback):
+    """Run-through train-batch wandb grid (fran TrainerRT parity; no val dataloader)."""
+
+    def on_train_start(self, trainer, pl_module):
+        trainer.store_preds = False
+        len_dl = int(len(trainer.train_dataloader) / trainer.accumulate_grad_batches)
+        self.freq = max(2, int(len_dl / self.grid_rows))
+
+    def on_train_epoch_start(self, trainer, pl_module):
+        epoch = trainer.current_epoch + 1
+        if epoch % self.epoch_freq == 0:
+            self._cached_items = []
+            self._grid_collect_target = self.imgs_per_batch * self.grid_rows
+            self.validation_grid_created = True
+            self.val_start_idx = None
+        else:
+            self._grid_collect_target = 0
+
+    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
+        epoch = trainer.current_epoch + 1
+        if epoch % self.epoch_freq == 0:
+            trainer.store_preds = trainer.global_step % self.freq == 0
+        else:
+            trainer.store_preds = False
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        if trainer.store_preds:
+            self.populate_grid(pl_module, batch)
+
+    def populate_grid(self, pl_module, batch):
+        if "pred" not in batch:
+            return
+        if len(self._cached_items) >= self._grid_collect_target:
+            return
+        self._append_det_batch(batch)
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        epoch = trainer.current_epoch + 1
+        if epoch % self.epoch_freq != 0:
+            return
+        self._log_grid(trainer, epoch)
+
+
 class WandbRetinaUNetImageGridCallback(WandbDetImageGridCallback):
     """RetinaUNet wandb grid: gt lm+box | overlap heatmap | pred_seg+top-k boxes."""
+
+    def __init__(
+        self,
+        patch_size,
+        grid_rows=6,
+        imgs_per_batch=4,
+        epoch_freq=5,
+        slice_axis=2,
+        auto_grid=True,
+        n_tiles=None,
+        local_folder=None,
+        score_min=0.3,
+        score_low_min=None,
+        score_mid_min=0.5,
+        score_high_min=0.8,
+        tiny_side_px=4,
+        pred_top_k=5,
+        show_pred_seg=True,
+        show_fg_heatmap=True,
+        show_gt_seg=True,
+        gt_seg_key="lm",
+        adapt_nndet_boxes=True,
+    ):
+        super().__init__(
+            patch_size=patch_size,
+            grid_rows=grid_rows,
+            imgs_per_batch=imgs_per_batch,
+            epoch_freq=epoch_freq,
+            slice_axis=slice_axis,
+            auto_grid=auto_grid,
+            n_tiles=n_tiles,
+            local_folder=local_folder,
+            score_min=score_min,
+            score_low_min=score_low_min,
+            score_mid_min=score_mid_min,
+            score_high_min=score_high_min,
+            tiny_side_px=tiny_side_px,
+            pred_top_k=pred_top_k,
+            show_fg_heatmap=show_fg_heatmap,
+        )
+        self.show_pred_seg = show_pred_seg
+        self.show_gt_seg = show_gt_seg
+        self.gt_seg_key = gt_seg_key
+        self.adapt_nndet_boxes = adapt_nndet_boxes
+
+    def _append_det_batch(self, batch):
+        gt_seg_key = self.gt_seg_key if self.show_gt_seg else None
+        self._cached_items.extend(
+            _items_from_batch(
+                batch,
+                batch["pred"],
+                self.score_min,
+                top_k=self.pred_top_k,
+                retinaunet=True,
+                adapt_nndet_boxes=self.adapt_nndet_boxes,
+                gt_seg_key=gt_seg_key,
+            )
+        )
+
+
+class WandbRetinaUNetImageGridTrainCallback(WandbDetImageGridTrainCallback):
+    """RetinaUNet train-path wandb grid."""
 
     def __init__(
         self,

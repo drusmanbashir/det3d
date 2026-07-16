@@ -4,14 +4,17 @@ from pathlib import Path
 
 import pandas as pd
 import torch
+from fran.utils.bbox_sidecar import (
+    bbox_sidecar_path,
+    extended_bbox_df_column,
+    load_nbrhood_sidecar,
+    nbrhood_df_to_detection_records,
+    save_nbrhood_sidecar,
+)
 from utilz.fileio import save_json
 
 NBRHOOD_SIDECAR_EXT = ".csv"
 DETECTION_JSON_EXT = ".json"
-
-
-def bbox_sidecar_path(bboxes_dir, image_stem, ext=NBRHOOD_SIDECAR_EXT):
-    return Path(bboxes_dir) / f"{image_stem}{ext}"
 
 
 def _box_to_list(box):
@@ -43,36 +46,6 @@ def migrate_detection_sidecar_file(bbox_fn) -> bool:
         return False
     save_json(normalized, path)
     return True
-
-
-def save_nbrhood_sidecar(out_fn, df):
-    df.to_csv(Path(out_fn), index=False)
-
-
-def load_nbrhood_sidecar(bbox_fn, usecols=None):
-    path = Path(bbox_fn)
-    if usecols is None:
-        return pd.read_csv(path)
-    return pd.read_csv(path, usecols=usecols)
-
-
-def extended_bbox_df_column(patch_size_key):
-    return "bbox_extended_" + patch_size_key.replace(",", "_")
-
-
-def nbrhood_df_to_detection_records(df):
-    if df.empty:
-        return [], [], {}
-    boxes = []
-    labels = []
-    for _, row in df.iterrows():
-        raw = row["bbox_xyzxyz"]
-        box = literal_eval(raw) if isinstance(raw, str) else raw
-        boxes.append(torch.tensor(box, dtype=torch.float32))
-        labels.append(torch.tensor(int(row["label_org"]), dtype=torch.long))
-    labels_int = [int(v) for v in labels]
-    instances = {str(x): x for x in set(labels_int)}
-    return boxes, labels, instances
 
 
 def save_detection_sidecar(out_fn, boxes, labels, ignore_labels=None, instances: dict = None):
@@ -213,6 +186,7 @@ def save_inference_sidecar(
         "predictions": predictions,
     }
     save_json(payload, out_fn)
+    return payload
 
 
 def load_inference_sidecar(sidecar_fn):

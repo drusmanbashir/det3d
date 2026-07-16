@@ -10,7 +10,7 @@ if __name__ == "__main__":
 
     from det3d.configs.parser import ConfigMakerDet
     from det3d.detection.nndet_train import ensure_nndet_importable
-    from det3d.extra.trainer_nndet import (
+    from det3d.archived.trainer_nndet import (
         apply_det3d_plan_to_nndet_model_cfg,
         load_nndet_train_cfgs,
         plan_from_det3d,

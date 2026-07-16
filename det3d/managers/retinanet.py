@@ -17,6 +17,7 @@ class RetinaNetManager(LightningModule):
         self.project = Project(project_title)
         self.save_hyperparameters("project_title", "configs", "lr")
         self.configs = configs
+        self.model_params = configs["model_params"]
         self.plan = configs["plan_train"]
         self.lr = float(lr if lr is not None else self.configs["model_params"]["lr"])
         self.w_cls = float(self.plan["w_cls"])
@@ -61,6 +62,20 @@ class RetinaNetManager(LightningModule):
             }
             for p in preds
         ]
+
+    def maybe_store_grid_preds(self, batch):
+        if not (hasattr(self.trainer, "store_preds") and self.trainer.store_preds):
+            return
+        with torch.no_grad():
+            val_inputs = self._val_inputs_from_batch(batch)
+            was_training = self.detector.training
+            self.detector.eval()
+            val_outputs = self.detector(
+                val_inputs, use_inferer=self._use_sliding_window_inferer(val_inputs)
+            )
+            if was_training:
+                self.detector.train()
+            self._store_batch_grid_preds(batch, val_outputs)
 
     def _forward_network_head(self, images):
         dtype = next(self.detector.network.parameters()).dtype
@@ -113,6 +128,7 @@ class RetinaNetManager(LightningModule):
         self.log("train0_loss", loss, prog_bar=True, sync_dist=self.sync_dist)
         self.log("train0_cls_loss", cls_loss, sync_dist=self.sync_dist)
         self.log("train0_box_reg_loss", box_loss, sync_dist=self.sync_dist)
+        self.maybe_store_grid_preds(batch)
         return loss
 
     def on_validation_epoch_start(self):
@@ -145,12 +161,14 @@ class RetinaNetManager(LightningModule):
     def configure_optimizers(self):
         holder = {}
         result = configure_detection_optimizers(
-            self.detector.network.parameters(), self.plan, self.lr, holder
+            self.detector.network.parameters(),
+            self.plan,
+            self.lr,
+            holder,
+            monitor=self.plan["scheduler_monitor"],
         )
         self.scheduler_warmup = holder["scheduler_warmup"]
         return result
-
-    def on_fit_start(self):
         plan = self.plan
         self.detector.set_sliding_window_inferer(
             roi_size=self.val_patch_size,

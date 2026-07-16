@@ -14,20 +14,22 @@ from det3d.managers.data.valid_patch_stream import (
     PatchStreamDatasetDet,
     patch_stream_collate_fn,
 )
-from det3d.preprocessing.hdf5_shards_det import ensure_hdf5_shards_for_plan
-from det3d.transforms.crop_indices import (
-    monai_crop_center_to_slices,
-    sample_crop_center_from_extended_boxes,
-)
-from det3d.transforms.detection import ClipBoxToImagedWithDf, patch_size_manifest_key
+from fran.preprocessing.hdf5_shards import ensure_hdf5_shards_for_plan
+from fran.transforms.crop_indices import sample_crop_center_from_extended_boxes
+from det3d.transforms.crop_indices import monai_crop_center_to_slices
+from det3d.transforms.detection import ClipBoxToImagedWithDf
+from fran.transforms.detection import patch_size_manifest_key
 from det3d.transforms.gpu_det import RandAffineBoxSyncd, RandFlipBoxSyncd, ResizeWithPadOrCropBoxSyncd
 from fran.managers.data.valid_patch_stream import _pad_tensor_to_patch_size
 from det3d.utils.bbox_sidecar import (
     bbox_sidecar_path,
-    extended_bbox_df_column,
     load_detection_sidecar,
-    nbrhood_df_to_detection_records,
     valid_detection_box,
+)
+from fran.utils.bbox_sidecar import (
+    extended_bbox_df_column,
+    load_nbrhood_sidecar,
+    nbrhood_df_to_detection_records,
 )
 from fran.configs.helpers import is_excel_None
 from fran.managers.data.main import (
@@ -46,12 +48,17 @@ from fran.preprocessing.helpers import import_h5py
 from fran.run.preproc.archive_preprocessed import ensure_rapid_data_folder
 from fran.transforms.imageio import TorchReader
 from monai.data import DataLoader, Dataset, MetaTensor
+from fran.transforms.intensitytransforms import RandRandGaussianNoised
 from monai.transforms import (
     Compose,
     EnsureChannelFirstd,
     EnsureTyped,
     LoadImaged,
     MapTransform,
+    RandAdjustContrastd,
+    RandGaussianSmoothd,
+    RandScaleIntensityd,
+    RandShiftIntensityd,
     ScaleIntensityRanged,
 )
 from monai.transforms.croppad.dictionary import ResizeWithPadOrCropd
@@ -510,7 +517,7 @@ class DataManagerDet(DataManager):
     def uses_lm_seg(self):
         from det3d.architectures.create_detector import arch_from_conf
 
-        return arch_from_conf(self.configs) in ("retinaunet", "retinaunet_v3")
+        return arch_from_conf(self.configs) == "retinaunet"
 
     def _rand_crop_patch_size(self): # garbage AI slop
                 return self._patch_size()
@@ -548,7 +555,7 @@ class DataManagerDet(DataManager):
         soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
         if soft_limit < 1024:
             return 0, False
-        if self.is_train_split():
+        if self.is_train_all_split():
             num_workers = min(4, max(2, self.effective_batch_size // 8))
         else:
             num_workers = min(4, max(2, int(self.configs["dataset_params"].get("num_workers_val", 2))))
@@ -556,7 +563,7 @@ class DataManagerDet(DataManager):
 
     def create_dataloader(self):
         num_workers, persistent_workers = self._num_workers()
-        if self.is_train_split():
+        if self.is_train_all_split():
             batch_size = self.effective_batch_size
             collate_fn = self.collate_fn
         else:
@@ -567,7 +574,7 @@ class DataManagerDet(DataManager):
             persistent_workers = True
         dl_kwargs = dict(
             batch_size=batch_size,
-            shuffle=self.is_train_split(),
+            shuffle=self.is_train_all_split(),
             num_workers=num_workers,
             collate_fn=collate_fn,
             persistent_workers=persistent_workers,
@@ -607,12 +614,21 @@ class DataManagerDet(DataManager):
     def cases_from_project_split(self):
         ds_tokens = [x.strip() for x in self.plan["datasources"].split(",") if x.strip()]
         nnz_allowed = self.plan.get("nnz_allowed", False)
-        train_cases, valid_cases = self.project.get_train_val_case_ids(
-            self.dataset_params["fold"],
-            ds_tokens,
-            nnz_allowed=nnz_allowed,
-        )
-        self.cases = train_cases if self.is_train_split() else valid_cases
+        if self.split == "all":
+            self.cases = list(
+                self.project.get_train_val_case_ids(
+                    fold=None,
+                    ds=ds_tokens,
+                    nnz_allowed=nnz_allowed,
+                )
+            )
+        else:
+            train_cases, valid_cases = self.project.get_train_val_case_ids(
+                self.dataset_params["fold"],
+                ds_tokens,
+                nnz_allowed=nnz_allowed,
+            )
+            self.cases = train_cases if self.is_train_split() else valid_cases
         case_ids_on_disk = set()
         for img_fn in (self.data_folder / "images").glob("*.pt"):
             case_ids_on_disk.add(
@@ -743,7 +759,7 @@ class DataManagerDet(DataManager):
 
 class DataManagerDetSource(DataManagerDet, DataManagerSource):
     keys_tr = (
-        "Ld,Rtr,L2,E,Norm,F1,F2,Affine,ResizePC,BoxClip,IntensityTfms"
+        "Ld,Rtr,L2,E,Norm,F,Affine,ResizePC,BoxClip,IntensityTfms"
     )
 
     def __init__(self, project, configs: dict, batch_size=8, cache_rate=0.0, **kwargs):
@@ -832,17 +848,10 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
         )
         self.L2 = LoadHDF5DetCropd(keys=load_keys, box_key=bk)
         self.E = EnsureChannelFirstd(keys=load_keys)
-        self.F1 = RandFlipBoxSyncd(
+        self.F = RandFlipBoxSyncd(
             spatial_keys=spatial_aug_keys,
             box_key=bk,
             prob=flip_prob,
-            spatial_axis=0,
-        )
-        self.F2 = RandFlipBoxSyncd(
-            spatial_keys=spatial_aug_keys,
-            box_key=bk,
-            prob=flip_prob,
-            spatial_axis=1,
         )
         self.Affine = RandAffineBoxSyncd(
             spatial_keys=spatial_aug_keys,
@@ -878,11 +887,32 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
         self.transforms_dict["L2"] = self.L2
         self.transforms_dict["E"] = self.E
         self.transforms_dict["Norm"] = self.Norm
-        self.transforms_dict["F1"] = self.F1
-        self.transforms_dict["F2"] = self.F2
+        self.transforms_dict["F"] = self.F
         self.transforms_dict["Affine"] = self.Affine
         self.transforms_dict["ResizePC"] = self.ResizePC
         self.transforms_dict["BoxClip"] = self.BoxClip
+        self.transforms_dict["IntensityTfms"] = [
+            RandScaleIntensityd(
+                keys=[ik], factors=self.scale["value"], prob=self.scale["prob"]
+            ),
+            RandRandGaussianNoised(
+                keys=[ik], std_limits=self.noise["value"], prob=self.noise["prob"]
+            ),
+            RandShiftIntensityd(
+                keys=[ik], offsets=self.shift["value"], prob=self.shift["prob"]
+            ),
+            RandAdjustContrastd(
+                keys=[ik], gamma=self.contrast["value"], prob=self.contrast["prob"]
+            ),
+            RandGaussianSmoothd(
+                keys=[ik],
+                prob=0.15,
+                sigma_x=(0.5, 1.0),
+                sigma_y=(0.5, 1.0),
+                sigma_z=(0.5, 1.0),
+            ),
+            RandAdjustContrastd(keys=[ik], prob=0.15, gamma=(0.7, 1.5)),
+        ]
         if type(self.Ld) is not LoadHDF5DetShardExtendedBBoxd:
             raise RuntimeError(
                 f"det shard train must use LoadHDF5DetShardExtendedBBoxd, got {type(self.Ld)}"
@@ -986,6 +1016,9 @@ class DataManagerDetLBD(DataManagerDetSource, DataManagerLBD):
 
     def cases_from_project_split(self):
         if self.is_eval_split():
+            DataManagerDet.cases_from_project_split(self)
+            return
+        if self.split == "all":
             DataManagerDet.cases_from_project_split(self)
             return
         self._shard_cases_from_project_split()

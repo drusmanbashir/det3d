@@ -17,7 +17,7 @@ from typing import List, Optional, Sequence
 import torch
 import yaml
 
-from det3d.extra.lbd_nndet_materialize import (
+from det3d.archived.lbd_nndet_materialize import (
     DUSTING_THRESHOLD,
     instance_seg_to_nndet_boxes_pkl,
     lbd_case_to_nndet_arrays,

@@ -5,11 +5,12 @@ from pathlib import Path
 from typing import Optional
 from nndet.core.retina import BaseRetinaNet
 import torch
-from det3d.detection.nndet_train import nndet_batch_to_xyzxyz, xyzxyz_exclusive_batch_to_nndet
-from det3d.detection.preprocess_images import check_training_targets
+from det3d.managers.helpers.nndet_retinaunet import (
+    det3d_batch_to_nndet,
+    nndet_batch_to_xyzxyz,
+    xyzxyz_exclusive_batch_to_nndet,
+)
 from det3d.detection.retinanet_detector2 import RetinaNetDetector2
-from det3d.detection.retinanet_train import forward_train_joint
-from det3d.detection.retinaunet_v3 import RetinaUNetV3
 from fran.callback.debug_epoch_limit import DebugEpochBatchLimit
 from fran.callback.incremental import LRFloorStop
 from fran.configs.helpers import normalize_logging_payload
@@ -31,7 +32,7 @@ from lightning.pytorch.profilers import AdvancedProfiler
 from utilz.imageviewers import ImageMaskBboxViewer, ImageMaskViewer
 from utilz.stringz import ast_literal_eval, headline
 
-from det3d.architectures.create_detector import arch_from_conf, create_retinaunet_v3_from_conf
+from det3d.architectures.create_detector import arch_from_conf
 from det3d.callback.wandb_det_grid import (
     WandbDetImageGridCallback,
     WandbRetinaUNetImageGridCallback,
@@ -43,12 +44,21 @@ from det3d.managers.detector_factory import resolve_detector_manager
 
 
 class TrainerDet(Trainer):
+    """Detection trainer for RetinaNet / RetinaUNet (mirrors fran ``Trainer``).
+
+    Wires ``DataManagerDualDet*`` orchestrators, detection W&B image grids, and
+    ``val0_metric`` early stopping. Normalizes ``plan_*`` modes ``det`` / ``lbd``
+    to the label-bounded pipeline before DM setup.
+    """
+
     wandb_grid_cb_cls = WandbDetImageGridCallback
     monitor_metric_name = "val0_metric"
     _DET_PIPELINE_MODES = frozenset({"det", "lbd"})
 
     def wandb_grid_cb_kwargs(self, wandb_grid_epoch_freq: int) -> dict:
-        val_patch_size = self.configs["model_params"]["val_patch_size"]
+        val_patch_size = self.configs["plan_valid"].get("val_patch_size")
+        if val_patch_size is None:
+            val_patch_size = self.configs["plan_valid"]["patch_size"]
         if isinstance(val_patch_size, str):
             val_patch_size = ast_literal_eval(val_patch_size)
         plan = self.configs["plan_train"]
@@ -66,6 +76,7 @@ class TrainerDet(Trainer):
         return kwargs
 
     def wandb_retinaunet_grid_cb_kwargs(self, wandb_grid_epoch_freq: int) -> dict:
+        """Base WandB grid kwargs plus RetinaUNet seg overlay toggles from plan_train."""
         plan = self.configs["plan_train"]
         kwargs = self.wandb_grid_cb_kwargs(wandb_grid_epoch_freq)
         kwargs["show_pred_seg"] = bool(plan.get("wandb_grid_show_pred_seg", True))
@@ -74,9 +85,9 @@ class TrainerDet(Trainer):
 
     def wandb_grid_callback(self, wandb_grid_epoch_freq: int):
         arch = arch_from_conf(self.configs)
-        if arch in ("retinaunet", "retinaunet_v3"):
+        if arch == "retinaunet":
             kwargs = self.wandb_retinaunet_grid_cb_kwargs(wandb_grid_epoch_freq)
-            kwargs["adapt_nndet_boxes"] = arch == "retinaunet"
+            kwargs["adapt_nndet_boxes"] = True
             return WandbRetinaUNetImageGridCallback(**kwargs)
         return WandbDetImageGridCallback(
             **self.wandb_grid_cb_kwargs(wandb_grid_epoch_freq)
@@ -162,16 +173,28 @@ class TrainerDet(Trainer):
         self.init_dm_unet(self.max_epochs, batch_size, override_dm_checkpoint)
         self.D.prepare_data()
         self.D.setup(stage="fit")
+        valid_mgr = getattr(self.D, "valid_manager", None)
+        if valid_mgr is None:
+            valid_mgr = getattr(self.D, "snapshot_manager", None)
         headline(
             "Data module ready.\n"
             f"  train: {type(self.D.train_manager).__name__} — {self.D.train_manager}\n"
-            f"  valid: {type(self.D.valid_manager).__name__} — {self.D.valid_manager}"
+            f"  valid: {type(valid_mgr).__name__} — {valid_mgr}"
         )
+
+        if self.ckpt is not None and batchsize_finder:
+            headline(
+                "BatchSizeFinder was requested, but this run is resuming from an existing checkpoint "
+                f"({self.ckpt}). To preserve resumed epoch/global_step continuity and avoid mixing "
+                "BatchSizeFinder probe steps into the same W&B run history, batchsize_finder is being "
+                "force-disabled for this run."
+            )
+            batchsize_finder = False
 
         cbs, logger, profiler = self.init_cbs(
             extra_cbs=cbs,
             wandb=wandb,
-            batchsize_finder=False,
+            batchsize_finder=batchsize_finder,
             profiler=profiler,
             tags=tags,
             description=description,
@@ -182,13 +205,11 @@ class TrainerDet(Trainer):
             wandb_grid_epoch_freq=wandb_grid_epoch_freq,
         )
         self._ensure_local_ckpt_on_wandb_resume(logger)
-
-        precision = "bf16-mixed"
         trainer_kwargs = dict(
             callbacks=cbs,
             accelerator=accelerator,
             devices=trainer_devices,
-            precision=precision,
+            precision="bf16-mixed",
             profiler=profiler,
             logger=logger,
             max_epochs=self.max_epochs,
@@ -198,9 +219,14 @@ class TrainerDet(Trainer):
             enable_checkpointing=True,
             default_root_dir=self.project.checkpoints_parent_folder,
             strategy=strategy,
+            benchmark=bool(self.configs["plan_train"]["benchmark"]),
+            deterministic=bool(self.configs["plan_train"]["deterministic"]),
         )
         if arch_from_conf(self.configs) == "retinaunet":
             trainer_kwargs["gradient_clip_val"] = 1.0
+        if getattr(self, "run_through", False):
+            trainer_kwargs["limit_val_batches"] = 0
+            trainer_kwargs["check_val_every_n_epoch"] = 1
         self.trainer = TrainerL(**trainer_kwargs)
 
     def resolve_orchestrator_class(self, batch_tfms=None):
@@ -217,17 +243,6 @@ class TrainerDet(Trainer):
                 if batch_tfms
                 else DataManagerDualDetTfmDebug
             )
-        if self.configs["model_params"].get("pre_trafo", False):
-            from det3d.managers.data.pre_trafo import (
-                DataManagerDualDetPreTrafo,
-                DataManagerDualDetPreTrafoBTfms,
-            )
-
-            return (
-                DataManagerDualDetPreTrafoBTfms
-                if batch_tfms
-                else DataManagerDualDetPreTrafo
-            )
         return DataManagerDualDetBTfms if batch_tfms else DataManagerDualDet
 
     def normalize_plan_modes_for_det_pipeline(self):
@@ -239,6 +254,9 @@ class TrainerDet(Trainer):
 
     def qc_configs(self, configs, project):
         self.normalize_plan_modes_for_det_pipeline()
+        arch = arch_from_conf(configs)
+        if arch not in ("retinanet", "retinaunet"):
+            raise ValueError(f"unsupported arch {arch!r}; use retinanet or retinaunet")
 
     def init_dm(self):
         self.normalize_plan_modes_for_det_pipeline()
@@ -285,6 +303,7 @@ class TrainerDet(Trainer):
     def init_trainer(self, epochs):
         from det3d.managers.detector_factory import resolve_detector_manager
 
+        self.configs["model_params"]["max_epochs"] = int(epochs)
         manager_cls = resolve_detector_manager(self.configs)
         N = manager_cls(
             project_title=self.project.project_title,
@@ -296,15 +315,26 @@ class TrainerDet(Trainer):
 
     def load_trainer(self, map_location="cpu", **kwargs):
         manager_cls = resolve_detector_manager(self.configs)
+        weights_only = False
         try:
-            return manager_cls.load_from_checkpoint(
-                self.ckpt, map_location=map_location, strict=True, **kwargs
+            N = manager_cls.load_from_checkpoint(
+                self.ckpt,
+                map_location=map_location,
+                strict=True,
+                weights_only=weights_only,
+                **kwargs,
             )
         except RuntimeError:
             switch_ckpt_keys(self.ckpt)
-            return manager_cls.load_from_checkpoint(
-                self.ckpt, map_location=map_location, strict=True, **kwargs
+            N = manager_cls.load_from_checkpoint(
+                self.ckpt,
+                map_location=map_location,
+                strict=True,
+                weights_only=weights_only,
+                **kwargs,
             )
+        print("Model loaded from checkpoint: ", self.ckpt)
+        return N
 
     def maybe_alter_configs(self, batch_size, compiled):
         if batch_size is not None:
@@ -332,12 +362,13 @@ class TrainerDet(Trainer):
         if self.debug and not self.debug_tfm_keys:
             cbs += [DebugEpochBatchLimit(n=2)]
 
+        ckpt_mode = self.early_stopping_kwargs["mode"]
         cbs += [
             ModelCheckpoint(
                 save_top_k=2,
                 save_last=True,
                 monitor=self.monitor_metric_name,
-                mode="max",
+                mode=ckpt_mode,
                 every_n_epochs=5,
                 filename="{epoch}-{" + self.monitor_metric_name + ":.4f}",
                 enable_version_counter=True,
@@ -423,6 +454,12 @@ class TrainerDet(Trainer):
         self.fabric_infer = fabric
         return model
 
+    def fabric_inner_module(self):
+        arch = arch_from_conf(self.configs)
+        if arch == "retinaunet":
+            return self.N.net
+        return self.N.detector
+
     def setup_tm_for_cuda(
         self, device=0, precision="bf16-mixed", wrap_inner_model=True
     ):
@@ -433,9 +470,15 @@ class TrainerDet(Trainer):
         )
 
         if wrap_inner_model:
-            self.N.detector.eval()
-            self.N.detector = fabric.setup(self.N.detector)
-            model = self.N.detector
+            inner = self.fabric_inner_module()
+            inner.eval()
+            inner = fabric.setup(inner)
+            arch = arch_from_conf(self.configs)
+            if arch == "retinaunet":
+                self.N.nndet_module.model = inner
+            else:
+                self.N.detector = inner
+            model = inner
         else:
             self.N.eval()
             self.N = fabric.setup(self.N)
@@ -454,7 +497,7 @@ if __name__ == "__main__":
     from det3d.configs.parser import ConfigMakerDet
 
     project_title = "lidca"
-    plan_id = 4
+    plan_id = 3
 
     P = Project(project_title)
     C = ConfigMakerDet(P)
@@ -466,21 +509,21 @@ if __name__ == "__main__":
 # SECTION:-------------------- TRAINING --------------------------------------------------------------------------------------
     from det3d.managers.data.tfm_debug import KEYS_ITEM_NO_SPATIAL
 
-    conf["model_params"]["arch"] = "retinaunet"
-    conf["affine3d"]["p"] = 0.0
+    conf["model_params"]["arch"] = "retinanet"
     print(conf["dataset_params"]["prezoom_scale"])
 
-    bs = 6
+    bs = 8
     device_id = 0
-    batch_tfms = True
+    batch_tfms = False
     wandb = True
+    run_name = "LIDCA-GYRO"
     run_name = None
 
 # %%
-    tags = ["tfm-debug", "no-spatial", "instances-fix"]
-    description = "TrainerDet tfm debug n=50 no spatial aug + sidecar instances"
+    tags = []
+    description = "upgradefrom LIDCA-GYRO using nndet params"
     lr = None
-    debug_ = True
+    debug_ = False
     debug_tfm_keys = KEYS_ITEM_NO_SPATIAL
     profiler = False
     compiled = False
@@ -488,6 +531,7 @@ if __name__ == "__main__":
     wandb_grid_epoch_freq = 20
     val_every_n_epochs = 2
     train_indices = 50
+    train_indices = None
     val_indices = None
     val_sampling = 1.0
     epochs = 500
@@ -551,67 +595,11 @@ if __name__ == "__main__":
     images = batch["image"]
 
 # %%
-    R = N.detector
-    debug = False
-    script=None
     plan = Tm.configs["plan_train"]
-
-
-    R= create_retinaunet_v3_from_conf(plan, script=script, debug=debug)
-
+    R = N.nndet_module
 
 # %%
-    images = batch["image"]
-    R = N
-# %%  # T:block_start|RetinaUNetV3.forward
-    A = N.detector
-    R = N.detector.network
-
-# /home/ub/code/det3d/det3d/detection/retinaunet_v3.py  # T:block_donor|/home/ub/code/det3d/det3d/detection/retinaunet_v3.py
-#SECTION:-------------------- forward --------------------------------------------------------------------------------------  # T:block_meta|RetinaUNetV3.forward
-    # requires R = RetinaUNetV3(...) in __main__  # T:requires_alias|R = RetinaUNetV3(...)
-    head_maps, all_maps = R.feature_extractor(images)  # T:self_ref|head_maps, all_maps = self.feature_extractor(images)
-    [print(a.shape) for a in head_maps]
-    [print(a.shape) for a in all_maps]
-    pred_seg = R.segmenter(all_maps)  # T:self_ref|pred_seg = self.segmenter(all_maps)
-    classification = R.classification_head(head_maps)  # T:self_ref|classification = self.classification_head(head_maps)
-    box_regression = R.regression_head(head_maps)  # T:self_ref|box_regression = self.regression_head(head_maps)
-    # return {
-    #     R.cls_key: classification,
-    #     R.box_reg_key: box_regression,
-    #     R.seg_key: pred_seg["seg_logits"],
-    # }
-#SECTION:-------------------- forward end --------------------------------------------------------------------------------------  # T:block_meta_end|RetinaUNetV3.forward
-    # end PythonMethodScratch  # T:block_end|RetinaUNetV3.forward
-# %%
-    from det3d.architectures.create_detector import _anchor_generator
-
-    decoder_levels = plan.get("decoder_levels", (1, 2, 3, 4))
-    if isinstance(decoder_levels, str):
-        decoder_levels = ast_literal_eval(decoder_levels)
-    anchor_generator = _anchor_generator (plan, decoder_levels)
-    num_anchors = anchor_generator.num_anchors_per_location()[0]
-    net = build_retinaunet_v3(plan, num_anchors)
-    if script:
-        net = torch.jit.script(net)
-    R = RetinaNetDetector2(network=net, anchor_generator=anchor_generator, debug=debug)
-
-
-# %%
-    outputs = forward_train_joint(
-        N.detector,
-        batch["image"],
-        N._targets_from_batch(batch),
-        N.seg_loss_fnc,
-        batch["lm"],
-        N.plan,
-    )
-
-
-# %%
-
-# %%
-    losses, preds, nb = N._step_losses(batch, 0, True) # %% preds.keys()
+    losses, preds, nb = N.step_losses(batch, 0, True) # %% preds.keys()
     lm = preds["pred_seg"]
     batch_idx = 0
     ImageMaskViewer([img[0], lm[0, 1, :]], "im")
@@ -660,7 +648,7 @@ if __name__ == "__main__":
     batch = batch
     batch_idx = 0
     evaluation = True
-    nb = N._det3d_batch_to_nndet(batch)
+    nb = det3d_batch_to_nndet(batch, N.plan["fg_labels"])
     nb.keys()
     nb["target_classes"]
     nb["target_boxes"]

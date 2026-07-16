@@ -2,21 +2,21 @@
 
 ## run/preprocessing
 
-- `build_detection_json.py` — build MONAI detection JSON from lesion_stats.csv and fran fold splits
-- `nndet_lidc_prep.py` — native nnDetection LIDC prep: FRAN nifti (`/media/UB/datasets/lidc_all`) → `Task012_LIDC` raw_splitted + fran splits + `nndet_prep` crop/analyze/plan/process (`--det-data`, `--skip-convert`, `--skip-prep`)
 - `backfill_sidecar_instances.py` — add ``instances`` {lm_cc_id: semantic_label} to existing `bboxes/*.json` from matching `lms/*.pt` (`--project`, `--plan-id`, `--lbd-folder`, `--dry-run`)
+- `binarize_lbd_lms.py` — collapse LBD `lms/*.pt` to 0=bg / 1=lesion; set `label_org=1` on bbox sidecars (`--project`, `--plan-id`, `--lbd-folder`, `--dry-run`); shell `binarize_lbd_lms.sh`
 
 ## run/preproc
 
 - `object_bounded.py` — object-bounded detection preprocessing CLI (`--project`, `--plan`, `--overwrite`, `--num-processes`, `--case-ids`, optional `--input-folder`)
-- `label_bounded.py` — label-bounded detection preprocessing CLI (same flags; one volume per case)
+
+Detection LBD preproc: `fran/run/preproc/analyze_resample.py --pipeline det` (ConfigMakerDet; `LabelBoundedDetDataGenerator` is a thin alias of fran `LabelBoundedDataGenerator` with `hdf5_shard_mode=det`).
 
 ## det/preprocessing
 
 - `object_bounded.py` — `ObjectBoundedDataGenerator` + `_OBJWorker`: fixed_spacing PT in; strict bbox crop (`expand_by=0`); compose `LoadT,Chan,Dev,Stats,N2P,AttachGT,Int`; patch size native — train `batch_size=1`, no collate/pad → `images/`, `lms/`, `bboxes/*_bboxN.json`
-- `labelbounded.py` — `LabelBoundedDetDataGenerator` + `_LBDDetWorker`: fixed_spacing PT in → label crop/remap → `DetectionBBoxStatsd` → `Stats,E,Ext,H` → `images/`, `lms/`, `bboxes/{case}.csv` (LMG nbrhoods + `bbox_xyzxyz` + `bbox_extended_{Dx}_{Dy}_{Dz}` extended cols); postprocess writes `manifest.json` + `dataset_details.csv`
-- `dataset_details.py` — `dataset_details_from_mask_file`, `create_results_df_from_det_folder` (fran: `dataset_details_from_lm_file`, `create_results_df_from_lms_folder`); `write_dataset_details_csv`
-- `bbox_sidecar.py` — `save_detection_sidecar` / `load_detection_sidecar` (JSON + LBD CSV); `save_nbrhood_sidecar` / `load_nbrhood_sidecar`; `extended_bbox_df_column`; `save_inference_sidecar` / `load_inference_sidecar`; `valid_detection_box` / `sidecar_bbox_empty`
+- `labelbounded.py` — thin re-export: `LabelBoundedDetDataGenerator` → fran `LabelBoundedDataGenerator` (`hdf5_shard_mode=det`)
+- `hdf5_shards_det.py`, `dataset_details.py`, `helpers.py` — re-exports from fran
+- `bbox_sidecar.py` — nbrhood symbols from fran; local JSON inference sidecar helpers remain
 
 ## det/utils
 
@@ -24,20 +24,24 @@
 
 ## det/geometry
 
-- `lmg.py` — `DetectionLabelMapGeometryPT.to_voxel_detection_records`: ITK `[idx,idx,idx,size,size,size]` → `gt_box_mode` voxel box
+- `lmg.py` — `DetectionLabelMapGeometryPT.to_voxel_detection_records`: ITK `[idx,idx,idx,size,size,size]` → xyzxyz voxel box
 
 ## det/transforms
 
 - `bbox_stats.py` — `DetectionBBoxStatsd`: LMG GT on `data['bbox']`/`data['label']`; `AttachDetectionGTd`: post-crop LMG GT on `data['box']`/`data['label']` (OBD)
 - `patch_size.py` — `NbrhoodsToPatchesOBDD`: strict lesion bbox N2P + 4D channel
 
-## run/configs
-
-- `build_experiment_configs_det.py` — build `~/code/fran/configurations/experiment_configs_det.xlsx` (model/loss/data params + plans_det)
-
 ## run/planning
 
 - `advise_det_plan.py` — offline PlanAdvisorDet compare table vs manual plan (`--project`, `--plan-id`)
+
+## run/nndet
+
+- `local_plan_sources.yaml` — local-only image/lm roots → nnDet task mapping (`liver|kidneys|pancreas|colon`; no downloads)
+- `discover_local_plan_sources.py` — report on-disk sources + plan pkl status
+- `stage_local_msd.py` — symlink local FRAN `images/` + `lms/` into nnDet task layouts (Decathlon raw or KiTS raw_splitted)
+- `generate_nndet_plan_silo.sh` — ephemeral `nndet_prep` silo → `$nndet_conf/plans/{mnemonic}/D3V001_3d.pkl`; supports `all` and `--force`
+- `generate_nndet_plans_local.sh` — run silo for every mnemonic in `local_plan_sources.yaml` (skips existing real pkls)
 
 ## det/architectures
 
@@ -59,41 +63,62 @@
 - `data.py` — `DataManagerTrainDet` (LBD train: load image/mask, Norm, spatial aug + point sync, `lbd_det_collate`), `DataManagerTrainDetBTfms` / `DataManagerDetBTfms` (GPU batch tail), `DataManagerDetLBD` (val full volumes), `DataManagerDualDet` / `DataManagerDualDetBTfms`; `DataManagerDet` alias → TrainDet
 - `detector_factory.py` — `resolve_detector_manager`, `build_detector_manager` (retinanet | retinaunet)
 - `retinaunet.py` — `RetinaUNetManager` Lightning module (vendored UFPN + MONAI RetinaNet head)
-- `det_schedule.py` — `configure_detection_optimizers` (epoch_step | poly_iter)
+- `det_schedule.py` — `configure_detection_optimizers` (SGD + ReduceLROnPlateau from plan `scheduler_*` / `nndet` keys)
 - `retinanet_bk.py` — canonical `RetinaNetManager` (plan-driven loss/sampler)
 
 ## run/training
 
-- `train.py` — Lightning det training entrypoint; `--arch retinanet|retinaunet`, `--nndet-forward-patch-size 128,128,64` (DM RandCrop patch; same DM for both arch), `--batch-tfms` → `TrainerDet.resolve_orchestrator_class`
-- `nndet_env_dl.sh` — env vars for native nnDetection in conda `dl` (`det_data`, `det_models`, MLflow)
-- `nndet_train_lidc.sh` — native nnDet LIDC training (`nndet_train Task012_LIDC`, forwards `-o` / `--sweep`)
-- `benchmark_det_pipelines.py` — benchmark pipelines (native nnDet + `retinaunet_v3`); det loss cls+reg; refs `LIDCA-HOSS`/`LIDCA-IMPS`; `run|report|all|sweep`
-- `train_hybrid_fast_lbd.py` — hybrid fast LBD → nnDet RetinaUNetV001 (GpuTail + disk boxes); canonical loop in `det3d.extra.hybrid`; `--train-mode overwrite|resume`, `--n-train`/`--n-val`, `--train-equals-val`, `--case-ids`, `--exp-id`, `--gpu`
-- `hybrid_fast_lbd_benchmark.sh` — benchmark launcher profiles `smoke` | `n25-e200` for hybrid fast LBD CLI
-- `train_native_lbd.py` — native nnDet LBD (materialize instance seg → Datamodule → pre_trafo); W&B image grid via `--wandb-grid-epoch-freq`; same resume/limited-n/train-equals-val flags as hybrid CLI
+- `train.py` — shim → `fran/run/training/train.py` (prepends `--pipeline det` when omitted; `TrainerDet` / `TrainerDetTransfer`); standard: `--project lidca --plan 4 --arch retinaunet`; transfer: `--transfer true --run-name {source_run} --arch retinaunet --source-ckpt last`; also `--run-through`, `--resume-lr`, `--batch-tfms`
+- `train_det.sh` — HPC Slurm det training (`train_retry.py --pipeline det`); defaults bones plan 1, retinanet, run-through, 500 epochs
+- `local_train_det.sh` — local det training via `train.py` shim (PYTHONPATH + bones defaults)
+- `submit_train_det.sh` — HPC submit wrapper (optional)
+## run/archived/training
+
+Retired nnDet migration / benchmark CLIs (superseded by `run/training/train.py` + `TrainerDet`):
+
+- `benchmark_det_pipelines.py` — native nnDet + det3d pipeline benchmarks (`run|report|all|sweep`)
+- `train_hybrid_fast_lbd.py` — hybrid fast LBD → nnDet RetinaUNetV001 (`det3d.archived.hybrid`)
+- `train_native_lbd.py` — native nnDet LBD materialize + pre_trafo (`det3d.archived.nndet_native_lbd`)
+- `hybrid.sh`, `hybrid_fast_lbd_benchmark.sh` — launchers for hybrid fast LBD CLI
 
 ## det3d/inference
 
-- `patch.py` — `DetPatchInferer(BaseInferer)`: val-matched preprocess (`E,S,Norm,Dtype`), RetinaNetDetector forward
-- `cascade.py` — `DetCascadeInferer` (RetinaNet bbox sidecar); `DetCascadeInfererRetinaUNet` (det+seg NIfTI)
-- `transforms.py` — `OffsetBoxByBBoxd`, `ScaleBoxToCropNatived`, `PreservePreTfmBoxd`, `SaveInferenceSidecard`, `SaveInferenceMarkupsd`, `crop_around_boxes`; keyed post transforms for debug review
-- `markups.py` — `bbox_world_ras_to_roi_lps`, `inference_sidecar_to_mrk_payload`, `save_inference_markups`; Slicer ROI Box `.mrk.json` from sidecar
-- `visualize.py` — `view_inference_sidecar`, `save_sidecar_png`, `sidecar_pred_boxes`; load sidecar + overlay bboxes on slices
-- `hybrid_lbd.py` — `build_hybrid_detector`, `infer_lbd_volume`, `save_lbd_pred_png`; Luna16-hybrid RetinaNet on LBD torch `.pt` volumes
-- `hybrid_samples.py` — `run_hybrid_sample_infer`, `view_hybrid_sidecar`; infer 20 train + 20 val LBD volumes, save viewer JSON sidecars
-- `retinaunet_nifti.py` — `run_lidc2_seg_infer`, `open_slicer_case`; RetinaUNet tiled seg infer on LIDC2 nifti cases (fixed_spacing .pt), export image+pred_seg NIfTI for Slicer
-- `jaeger.py` — placeholder Jaeger logit aggregation (phase 5)
-- `mirror_tta.py` — placeholder mirror TTA forward (phase 5)
+- `post.py` — `PackRetinaNetPredsd`, `PackRetinaUNetPredsd`, `InvPreprocessBoxd`, `Offd`, `BoxRd`, `SaveDetOutputd`
+- `patch.py` — `DetPatchRetinaNet`, `DetPatchRetinaUNet`, `DetPatchLBD`
+- `cascade.py` — `DetBBoxCascadeInferer`, `DetSegBBoxCascadeInferer`
+- `lbd.py` — `DetLBDRunner` (LBD `.pt` patch-only infer)
+- `lbd_pt.py` — `load_lbd_pt`, `load_lbd_pt_patch_data`, `normalize_lbd_image`
+- `patch.py` / `cascade.py` — re-exports of Det inferers
+- `transforms.py` — legacy keyed transforms (superseded by post for cascade)
+- `markups.py` — Slicer ROI Box `.mrk.json` from sidecar
+- `visualize.py` — sidecar overlay viewers
+- `retinaunet_nifti.py` — RetinaUNet tiled seg infer on LIDC2 nifti cases
+- `jaeger.py`, `mirror_tta.py` — placeholders (phase 5)
+
+## det3d/extra/archived
+
+- `hybrid_lbd.py` — Luna16-hybrid RetinaNet on LBD `.pt` (archived)
+- `hybrid_samples.py` — hybrid sample infer + viewer sidecars (archived)
+- `hybrid_transfer.py` — hybrid fast-LBD ckpt path helpers (archived)
 
 ## run/inference
 
-- `infer_det.py` — cascade det infer CLI (`--run-p`, `--arch retinanet|retinaunet`, `--run-w`, `--lung-localiser`, `--project`, `--folder`/`--dataset`; `--lbd-folder` runs same DetPatchInferer on pre-cropped LBD `.pt`, no localiser)
-- `infer_lbd_pt.py` — hybrid Luna16 RetinaNet on LBD torch `.pt` file or folder (`--model`, `--plan-json` or `--project`/`--plan-id`, `--input`/`--folder`, `--out-dir`; writes `{stem}_pred.png`)
-- `infer_hybrid_samples.py` — hybrid DM infer on N train + N val cases (`--project`, `--plan-id`, `--model`, `--out-dir`; writes `{split}_{idx}_{case_id}.json` + `manifest.json`)
-- `infer_retinaunet_lidc2_seg.py` — RetinaUNet seg infer on N LIDC2 nifti cases (`--ckpt`, `--out-dir`, `-n`, `--open-slicer`; writes `{case_id}_image.nii.gz`, `{case_id}_pred_seg.nii.gz`, `manifest.json`)
-- `view_retinaunet_seg_slicer.py` — open seg NIfTI outputs in 3D Slicer (`--out-dir`, `--index`, `--list`)
-- `view_hybrid_samples.py` — ImageBBoxViewer for hybrid sample sidecars (`--out-dir`, `--index`, `--show gt|pred|both`)
-- `view_preds.py` — view stored sidecars only, no inference (`--index`, `--list`, `--dir` or `--run-p`; default `LIDC-TAINT` predictions)
-- `sidecar_to_mrk.py` — batch sidecar JSON → Slicer ROI Box `.mrk.json` (`--dir` or `--run-p`, `--score-min`, `--overwrite`)
+- `_infer_common.py` — shared helpers for inference CLIs: `default_run_w`, `resolve_input_images`, `resolve_localiser_labels`
+- `infer_cascade.py` — RetinaUNet cascade infer (`--run-p`, `--run-w`, `--lung-localiser`, `--folder`/`--dataset`, `--project lidca`)
+- `infer_det.py` — cascade / LBD det infer (`--run-p`, `--arch`, `--run-w`, `--lbd-folder`, `--folder`/`--dataset`)
+- `infer_retinaunet_lidc2_seg.py` — RetinaUNet seg infer on N LIDC2 nifti cases
+- `view_retinaunet_seg_slicer.py` — open seg NIfTI outputs in 3D Slicer
+- `view_preds.py` — view stored sidecars only (`--dir` or `--run-p`)
+- `sidecar_to_mrk.py` — batch sidecar JSON → Slicer ROI Box `.mrk.json`
 - `view_det.py` — alias for `view_preds.py`
+
+## run/tools
+
+- `affine_voxel_world_demo.py` — numeric affine forward/inverse demos (toy, two-grid same world, preproc InvB trap); see `docs/affine-voxel-world.md`
+
+## run/archived/inference
+
+- `infer_lbd_pt.py` — hybrid Luna16 RetinaNet on LBD `.pt` (archived)
+- `infer_hybrid_samples.py` — hybrid DM sample infer (archived)
+- `view_hybrid_samples.py` — hybrid sample viewer (archived)
 

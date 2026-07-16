@@ -3,7 +3,7 @@ from pathlib import Path
 
 import torch
 from det3d.configs.parser import ConfigMakerDet
-from det3d.inference.hybrid_lbd import build_hybrid_detector, load_lbd_pt
+from det3d.extra.archived.hybrid_lbd import build_hybrid_detector, load_lbd_pt
 from det3d.managers.data import DataManagerDualDet, DataManagerDualDetBTfms
 from fran.managers import Project
 from monai.data import Dataset

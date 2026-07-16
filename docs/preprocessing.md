@@ -35,5 +35,6 @@ Preproc writes HDF5 under `project.rapid_access_folder / {mode} / {lbd_name} / h
 
 ## See also
 
+- [labels.md](labels.md) — remapping keys, `ignore_labels_cc`, semantic → class channels
 - [plans-and-patches.md](plans-and-patches.md)
 - fran `HDF5ShardGenerator.shards_folder` — same `src_{tag}` pattern for seg

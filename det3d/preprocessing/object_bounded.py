@@ -74,7 +74,6 @@ class _OBJWorker(RayWorkerBase):
             lm_key=self.lm_key,
             dusting_threshold=dusting_threshold(plan),
             ignore_labels=self.ignore_labels,
-            gt_box_mode=plan["gt_box_mode"],
         )
         clip = self.project.global_properties["intensity_clip_range"]
         self.Int = ScaleIntensityRanged(

@@ -20,13 +20,13 @@ import numpy as np
 import pandas as pd
 import torch
 
-from det3d.extra.lbd_nndet_materialize import (
+from det3d.archived.lbd_nndet_materialize import (
     DUSTING_THRESHOLD,
     _spacing_from_lm_meta,
     instance_seg_to_nndet_boxes_pkl,
     lm_pt_to_instance_seg,
 )
-from det3d.extra.nndet_native_lbd import (
+from det3d.archived.nndet_native_lbd import (
     NATIVE_DATASET_JSON_SRC,
     NATIVE_PLAN_SRC,
     NNDET_ROOT,
@@ -105,7 +105,7 @@ def _run_benchmark_smoke(cp: int, n_cases: int, batches_per_epoch: int, gpu: int
     run_id = f"parity_cp{cp}_e20"
     cmd = [
         sys.executable,
-        "run/training/benchmark_det_pipelines.py",
+        "run/archived/training/benchmark_det_pipelines.py",
         "run",
         "--pipelines",
         "native_lbd",

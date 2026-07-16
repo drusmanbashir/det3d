@@ -182,7 +182,7 @@ class RetinaUNetBoxInversed(MapTransform):
         self.point_key = point_key
 
     def __call__(self, data):
-        from det3d.detection.nndet_train import nndet_batch_to_xyzxyz
+        from det3d.managers.helpers.nndet_retinaunet import nndet_batch_to_xyzxyz
 
         d = dict(data)
         d[self.image_key] = d[self.image_key].detach().cpu()
@@ -222,7 +222,7 @@ class OffsetBoxByBBoxd(MapTransform):
         self.box_mode = box_mode
 
     def __call__(self, data):
-        from det3d.detection.nndet_train import offset_nndet_xyxyzz_boxes
+        from det3d.managers.helpers.nndet_retinaunet import offset_nndet_xyxyzz_boxes
 
         d = dict(data)
         if self.box_mode == "nndet":
@@ -254,7 +254,7 @@ class UseFullMetaForImaged(MapTransform):
 
 
 class CopyBoxKeyd(MapTransform):
-    """Keep full-voxel xyzxyz boxes before gt_box_mode conversion."""
+    """Keep full-voxel xyzxyz boxes (nnDet bridge input format)."""
 
     def __init__(self, src_key: str, dst_key: str):
         super().__init__(keys=[src_key])
@@ -579,7 +579,7 @@ class NndetBoxToXyzxyzd(MapTransform):
         super().__init__(keys=[box_key])
 
     def __call__(self, data):
-        from det3d.detection.nndet_train import nndet_batch_to_xyzxyz
+        from det3d.managers.helpers.nndet_retinaunet import nndet_batch_to_xyzxyz
 
         d = dict(data)
         for key in self.key_iterator(d):
@@ -607,7 +607,7 @@ class PackRetinaUNetPredsd(MapTransform):
         return (seg > 0).to(torch.uint8)
 
     def __call__(self, data):
-        from det3d.detection.nndet_train import nndet_pred_to_vis
+        from det3d.managers.helpers.nndet_retinaunet import nndet_pred_to_vis
 
         d = dict(data)
         if "raw_pred" in d:

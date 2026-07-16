@@ -16,7 +16,6 @@ from det3d.detection.loss_config import (
 )
 from det3d.detection.retinanet_detector2 import RetinaNetDetector2
 from det3d.detection.retinaunet import build_retinaunet
-from det3d.detection.retinaunet_v3 import create_retinaunet_v3_from_conf
 
 VAL_PATCH_SIZE = [512, 512, 208]
 INFER_OVERLAP = 0.25
@@ -34,11 +33,8 @@ def arch_from_conf(configs) -> str:
 
 def size_divisible_from_conf(configs):
     plan = configs["plan_train"]
-    if arch_from_conf(configs) in ("retinaunet", "retinaunet_v3"):
-        if arch_from_conf(configs) == "retinaunet_v3":
-            from det3d.detection.retinaunet_v3 import encoder_abs_strides_from_plan as _easfp
-        else:
-            from det3d.detection.retinaunet_network import encoder_abs_strides_from_plan as _easfp
+    if arch_from_conf(configs) == "retinaunet":
+        from det3d.detection.retinaunet_network import encoder_abs_strides_from_plan as _easfp
 
         return _easfp(plan)[-1]
     return [
@@ -47,7 +43,9 @@ def size_divisible_from_conf(configs):
 
 
 def val_patch_size_from_conf(configs):
-    val_patch_size = configs["model_params"]["val_patch_size"]
+    val_patch_size = configs["plan_valid"].get("val_patch_size")
+    if is_excel_None(val_patch_size):
+        val_patch_size = configs["plan_valid"]["patch_size"]
     if isinstance(val_patch_size, str):
         val_patch_size = ast_literal_eval(val_patch_size)
     return [int(v) for v in val_patch_size]
@@ -142,10 +140,11 @@ def create_detector_from_conf(configs, script=None, debug=False):
     arch = arch_from_conf(configs)
     if script is None:
         script = arch == "retinanet"
-    if arch == "retinaunet_v3":
-        detector = create_retinaunet_v3_from_conf(plan, script=script, debug=debug)
-    elif arch == "retinaunet":
-        detector = create_retinaunet_from_conf(plan, script=script, debug=debug)
+    if arch == "retinaunet":
+        raise ValueError(
+            "arch=retinaunet uses RetinaUNetManager via resolve_detector_manager, "
+            "not create_detector_from_conf"
+        )
     else:
         detector = create_retinanet_from_conf(plan, script=script, debug=debug)
     val_patch_size = val_patch_size_from_conf(configs)

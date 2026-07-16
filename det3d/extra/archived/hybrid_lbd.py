@@ -167,6 +167,17 @@ def load_lbd_pt_patch_data(pt_paths):
     return apply_bboxes(data, bboxes)
 
 
+def resolve_det_inference_params(run_p, project_title="lidca"):
+    """Archived: hybrid ckpt redirect for det patch inference."""
+    from det3d.extra.archived.hybrid_transfer import hybrid_fast_lbd_ckpt_path
+    from fran.inference.helpers import load_params
+
+    hybrid_ckpt = hybrid_fast_lbd_ckpt_path(run_p)
+    if hybrid_ckpt is not None:
+        return load_params("LIDCA-FAST-LBD-E500-FULL"), str(hybrid_ckpt)
+    return load_params(run_p), None
+
+
 def collect_lbd_pt_paths(input_path=None, folder=None):
     if (input_path is None) == (folder is None):
         raise ValueError("Pass exactly one of input_path or folder")

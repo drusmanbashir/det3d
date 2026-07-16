@@ -60,7 +60,7 @@ Validation loops, COCO/mDice, and WandB grids are **phase-2** checks after the s
 - Scratch work: `det3d/extra/{topic}.py` per `extra-scratch-workflow.mdc`.
 - Ad hoc validation: `/s/agent_rw/tmp/` — not repo `test_*.py` unless user asks for persistent regression tests.
 - Active conda env: `dl`.
-- Managers: log `train0_*`; val `val0_*` (see `RetinaNetManager`, `RetinaUNetManagerV3`).
+- Managers: log `train0_*`; val `val0_*` (see `RetinaNetManager`, `RetinaUNetManager`).
 
 ## Scratch blocks for step-by-step use
 
@@ -88,17 +88,14 @@ When building or validating a pipeline, **append `# %%` scratch blocks** in `ext
 
 - Add or extend scratch blocks when implementing new pipeline pieces; do not skip straight to production-only code.
 - Mirror Neovim parity: inherited methods expanded, args from last `__main__` call site, `#SECTION:--- name ---` delimiters.
-- After user approves scratch, lift into target module; `git mv` extra → `extra/archived/`.
-- Reference existing scratches: `det3d/extra/retinaunet_v3.py`, `det3d/extra/trainer.py`, `det3d/managers/detector_factory.py` (`__main__`).
+- After user approves scratch, lift into target module; `git mv` extra → `det3d/archived/`.
+- Reference production scratch: `det3d/trainers/trainerdet.py` (`__main__`), `det3d/managers/detector_factory.py` (`__main__`).
 
 ## Quick commands (examples)
 
 ```bash
-# import + synthetic forward
-conda run -n dl python -m det3d.extra.retinaunet_v3
-
 # train-only smoke (adjust paths/indices in scratch or CLI)
-conda run -n dl python run/training/train.py --arch retinaunet_v3 ...
+conda run -n dl python run/training/train.py --arch retinaunet --plan 4 ...
 ```
 
 ## Anti-patterns

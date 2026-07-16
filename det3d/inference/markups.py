@@ -19,8 +19,14 @@ _DETECTION_COLORS_PATH = (
 )
 
 
+_ROI_SHELL = None
+
+
 def _load_roi_shell():
-    return json.loads(_TEMPLATE_PATH.read_text())
+    global _ROI_SHELL
+    if _ROI_SHELL is None:
+        _ROI_SHELL = json.loads(_TEMPLATE_PATH.read_text())
+    return _ROI_SHELL
 
 
 def _label_colors():
@@ -100,14 +106,18 @@ def roi_markup_from_voxel_box(image, box_xyzxyz, label, description="", color=No
     return markup
 
 
-def _prediction_to_roi(pred, case_id, idx, colors):
+def _prediction_to_roi(pred, case_id, idx, colors, source_image=None):
     shell = deepcopy(_load_roi_shell())
-    center, size, orient = bbox_world_ras_to_roi_lps(pred["bbox_world"])
+    orient = list(LPS_ORIENTATION)
+    center, size = roi_center_size_from_voxel_box(source_image, pred["bbox_voxel_full"])
     label = f"{case_id}-{idx + 1}"
+    score = float(pred["score"])
     shell["center"] = center
     shell["size"] = size
     shell["orientation"] = orient
-    shell["description"] = f"label={pred['label']} score={pred['score']:.3f}"
+    shell["description"] = f"{score:.3f}"
+    shell["score"] = score
+    shell["class"] = int(pred["label"])
     cp = shell["controlPoints"][0]
     cp["label"] = label
     cp["position"] = list(center)
@@ -120,13 +130,19 @@ def _prediction_to_roi(pred, case_id, idx, colors):
 def inference_sidecar_to_mrk_payload(sidecar, score_min=0.0):
     """#AI Build Slicer ROI Box markups dict from inference sidecar."""
     case_id = sidecar["case_id"]
+    source_image = sidecar["source_image"]
+    img = (
+        sitk.ReadImage(str(source_image))
+        if isinstance(source_image, (str, Path))
+        else source_image
+    )
     colors = _label_colors()
     markups = []
     idx = 0
     for pred in sidecar["predictions"]:
         if pred["score"] < score_min:
             continue
-        markups.append(_prediction_to_roi(pred, case_id, idx, colors))
+        markups.append(_prediction_to_roi(pred, case_id, idx, colors, img))
         idx += 1
     payload = {"@schema": SCHEMA_URL, "markups": markups}
     return payload
@@ -141,12 +157,13 @@ def save_inference_markups(out_fn, sidecar, score_min=0.0):
 
 def save_voxel_box_markups(out_fn, image, boxes, labels, descriptions=None, colors=None):
     """#AI Write Slicer ROI Box .mrk.json from voxel xyzxyz boxes."""
+    img = sitk.ReadImage(str(image)) if isinstance(image, (str, Path)) else image
     markups = []
     for i, box in enumerate(boxes):
         label = labels[i]
         desc = descriptions[i] if descriptions is not None else ""
         color = colors[i] if colors is not None else None
-        markups.append(roi_markup_from_voxel_box(image, box, label, description=desc, color=color))
+        markups.append(roi_markup_from_voxel_box(img, box, label, description=desc, color=color))
     payload = {"@schema": SCHEMA_URL, "markups": markups}
     save_json(payload, out_fn)
     return out_fn

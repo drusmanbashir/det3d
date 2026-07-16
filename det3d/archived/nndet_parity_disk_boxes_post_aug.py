@@ -31,7 +31,7 @@ from det3d.detection.nndet_train import (
     ensure_nndet_importable,
     xyzxyz_exclusive_batch_to_nndet,
 )
-from det3d.extra.nndet_parity_cp0_4 import (
+from det3d.archived.nndet_parity_cp0_4 import (
     BOXES_ATOL,
     CASE_ID,
     DET3D_PLAN_ID,
@@ -216,7 +216,7 @@ def pre_trafo_oracle_boxes(
     forward_patch_size=None,
     verbose: bool = False,
 ):
-    from det3d.extra.nndet_parity_pre_trafo import run_pre_trafo_stepped
+    from det3d.archived.nndet_parity_pre_trafo import run_pre_trafo_stepped
 
     batch_pre = det3d_batch_to_pre_trafo_input(
         batch, forward_patch_size=forward_patch_size, fg_labels=fg_labels

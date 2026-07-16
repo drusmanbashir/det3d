@@ -6,7 +6,12 @@ from monai.data import MetaTensor
 from monai.transforms import Compose
 from monai.transforms.croppad.array import Crop
 from monai.transforms.croppad.dictionary import ResizeWithPadOrCropd
-from monai.transforms.spatial.dictionary import ConvertPointsToBoxesd, ConvertBoxToPointsd, RandAffined, RandFlipd
+from monai.transforms.spatial.dictionary import (
+    ConvertPointsToBoxesd,
+    ConvertBoxToPointsd,
+    RandAffined,
+    RandAxisFlipd,
+)
 from monai.transforms.utility.array import ApplyTransformToPoints
 from monai.transforms.utils import to_affine_nd
 from monai.utils import fall_back_tuple
@@ -133,14 +138,13 @@ class RandFlipBoxSyncd(MapTransform):
 
     _corner_key = "__box_corners__"
 
-    def __init__(self, spatial_keys, box_key, prob, spatial_axis):
+    def __init__(self, spatial_keys, box_key, prob):
         super().__init__(spatial_keys)
         self.box_key = box_key
         self.ref_key = spatial_keys[0]
-        self.rand_flip = RandFlipd(
+        self.rand_flip = RandAxisFlipd(
             keys=spatial_keys,
             prob=prob,
-            spatial_axis=spatial_axis,
         )
 
     def __call__(self, data):
@@ -346,89 +350,6 @@ class BatchItemCompose:
         return attach_targets(d, self.box_key, self.label_key)
 
 
-class PreTrafoBatchItemCompose:
-    """GPU tail for pre_trafo: spatial aug on image+lm only (no box path)."""
-
-    def __init__(
-        self,
-        tfms,
-        image_key="image",
-        label_key="label",
-        lm_key="lm",
-        instances_key="instances",
-    ):
-        self.tfms = tfms
-        self.image_key = image_key
-        self.label_key = label_key
-        self.lm_key = lm_key
-        self.instances_key = instances_key
-
-    def __call__(self, batch):
-        d = dict(batch)
-        n = d[self.image_key].shape[0]
-        items = []
-        passthrough_keys = (self.label_key, self.lm_key, self.instances_key)
-        for i in range(n):
-            item = {self.image_key: d[self.image_key][i]}
-            for key in passthrough_keys:
-                val = d[key]
-                if isinstance(val, list):
-                    item[key] = val[i]
-                elif torch.is_tensor(val) and val.shape[0] == n:
-                    item[key] = val[i]
-                else:
-                    item[key] = val
-            items.append(self.tfms(item))
-        d[self.image_key] = torch.stack([it[self.image_key] for it in items], 0)
-        d[self.label_key] = [it[self.label_key] for it in items]
-        d[self.lm_key] = torch.stack([it[self.lm_key] for it in items], 0)
-        d[self.instances_key] = [it[self.instances_key] for it in items]
-        return d
-
-
-def build_train_gpu_tail_compose_pre_trafo(
-    *,
-    image_key,
-    lm_key,
-    intensity_tfms,
-    affine3d,
-    patch_size,
-    flip_prob,
-    spatial_prob=1.0,
-):
-    p = float(spatial_prob)
-    spatial_keys = [image_key, lm_key]
-    flip_p = float(flip_prob)
-    return Compose(
-        [
-            RandFlipd(
-                keys=spatial_keys,
-                prob=flip_p,
-                spatial_axis=0,
-            ),
-            RandFlipd(
-                keys=spatial_keys,
-                prob=flip_p,
-                spatial_axis=1,
-            ),
-            RandAffined(
-                keys=spatial_keys,
-                mode=["bilinear", "nearest"],
-                prob=float(affine3d["p"]) * p,
-                rotate_range=affine3d["rotate_range"],
-                scale_range=affine3d["scale_range"],
-            ),
-            SyncMetaAffined(keys=spatial_keys),
-            ResizeWithPadOrCropd(
-                keys=spatial_keys,
-                spatial_size=tuple(int(v) for v in patch_size),
-                lazy=False,
-            ),
-            *intensity_tfms,
-        ]
-    )
-
-
 def build_train_gpu_tail_compose(
     *,
     device,
@@ -461,13 +382,6 @@ def build_train_gpu_tail_compose(
                 spatial_keys=spatial_keys,
                 box_key=box_key,
                 prob=flip_p,
-                spatial_axis=0,
-            ),
-            RandFlipBoxSyncd(
-                spatial_keys=spatial_keys,
-                box_key=box_key,
-                prob=flip_p,
-                spatial_axis=1,
             ),
             RandAffineBoxSyncd(
                 spatial_keys=spatial_keys,

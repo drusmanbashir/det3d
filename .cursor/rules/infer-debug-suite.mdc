@@ -1,0 +1,48 @@
+---
+description: Inference alignment debug — use infer_debug suite when user asks about cascade/patch desync, bbox/seg misalignment, or postprocessing roundtrips
+alwaysApply: false
+---
+
+# Inference debug suite (`det3d/extra/infer_debug/`)
+
+Trigger when the user asks for help debugging **inference alignment**: seg/bbox vs image, cascade post desync, `InvP`/`Fill`/`R`/`Off` suspects, or roundtrip validation.
+
+## First read
+
+[`det3d/extra/infer_debug/README.md`](det3d/extra/infer_debug/README.md)
+
+## Default workflow
+
+1. **Stepwise report** (no model weights):
+   ```bash
+   conda run -n dl python -m det3d.extra.infer_debug.run --fixture pseudo_cuboid
+   conda run -n dl python -m det3d.extra.infer_debug.run --fixture lidc_0001
+   ```
+2. Inspect `{out}/{fixture}/{run_p}/patch_stages.tsv` and `cascade_stages.tsv` — first `pred_fg` or `n_boxes` change pinpoints the transform.
+3. **Pseudo must PASS** (exact fg). **lidc_0001** may CHECK on full fg (spacing resample); per-lesion component masks are the primary assert.
+
+## Fixtures
+
+| Name | Use |
+|------|-----|
+| `pseudo_cuboid` | Stand-in image + 2 cuboid lesions; native spacing = plan spacing |
+| `lidc_0001` | Real `/media/UB/datasets/lidc_all/`; 2 lesions (`ignore_labels=[6]`) |
+
+## Interactive (real model)
+
+[`det3d/inference/cascade.py`](det3d/inference/cascade.py) and [`patch.py`](det3d/inference/patch.py) `__main__` `# %%` blocks — stepwise with `ImageMaskBboxViewer`, GT CC in §6.
+
+## Box-only roundtrips
+
+- [`det3d/extra/bbox_geom_roundtrip.py`](det3d/extra/bbox_geom_roundtrip.py)
+- [`det3d/extra/bbox_lmg_roundtrip.py`](det3d/extra/bbox_lmg_roundtrip.py)
+
+## Known failure signature
+
+[`HANDOFF.md`](HANDOFF.md): missing patch `InvP` → ~60 voxel centroid shift on `lidc_0001`.
+
+## Agent rules
+
+- New debug harness code → `det3d/extra/infer_debug/` (not `test_*.py` unless user asks).
+- Extend suite via `fixtures/` + `streams/`; keep `step_runner.py` generic.
+- Outputs under `/s/agent_rw/tmp/infer_debug/` by default.

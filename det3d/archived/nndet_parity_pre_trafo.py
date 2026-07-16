@@ -29,7 +29,7 @@ from det3d.detection.nndet_train import (
     det3d_semantic_target_seg_from_batch,
     ensure_nndet_importable,
 )
-from det3d.extra.nndet_parity_cp0_4 import (
+from det3d.archived.nndet_parity_cp0_4 import (
     BOXES_ATOL,
     CASE_ID,
     DET3D_PLAN_ID,
@@ -307,7 +307,7 @@ def batch_with_adapter_boxes_from_pre_trafo(
 def load_batch_from_cp5_pipeline(case_id: str, seed: int, fg_labels: list[int]) -> dict:
     """Ld→Rtr→L2→E→Norm item + sidecar bbox/label/instances → collated batch."""
     from det3d.configs.parser import ConfigMakerDet
-    from det3d.extra.nndet_parity_cp5_dataloader import (
+    from det3d.archived.nndet_parity_cp5_dataloader import (
         CP5_KEYS,
         _det3d_item_after_norm,
         _item_to_collated_batch,

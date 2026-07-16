@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import json
@@ -18,6 +19,7 @@ from utilz.stringz import ast_literal_eval
 
 DET_PLAN_LIST_KEYS = (
     "patch_size",
+    "val_patch_size",
     "spacing",
     "fg_labels",
     "returned_layers",
@@ -58,31 +60,43 @@ DET_SHEET_ONLY_KEYS = frozenset(
         "spatial_dims",
         "n_input_channels",
         "class_name",
-        "val_patch_size",
-        "gt_box_mode",
-        "returned_layers",
-        "conv1_t_stride",
-        "base_anchor_shapes",
         "encoder_start_channels",
         "encoder_conv_kernels",
         "encoder_strides",
         "decoder_levels",
         "encoder_max_channels",
-        "cls_loss",
-        "reg_loss",
-        "w_cls",
-        "w_reg",
         "balanced_sampler_pos_fraction",
         "matcher_num_candidates",
         "matcher_center_in_gt",
         "sampler_batch_size_per_image",
         "sampler_pool_size",
         "sampler_min_neg",
+        "cls_loss",
+        "reg_loss",
+        "w_cls",
+        "w_reg",
+        "returned_layers",
+        "conv1_t_stride",
+        "base_anchor_shapes",
         "score_thresh",
         "nms_thresh",
         "detections_per_img",
+        "topk_candidates_per_level",
+        "remove_small_boxes",
+        "optimizer",
+        "momentum",
+        "weight_decay",
+        "nesterov",
+        "benchmark",
+        "deterministic",
+        "scheduler_monitor",
+        "scheduler_patience",
+        "scheduler_mode",
+        "scheduler_frequency",
     }
 )
+
+DET_PLAN_ROW_KEYS = frozenset({"val_patch_size"})
 
 
 def merge_param_dicts(base: dict, overlay: dict) -> dict:
@@ -91,17 +105,34 @@ def merge_param_dicts(base: dict, overlay: dict) -> dict:
     return merged
 
 
-def nndet_plan_paths_file(configurations_dir: Path) -> Path:
-    return configurations_dir / "nndet_plan_paths.yaml"
-
-
-def resolve_nndet_plan_path(mnemonic: str, configurations_dir: Path) -> Path:
+def nndet_conf_root() -> Path:
     from utilz.fileio import load_yaml
 
-    key = Mnemonics.match(mnemonic)
-    paths_file = nndet_plan_paths_file(configurations_dir)
+    cfg = load_yaml(Path(os.environ["FRAN_CONF"]) / "config.yaml")
+    return Path(cfg["nndet_conf"])
+
+
+def nndet_plan_paths_file() -> Path:
+    return nndet_conf_root() / "nndet_plan_paths.yaml"
+
+
+def resolve_nndet_plan_path(mnemonic: str) -> Path:
+    """Map project mnemonic → nnDet plan pickle via Mnemonics + nndet_plan_paths.yaml.
+
+    lits / liver / litsmc → yaml key ``liver``; lidc / lungs / lung → ``lungs``.
+    """
+    from utilz.fileio import load_yaml
+
+    canonical = Mnemonics.match(mnemonic)
+    paths_file = nndet_plan_paths_file()
     paths = load_yaml(paths_file)
-    return Path(paths[key])
+    if canonical not in paths:
+        raise KeyError(
+            f"No nnDet plan pickle for mnemonic {mnemonic!r} (canonical {canonical!r}). "
+            f"Add {canonical}: <path/to/D3V001_3d.pkl> to {paths_file}. "
+            f"Keys present: {sorted(paths)}"
+        )
+    return Path(paths[canonical])
 
 
 class PlanAdvisorDet:
@@ -179,10 +210,20 @@ class PlanAdvisorDet:
 
 
 class ConfigMakerDet(ConfigMaker):
+    """Build experiment configs from the detection Excel workbook and plans_det sheet."""
+
     CONFIG_FILENAME = "experiment_configs_det.xlsx"
     PLANS_SHEET = "plans_det"
     WORKBOOK_SKIP_SHEETS = frozenset({"plans", "plans_dot", "plans_det"})
-    PARAM_SHEETS = ("model_params", "loss_params", "postproc_params", "data_params")
+    PARAM_SHEETS = (
+        "model_params",
+        "nndet",
+        "scheduler_params",
+        "retinanet",
+        "loss_params",
+        "postproc_params",
+        "data_params",
+    )
 
     def resolve_configuration_filename(self):
         base = super().resolve_configuration_filename()
@@ -204,14 +245,9 @@ class ConfigMakerDet(ConfigMaker):
             configs_dict[sheet] = load_config_from_worksheet(settingsfilename, sheet)
         return configs_dict
 
-    def __init__(self, project):
-        self.project = project
-        configuration_mnemonic = project.global_properties["mnemonic"]
-        base_filename = self.resolve_base_configuration_filename()
-        configuration_filename = self.resolve_configuration_filename()
-
+    def _read_plans_det(self, path: Path) -> pd.DataFrame:
         plans = pd.read_excel(
-            configuration_filename,
+            path,
             sheet_name=self.PLANS_SHEET,
             index_col="id",
             keep_default_na=False,
@@ -219,8 +255,23 @@ class ConfigMakerDet(ConfigMaker):
         )
         plans = normalize_tree(plans)
         plans["mnemonic"] = plans["mnemonic"].map(Mnemonics.match)
+        return plans
+
+    def __init__(self, project):
+        self.project = project
+        configuration_mnemonic = project.global_properties["mnemonic"]
+        base_filename = self.resolve_base_configuration_filename()
+        configuration_filename = self.resolve_configuration_filename()
         configuration_mnemonic_standardized = Mnemonics.match(configuration_mnemonic)
-        self.plans = plans.loc[plans["mnemonic"] == configuration_mnemonic_standardized]
+
+        plans = self._read_plans_det(configuration_filename)
+        mnemonic_plans = plans.loc[plans["mnemonic"] == configuration_mnemonic_standardized]
+        if mnemonic_plans.empty and configuration_filename != base_filename:
+            base_plans = self._read_plans_det(base_filename)
+            mnemonic_plans = base_plans.loc[
+                base_plans["mnemonic"] == configuration_mnemonic_standardized
+            ]
+        self.plans = mnemonic_plans
         self.plans = self.plans.drop(columns=["mnemonic"])
         self.plans.insert(0, "plan_id", self.plans.index)
         self.plans = self.plans.set_index("plan_id", drop=False)
@@ -263,14 +314,28 @@ class ConfigMakerDet(ConfigMaker):
                 plan[key] = ast_literal_eval(plan[key])
         return parse_plan_row(plan)
 
+    def _plan_row_extras(self, plan_id: int) -> dict:
+        row = dict(self.plans.loc[plan_id])
+        out = {}
+        for key in DET_PLAN_ROW_KEYS:
+            val = row.get(key)
+            if is_excel_None(val) or val is None:
+                continue
+            if isinstance(val, str) and val.strip().startswith(("[", "(")):
+                val = ast_literal_eval(val)
+            out[key] = val
+        return out
+
     def _build_active_plan(self, plan_id: int) -> dict:
         plan_selected = dict(self.param_defaults())
         plan_row = dict(self.plans.loc[plan_id])
+        plan_row.pop("gt_box_mode", None)
         for key in DET_PLAN_EXCLUDED_KEYS:
             plan_row.pop(key, None)
         for key in DET_SHEET_ONLY_KEYS:
             plan_row.pop(key, None)
         plan_selected.update(plan_row)
+        plan_selected.update(self._plan_row_extras(plan_id))
         for key in DET_PLAN_EXCLUDED_KEYS:
             plan_selected.pop(key, None)
         return self._parse_det_plan(plan_selected)
@@ -300,12 +365,15 @@ class ConfigMakerDet(ConfigMaker):
 
         self.configs["plan_valid"]["patch_size"] = self.configs["plan_train"]["patch_size"]
         self.configs["plan_test"]["patch_size"] = self.configs["plan_train"]["patch_size"]
+        val_extras = self._plan_row_extras(plan_valid)
+        if "val_patch_size" in val_extras:
+            self.configs["plan_valid"]["val_patch_size"] = val_extras["val_patch_size"]
         for plan_key in ("plan_train", "plan_valid", "plan_test"):
             self._apply_src_dims_from_patch_size(self.configs[plan_key])
 
     @staticmethod
     def _apply_src_dims_from_patch_size(plan):
-        patch_size = plan.get("patch_size")
+        patch_size = plan["patch_size"]
         if is_excel_None(patch_size) or patch_size is None:
             return
         plan["src_dims"] = make_src_dims_from_patch_size(patch_size)
@@ -322,4 +390,80 @@ class ConfigMakerDet(ConfigMaker):
                     "RandCrop roi must fit inside shard volume"
                 )
 
-    
+
+# %%
+if __name__ == "__main__":
+    PROJECT = "lidca"
+    PLAN_ID = 2
+    RUN_NAME = "LIDCA-GYRO"
+    CKPT = "/s/fran_storage/checkpoints/lidca/lidc/LIDCA-GYRO/checkpoints/last.ckpt"
+
+# %%
+# SECTION:--- ConfigMakerDet setup (same path as train / infer config) ---
+    from fran.managers import Project
+
+    P = Project(PROJECT)
+    C = ConfigMakerDet(P)
+    C.setup(PLAN_ID)
+    conf = C.configs
+    plan_train = conf["plan_train"]
+    print("ConfigMakerDet project", PROJECT, "plan_id", PLAN_ID)
+
+# %%
+# SECTION:--- plan_train from ckpt vs ConfigMakerDet vs pickle ---
+    import torch
+    from copy import deepcopy
+    from fran.inference.helpers import load_params
+    from nndet.io.load import load_pickle
+    from det3d.managers.helpers.nndet_retinaunet import plan_from_det3d
+
+    params = load_params(RUN_NAME)
+    ckpt_plan_train = params["configs"]["plan_train"]
+    plan_train["fg_labels"] = ckpt_plan_train["fg_labels"]
+    plan_train["labels_all"] = ckpt_plan_train["labels_all"]
+    plan_path = resolve_nndet_plan_path(conf["mnemonic"])
+    pkl_plan = load_pickle(str(plan_path))
+    print("ckpt plan_train decoder_levels", ckpt_plan_train["decoder_levels"])
+    print("excel plan_train decoder_levels", plan_train["decoder_levels"])
+    print("fg_labels (from ckpt, as after TrainerDet label infer)", plan_train["fg_labels"])
+    print("pickle  decoder_levels", pkl_plan["architecture"]["decoder_levels"])
+
+# %%
+# SECTION:--- WITH pickle (old broken path: partial override only) ---
+    plan_with_pkl = deepcopy(pkl_plan)
+    plan_with_pkl["patch_size"] = [int(v) for v in plan_train["patch_size"]]
+    plan_with_pkl["architecture"]["classifier_classes"] = len(plan_train["fg_labels"])
+    plan_with_pkl["architecture"]["seg_classes"] = 1
+    print("WITH pickle decoder_levels", plan_with_pkl["architecture"]["decoder_levels"])
+
+# %%
+# SECTION:--- plan_train only (production build path) ---
+    plan_train_only = plan_from_det3d(plan_train, plan_path=None)
+    print("plan_train only decoder_levels", plan_train_only["architecture"]["decoder_levels"])
+
+# %%
+# SECTION:--- strict ckpt load: pickle path FAIL, plan_train only OK ---
+    from det3d.configs.nndet_bridge import load_nndet_train_cfgs
+    from nndet.ptmodule.retinaunet.v001 import RetinaUNetV001
+
+    model_cfg, trainer_cfg = load_nndet_train_cfgs()
+
+    def _try_strict(plan, label):
+        mod = RetinaUNetV001(model_cfg=model_cfg, trainer_cfg=trainer_cfg, plan=plan)
+        sd = torch.load(CKPT, map_location="cpu", weights_only=False)["state_dict"]
+        prefix = "nndet_module.model._orig_mod."
+        net_sd = {
+            k[len(prefix) :]: v for k, v in sd.items() if k.startswith(prefix)
+        }
+        try:
+            mod.model.load_state_dict(net_sd, strict=True)
+            print(label, "strict load OK")
+        except RuntimeError as exc:
+            print(label, "strict load FAIL:", str(exc).split("\n")[0])
+
+    from copy import deepcopy
+
+    _try_strict(plan_with_pkl, "WITH pickle")
+    _try_strict(plan_train_only, "plan_train only")
+# end PythonMethodScratch
+

@@ -26,7 +26,7 @@ SCRATCH_BATCH_SIZE = 1
 CKPT_TAG = "best"  # best | last
 DET3D_PROJECT = None  # e.g. "lidc_nndet" — stage 7 only
 
-# Populated by stages; import after running stage 0+1: `from det3d.extra.nndet_ckpt_repl import CTX`
+# Populated by stages; import after running stage 0+1: `from det3d.archived.nndet_ckpt_repl import CTX`
 CTX: dict = {}
 
 

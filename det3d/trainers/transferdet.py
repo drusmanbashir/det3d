@@ -18,6 +18,7 @@ from utilz.stringz import headline
 from det3d.architectures.create_detector import arch_from_conf
 from det3d.managers.detector_factory import resolve_detector_manager
 from det3d.trainers.trainerdet import TrainerDet
+from det3d.trainers.trainerdet_rt import TrainerDetRunThrough
 
 
 class TrainerDetTransfer(TrainerDet):
@@ -72,9 +73,10 @@ class TrainerDetTransfer(TrainerDet):
             headline(
                 "override_dm_checkpoint has no effect in transfer because no datamodule checkpoint is loaded."
             )
+        self.configs["model_params"]["max_epochs"] = int(epochs)
+        self.D = self.init_dm()
         source_manager = self.load_source_trainer(map_location="cpu")
         self.model_source = source_manager
-        self.D = self.init_dm()
         self.N = self.init_trainer(epochs)
         self.update_model()
         del self.model_source
@@ -263,7 +265,7 @@ class TrainerDetTransfer(TrainerDet):
             raise
 
 
-class TrainerDetTransferRT(TrainerDetTransfer):
+class TrainerDetTransferRT(TrainerDetTransfer, TrainerDetRunThrough):
     """Transfer det training in run-through mode (mirrors fran TrainerTransferRT)."""
 
     def __init__(

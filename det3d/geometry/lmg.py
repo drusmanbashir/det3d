@@ -4,26 +4,22 @@ import torch
 from label_analysis.geometry_pt import LabelMapGeometryPT
 
 
-def voxel_start_size_to_gt_box(bbox, gt_box_mode):
-    """ITK nbrhood bbox: [index_x, index_y, index_z, size_x, size_y, size_z] voxels."""
+def voxel_start_size_to_xyzxyz(bbox):
+    """ITK nbrhood bbox [ix,iy,iz,sx,sy,sz] → patch-voxel xyzxyz [x1,y1,z1,x2,y2,z2]."""
     if isinstance(bbox, str):
         bbox = literal_eval(bbox)
     x0, y0, z0, sx, sy, sz = [float(x) for x in bbox]
-    if gt_box_mode == "cccwhd":
-        return [x0 + sx / 2, y0 + sy / 2, z0 + sz / 2, sx, sy, sz]
-    if gt_box_mode == "xyzxyz":
-        return [x0, y0, z0, x0 + sx, y0 + sy, z0 + sz]
-    raise ValueError(f"unsupported gt_box_mode {gt_box_mode}")
+    return [x0, y0, z0, x0 + sx, y0 + sy, z0 + sz]
 
 
 class DetectionLabelMapGeometryPT(LabelMapGeometryPT):
-    def to_voxel_detection_records(self, gt_box_mode):
+    def to_voxel_detection_records(self):
         boxes = []
         labels = []
         for _, row in self.nbrhoods.iterrows():
             boxes.append(
                 torch.tensor(
-                    voxel_start_size_to_gt_box(row["bbox"], gt_box_mode),
+                    voxel_start_size_to_xyzxyz(row["bbox"]),
                     dtype=torch.float32,
                 )
             )

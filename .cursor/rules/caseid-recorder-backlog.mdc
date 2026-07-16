@@ -1,0 +1,32 @@
+---
+description: CaseID recorder backlog — CaseIDRecorderSnapshotDet, per-case val metrics, whole-image validation only, patch_stream noise. Read when revisiting caseid recorder, case performance tracking, or run-through snapshot callbacks.
+alwaysApply: false
+---
+
+# CaseID recorder (det3d backlog)
+
+**Keywords:** caseid recorder, CaseIDRecorder, CaseIDRecorderSnapshotDet, per-case validation, whole image validation, patch_stream, run-through snapshot.
+
+## Canonical plan
+
+Full context + phases: [`.cursor/plans/lidca-quark-runthrough-resume.md`](../plans/lidca-quark-runthrough-resume.md) — **Phase B**.
+
+## Intent
+
+Track case_ids that perform better/worse in validation. Segmentation + patch sampling (`valid_impl=patch_stream`, varying patch sizes) was too noisy; recorder should run only when an **entire image** is evaluated in a val epoch.
+
+## Do not (default)
+
+- Wire `CaseIDRecorderSnapshotDet` into `TrainerDetRT` or standard patch-stream val without a whole-image gate.
+- Copy fran `TrainerRT`’s unconditional `case_id_recorder_cls = CaseIDRecorderSnapshot` for det patch training.
+
+## When implementing
+
+1. Read [`det3d/callback/case_recorder_det.py`](../../det3d/callback/case_recorder_det.py), fran `CaseIDRecorderSnapshot`, and val paths in [`valid_patch_stream.py`](../../det3d/managers/data/valid_patch_stream.py), [`retinaunet.py`](../../det3d/managers/retinaunet.py).
+2. Subclass or trainer hook at **lower priority** — enable only for whole-image val (not per-patch `patch_stream` unless aggregated to full volume).
+3. Keep `TrainerDetRT.case_id_recorder_cls = None` until gate exists.
+
+## Related
+
+- Run-through resume (Phase A, no CaseID recorder): same plan file, Phase A.
+- `snapshot_freq` on `DataManagerRTDet` ≠ CaseIDRecorder callback; DM snapshot cadence can exist without Phase B.

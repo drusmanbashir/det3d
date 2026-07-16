@@ -16,14 +16,14 @@ from det3d.detection.nndet_train import (
     det3d_semantic_target_seg_from_batch,
     ensure_nndet_importable,
 )
-from det3d.extra.nndet_parity_cp0_4 import (
+from det3d.archived.nndet_parity_cp0_4 import (
     CASE_ID,
     DET3D_PLAN_ID,
     DET3D_PROJECT,
     LBD_FOLDER,
     PARITY_SEED,
 )
-from det3d.extra.nndet_parity_disk_boxes_post_aug import (
+from det3d.archived.nndet_parity_disk_boxes_post_aug import (
     _fg_labels_from_manifest,
     find_case_idx,
     run_disk_box_pipeline,
@@ -117,7 +117,7 @@ if __name__ == "__main__":
 
 # %%
 #SECTION:--- semantic post-aug gate ---
-    from det3d.extra.nndet_parity_disk_boxes_post_aug import load_sidecar_instances
+    from det3d.archived.nndet_parity_disk_boxes_post_aug import load_sidecar_instances
 
     INST = load_sidecar_instances(CASE_ID)
     APPROVED = gate_semantic_seg_post_aug(

@@ -1,0 +1,86 @@
+# Local-only sources for nnDetection plan silos (no downloads).
+# First existing source root with matched image/label pairs wins.
+
+liver:
+  task: Task003_Liver
+  layout: decathlon
+  prepare_project: Task001_Decathlon
+  prepare_args: Task003_Liver
+  sources:
+    - root: /s/datasets/lits_segs_improved
+      labels_subdir: lms_3as2
+    - root: /s/datasets/lits_segs_improved
+      labels_subdir: lms
+    - root: /s/datasets/lits_segs_improved
+      labels_subdir: lms_singlelesionclass
+    - root: /media/UB/datasets/lits_segs_improved
+      labels_subdir: lms_3as2
+  dataset_json:
+    name: Liver
+    description: Local LITS / MSD liver label maps
+    reference: lits_segs_improved
+    modality: {"0": "CT"}
+    labels:
+      "0": background
+      "1": liver
+      "2": cancer
+
+kidneys:
+  task: Task011_Kits
+  layout: kits_splitted
+  # label_remap: applied at runtime in convert_seg2det_local (multiprocess); source lms untouched
+  label_remap:
+    3: 2  # KiTS23 cyst → nnDet KiTS tumor class
+  sources:
+    - root: /media/UB/datasets/kits23
+    - root: /s/fran_storage/datasets/raw_data/kits23
+  case_prefix: case_
+  image_pattern: "{case_id}_0000.nii.gz"
+  label_pattern: "{case_id}.nii.gz"
+  dataset_json:
+    name: Kits
+    task: Task011_Kits
+    target_class: null
+    test_labels: true
+    seg2det_stuff: [1]
+    seg2det_things: [2]
+    min_size: 3.0
+    labels: {"0": "lesion"}
+    labels_stuff: {"1": "kidney"}
+    modalities: {"0": "CT"}
+    dim: 3
+
+pancreas:
+  task: Task007_Pancreas
+  layout: decathlon
+  prepare_project: Task001_Decathlon
+  prepare_args: Task007_Pancreas
+  sources:
+    - root: /media/UB/datasets/pancreasmsd07
+    - root: /s/fran_storage/datasets/raw_data/pancreas
+  dataset_json:
+    name: Pancreas
+    description: Local MSD Task07 pancreas
+    reference: pancreasmsd07
+    modality: {"0": "CT"}
+    labels:
+      "0": background
+      "1": pancreas
+      "2": cancer
+
+colon:
+  task: Task010_Colon
+  layout: decathlon
+  prepare_project: Task001_Decathlon
+  prepare_args: Task010_Colon
+  sources:
+    - root: /media/UB/datasets/colonmsd10
+    - root: /s/fran_storage/datasets/raw_data/colon
+  dataset_json:
+    name: Colon
+    description: Local MSD Task10 colon
+    reference: colonmsd10
+    modality: {"0": "CT"}
+    labels:
+      "0": background
+      "1": cancer

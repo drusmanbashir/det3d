@@ -18,8 +18,8 @@ import torch
 from monai.transforms import ScaleIntensityRanged
 
 from det3d.detection.nndet_train import det3d_batch_to_nndet
-from det3d.extra.nndet_native_lbd import setup_nndet_env
-from det3d.extra.nndet_parity_cp0_4 import (
+from det3d.archived.nndet_native_lbd import setup_nndet_env
+from det3d.archived.nndet_parity_cp0_4 import (
     BOXES_ATOL,
     CASE_ID,
     DET3D_PLAN_ID,

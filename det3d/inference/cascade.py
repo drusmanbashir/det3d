@@ -1,42 +1,34 @@
 from copy import deepcopy
-from pathlib import Path
 
+from monai.transforms import Compose
+from monai.transforms.spatial.dictionary import ConvertBoxToPointsd, ConvertPointsToBoxesd
+import numpy as np
 import torch
+from det3d.inference.post import InvPreprocessBoxd, PackRetinaNetPredsd, PackRetinaUNetPredsd, inverse_preprocess_box
 from fran.data.dataset import FillBBoxPatchesd
-from fran.inference.cascade import CascadeInferer
+from fran.inference.cascade import CascadeInferer as FranCascadeInferer
 from fran.transforms.inferencetransforms import MakeWritabled, SqueezeListofListsd
 from fran.transforms.spatialtransforms import RestoreOriginalOrientationd
-from monai.apps.detection.transforms.dictionary import (
-    AffineBoxToWorldCoordinated,
-    ClipBoxToImaged,
-    ConvertBoxModed,
-)
 from monai.data.meta_tensor import MetaTensor
-from monai.transforms.io.dictionary import SaveImaged
+from monai.transforms.post.dictionary import AsDiscreted
+from monai.transforms.utility.dictionary import ApplyTransformToPointsd, CastToTyped
 
-from det3d.inference.patch import DetPatchInferer
-from det3d.inference.transforms import (
-    ArgmaxSegd,
-    AttachInferenceMetad,
-    AttachPredSegPathd,
-    CopyBoxKeyd,
-    DustSegd,
-    OffsetBoxByBBoxd,
-    PredBoxToNativeCropViaPointsd,
-    PreservePreTfmBoxd,
-    SaveInferenceMarkupsd,
-    SaveInferenceSidecard,
-    ScaleBoxToCropNatived,
-    ScaleSegToCropNatived,
-    UseFullMetaForImaged,
-    WrapPredSegMetad,
-)
+from utilz.imageviewers import ImageMaskBboxViewer
 
-_SEG_SAVE_KEYS = ",Sav,SavM,RestoreSeg,WriteSeg,SaveSeg,SegPath"
-_BOX_WORLD_KEYS = ",Off,VoxCopy,FullMeta,World,WorldCopy,Mode,Meta"
+ 
+def _finalize_postproc_keys(postproc, postproc_safe, *, safe_mode, k_largest, save):
+    chain = postproc_safe if safe_mode else postproc
+    if k_largest is not None:
+        parts = chain.split(",")
+        if "F" in parts:
+            parts.insert(parts.index("F"), "K")
+            chain = ",".join(parts)
+    if not save:
+        chain = ",".join(k for k in chain.split(",") if k != "S")
+    return chain
 
 
-def _decollate_image(img, batch_image):
+def decollate_image(img, batch_image):
     if img.dim() == 5:
         img = img[0]
     img = img.detach().cpu()
@@ -47,18 +39,66 @@ def _decollate_image(img, batch_image):
     return img
 
 
-class DetCascadeInferer(CascadeInferer):
-    keys_postproc = "Pre,SqL,Clip,Scale,Off,VoxCopy,FullMeta,World,WorldCopy,Mode,Meta"
-    keys_postproc_safe = "SqL,Meta"
-    pred_run_p = None
+class DetBBoxCascadeInferer(FranCascadeInferer):
+    """Localiser bbox → det patch → full-volume boxes (RetinaNet)."""
+
+    keys_postproc = "SqL,Off,BoxR,S"
+
+    def __init__(
+        self,
+        run_w,
+        run_p,
+        localiser_labels,
+        project_title=None,
+        devices=(0,),
+        safe_mode=False,
+        patch_overlap=0.2,
+        profile=None,
+        save=True,
+        save_localiser=True,
+        k_largest=None,
+        debug=False,
+    ):
+        from fran.inference.helpers import load_params
+        from fran.utils.misc import parse_devices
+
+        assert profile in [None, "dataloading", "prediction", "all"]
+        self.run_w = run_w
+        self.run_p = run_p
+        self.localiser_labels = localiser_labels
+        self.project_title = project_title
+        self.devices = devices
+        self.safe_mode = safe_mode
+        self.patch_overlap = patch_overlap
+        self.profile = profile
+        self.save_channels = False
+        self.save = save
+        self.save_localiser = save_localiser
+        self.k_largest = k_largest
+        self.debug = debug
+        self.merge_touching_labels = None
+        self.pred_run_p = None
+        self.localiser_overwrite = False
+        self.device = parse_devices(devices)
+        self.params = load_params(run_p)
+        self.P = self.setup_patch_inferer()
+        self.predictions_folder = self.P.project.predictions_folder
+        self.W = self.setup_localiser_inferer()
 
     @property
     def output_folder(self):
         run_name = self.pred_run_p if self.pred_run_p is not None else self.run_p
         return self.predictions_folder / run_name
 
+    def cuda_clear(self):
+        if hasattr(self.P, "model"):
+            del self.P.model
+        torch.cuda.empty_cache()
+
     def setup_patch_inferer(self):
-        return DetPatchInferer(
+        from det3d.inference.patch import DetPatchRetinaNet
+
+        return DetPatchRetinaNet(
             run_name=self.run_p,
             project_title=self.project_title,
             devices=self.devices,
@@ -70,14 +110,13 @@ class DetCascadeInferer(CascadeInferer):
         )
 
     def decollate_patches(self, pa, bboxes, full_metas=None):
-        run_name = self.P.run_name
         output = []
-        for case_idx, batch in enumerate(pa[run_name]):
+        for case_idx, batch in enumerate(pa[self.P.run_name]):
             batch_img = batch["image"]
             bb = bboxes[case_idx]
             crop_shape = batch["crop_spatial_shape"]
             item = {
-                "image": _decollate_image(batch_img, batch_img),
+                "image": decollate_image(batch_img, batch_img),
                 "pred_box": batch["pred_box"].detach().cpu(),
                 "pred_label": batch["pred_label"].detach().cpu(),
                 "pred_score": batch["pred_score"].detach().cpu(),
@@ -91,163 +130,61 @@ class DetCascadeInferer(CascadeInferer):
         return output
 
     def patch_prediction(self, data):
-        sources = []
+        from fran.inference import helpers
+
+        sources = helpers.image_paths_from_data(data)
         crop_shapes = []
         for dat in data:
-            sources.append(dat["image"].meta["filename_or_obj"])
             crop_shapes.append(tuple(int(v) for v in dat["image"].shape[-3:]))
-        preds = super().patch_prediction(data)
+        preds = FranCascadeInferer.patch_prediction(self, data)
         for i, batch in enumerate(preds[self.P.run_name]):
             batch["source_image"] = sources[i]
             batch["crop_spatial_shape"] = crop_shapes[i]
         return preds
 
     def create_postprocess_transforms(self):
-        plan = self.params["configs"]["plan_train"]
-        gt_box_mode = plan["gt_box_mode"]
-        score_min = float(plan["score_thresh"])
-        ik = "image"
-        bk = "pred_box"
-        lk = "pred_label"
-        sk = "pred_score"
+        from det3d.inference.post import BoxRd, Offd, SaveDetOutputd
+
         self.postprocess_transforms_dict = {
-            "Pre": PreservePreTfmBoxd(box_key=bk, dst_key="pred_box_pre_tfm"),
             "SqL": SqueezeListofListsd(keys=["bounding_box"]),
-            "Clip": ClipBoxToImaged(
-                box_keys=[bk],
-                label_keys=[lk, sk],
-                box_ref_image_keys=ik,
-                remove_empty=True,
-            ),
-            "Scale": ScaleBoxToCropNatived(box_keys=[bk], image_key=ik),
-            "Off": OffsetBoxByBBoxd(box_keys=[bk]),
-            "VoxCopy": CopyBoxKeyd(src_key=bk, dst_key="pred_box_voxel"),
-            "FullMeta": UseFullMetaForImaged(keys=[ik]),
-            "World": AffineBoxToWorldCoordinated(
-                box_keys=[bk],
-                box_ref_image_keys=ik,
-                affine_lps_to_ras=True,
-            ),
-            "WorldCopy": CopyBoxKeyd(src_key=bk, dst_key="pred_box_world"),
-            "Mode": ConvertBoxModed(
-                box_keys=[bk],
-                src_mode="xyzxyz",
-                dst_mode=gt_box_mode,
-            ),
-            "Meta": AttachInferenceMetad(
-                box_keys=[bk],
+            "Off": Offd(box_keys=["pred_box"]),
+            "BoxR": BoxRd(box_key="pred_box"),
+            "S": SaveDetOutputd(
+                output_dir=self.output_folder,
                 run_w=self.run_w,
                 run_p=self.run_p,
-            ),
-            "Sav": SaveInferenceSidecard(
-                box_keys=[bk],
-                label_key=lk,
-                score_key=sk,
-                output_dir=self.output_folder,
-                world_box_key="pred_box_world",
-                score_min=score_min,
-            ),
-            "SavM": SaveInferenceMarkupsd(
-                label_key=lk,
-                score_key=sk,
-                output_dir=self.output_folder,
-                world_box_key="pred_box_world",
-                score_min=score_min,
+                write_seg=False,
             ),
         }
 
     def set_postprocess_tfms_keys(self):
-        if self.safe_mode is False:
-            self.postprocess_tfms_keys = self.keys_postproc
-        else:
-            self.postprocess_tfms_keys = self.keys_postproc_safe
-        if self.save is True:
-            self.postprocess_tfms_keys += ",Sav,SavM"
+        cls = type(self)
+        self.keys_postproc = _finalize_postproc_keys(
+            cls.keys_postproc,
+            cls.keys_postproc,
+            safe_mode=False,
+            k_largest=self.k_largest,
+            save=self.save,
+        )
+        self.postprocess_tfms_keys = self.keys_postproc
 
-    def postprocess_iterate(self, batch):
-        if isinstance(batch, list):
-            batch = batch[0]
-        bbox = batch["bounding_box"]
-        if isinstance(bbox[0], list):
-            batch["bounding_box"] = bbox[0]
-        for tfm in self.postprocess_transforms:
-            batch = tfm(batch)
-        return batch
-
-    def postprocess(self, preds):
-        outputs = []
-        for item in preds:
-            if self.debug is False:
-                outputs.append(self.postprocess_compose(item))
-            else:
-                outputs.append(self.postprocess_iterate(item))
-        return outputs
-
-    def process_lbd_sublist(self, pt_paths):
-        """Patch inferer + postprocess on pre-cropped LBD .pt (no localiser)."""
-        from det3d.inference.hybrid_lbd import load_lbd_pt_patch_data
-
-        self.create_and_set_postprocess_transforms()
-        data = load_lbd_pt_patch_data(pt_paths)
-        self.bboxes = [dat["bounding_box"] for dat in data]
-        full_metas = [dat["full_meta"] for dat in data]
-        pred_patches = self.patch_prediction(data)
-        decollated = self.decollate_patches(pred_patches, self.bboxes, full_metas)
-        output = self.postprocess(decollated)
-        self.cuda_clear()
-        return output
-
-    def run_lbd(self, pt_paths, chunksize=12, overwrite=False):
-        """Run DetPatchInferer on LBD .pt volumes (same path as cascade crop, no localiser)."""
-        from pathlib import Path
-
-        from utilz.helpers import chunks
-        from utilz.listify import listify
-
-        self.setup()
-        pt_paths = [Path(p) for p in listify(pt_paths)]
-        if overwrite is False:
-            out = Path(self.output_folder)
-            pt_paths = [p for p in pt_paths if not (out / f"{p.stem}.json").exists()]
-        if len(pt_paths) == 0:
-            raise SystemExit("Stopping execution - no LBD cases remain after filtering")
-        output = None
-        for sublist in chunks(pt_paths, n_sized_chunks=chunksize):
-            output = self.process_lbd_sublist(sublist)
-        return output
+    def set_postprocess_transforms(self):
+        self.postprocess_transforms = self.tfms_from_dict(
+            self.keys_postproc, self.postprocess_transforms_dict
+        )
+        self.postprocess_compose = Compose(self.postprocess_transforms)
 
 
-class DetCascadeInfererRetinaUNet(DetCascadeInferer):
-    """TotalSeg localiser + RetinaUNet; bbox sidecar JSON + seg-head pred_seg NIfTI."""
+class DetSegBBoxCascadeInferer(DetBBoxCascadeInferer):
+    """Localiser bbox → RetinaUNet patch → full-volume seg + boxes."""
 
-    keys_postproc = (
-        "Pre,SqL,BoxPts,Off,Reorder,SegScale,Argmax,WrapSeg,FillSeg,Dust,"
-        "VoxCopy,FullMeta,World,WorldCopy,Mode,Meta"
-    )
-    keys_postproc_safe = (
-        "Pre,SqL,BoxPts,Off,Reorder,SegScale,Argmax,WrapSeg,FillSeg,Dust"
-    )
+    keys_postproc = "SqL,MR,A,Int,W,F,R,Off,BoxR,S"
+    keys_postproc_safe = "SqL,MR,W,F,R,Off,BoxR,S"
 
     def setup_patch_inferer(self):
-        from det3d.inference.patch import DetPatchInfererRetinaUNet
+        from det3d.inference.patch import DetPatchRetinaUNet
 
-        return DetPatchInfererRetinaUNet(
-            run_name=self.run_p,
-            project_title=self.project_title,
-            devices=self.devices,
-            patch_overlap=self.patch_overlap,
-            safe_mode=self.safe_mode,
-            params=self.params,
-            debug=self.debug,
-            save=False,
-            keys_preproc="E,S,Norm,Dtype",
-            keys_postproc="Pack,SqL",
-        )
-
-    def setup_lbd_patch_inferer(self):
-        from det3d.inference.patch import DetPatchInfererRetinaUNetLBD
-
-        return DetPatchInfererRetinaUNetLBD(
+        return DetPatchRetinaUNet(
             run_name=self.run_p,
             project_title=self.project_title,
             devices=self.devices,
@@ -259,347 +196,304 @@ class DetCascadeInfererRetinaUNet(DetCascadeInferer):
         )
 
     def decollate_patches(self, pa, bboxes, full_metas=None):
-        output = super().decollate_patches(pa, bboxes, full_metas)
-        run_name = self.P.run_name
-        for i, batch in enumerate(pa[run_name]):
-            output[i]["pred_seg"] = batch["pred_seg"].detach().cpu()
-        return output
-
-    def run_lbd(self, pt_paths, chunksize=12, overwrite=False):
-        """Run DetPatchInfererRetinaUNetLBD on LBD .pt volumes (no localiser)."""
-        from pathlib import Path
-
-        from utilz.helpers import chunks
-        from utilz.listify import listify
-
-        self.P = self.setup_lbd_patch_inferer()
-        self.predictions_folder = self.P.project.predictions_folder
-        pt_paths = [Path(p) for p in listify(pt_paths)]
-        if overwrite is False:
-            out = Path(self.output_folder)
-            pt_paths = [p for p in pt_paths if not (out / f"{p.stem}.json").exists()]
-        if len(pt_paths) == 0:
-            raise SystemExit("Stopping execution - no LBD cases remain after filtering")
-        output = None
-        for sublist in chunks(pt_paths, n_sized_chunks=chunksize):
-            output = self.process_lbd_sublist(sublist)
+        output = []
+        for case_idx, batch in enumerate(pa[self.P.run_name]):
+            batch_img = batch["image"]
+            bb = bboxes[case_idx]
+            crop_shape = batch["crop_spatial_shape"]
+            pred = batch["pred"].detach().cpu()
+            if pred.ndim == 5:
+                pred = pred[0]
+            if pred.ndim == 3:
+                pred = pred.unsqueeze(0)
+            item = {
+                self.run_p: pred,
+                "pred_box": batch["pred_box"].detach().cpu(),
+                "pred_label": batch["pred_label"].detach().cpu(),
+                "pred_score": batch["pred_score"].detach().cpu(),
+                "bounding_box": bb,
+                "source_image": batch["source_image"],
+                "crop_spatial_shape": crop_shape,
+            }
+            if full_metas is not None:
+                item["full_meta"] = full_metas[case_idx]
+            output.append(item)
         return output
 
     def create_postprocess_transforms(self):
-        from det3d.inference.transforms import NndetBoxToXyzxyzd
+        FranCascadeInferer.create_postprocess_transforms(self)
+        from det3d.inference.post import BoxRd, Offd, SaveDetOutputd
 
-        super().create_postprocess_transforms()
-        plan = self.params["configs"]["plan_train"]
-        dust_mm = plan["dusting_mm"]
-        if dust_mm is None:
-            dust_mm = 1.0
-        else:
-            dust_mm = float(dust_mm)
-        ik = "image"
-        bk = "pred_box"
-        sk = "pred_seg"
-        del self.postprocess_transforms_dict["Scale"]
-        del self.postprocess_transforms_dict["Clip"]
-        self.postprocess_transforms_dict["BoxPts"] = PredBoxToNativeCropViaPointsd(
-            box_key=bk,
-            image_key=ik,
-            box_mode="nndet",
-        )
-        self.postprocess_transforms_dict["Off"] = OffsetBoxByBBoxd(
-            box_keys=[bk],
-            box_mode="nndet",
-        )
-        self.postprocess_transforms_dict["Reorder"] = NndetBoxToXyzxyzd(box_key=bk)
-        self.postprocess_transforms_dict["SegScale"] = ScaleSegToCropNatived(
-            seg_key=sk,
-            image_key=ik,
-        )
-        self.postprocess_transforms_dict["Argmax"] = ArgmaxSegd(seg_key=sk)
-        self.postprocess_transforms_dict["WrapSeg"] = WrapPredSegMetad(
-            seg_key=sk, image_key=ik
-        )
-        self.postprocess_transforms_dict["FillSeg"] = FillBBoxPatchesd(keys=[sk])
-        self.postprocess_transforms_dict["Dust"] = DustSegd(seg_key=sk, dust_mm=dust_mm)
-        self.postprocess_transforms_dict["RestoreSeg"] = RestoreOriginalOrientationd(
-            keys=[sk]
-        )
-        self.postprocess_transforms_dict["WriteSeg"] = MakeWritabled(keys=[sk])
-        self.postprocess_transforms_dict["SaveSeg"] = SaveImaged(
-            keys=[sk],
+        self.postprocess_transforms_dict["SqL"] = SqueezeListofListsd(keys=["bounding_box"])
+        self.postprocess_transforms_dict["Off"] = Offd(box_keys=["pred_box"])
+        self.postprocess_transforms_dict["BoxR"] = BoxRd(box_key="pred_box")
+        self.postprocess_transforms_dict["S"] = SaveDetOutputd(
             output_dir=self.output_folder,
-            separate_folder=False,
-            output_dtype=torch.uint8,
-            output_postfix="",
-            resample=False,
+            run_w=self.run_w,
+            run_p=self.run_p,
+            write_seg=True,
         )
-        self.postprocess_transforms_dict["SegPath"] = AttachPredSegPathd(seg_key=sk)
 
     def set_postprocess_tfms_keys(self):
-        if self.safe_mode:
-            self.postprocess_tfms_keys = self.keys_postproc_safe
-            if self.save:
-                self.postprocess_tfms_keys += _BOX_WORLD_KEYS + _SEG_SAVE_KEYS
-        else:
-            self.postprocess_tfms_keys = self.keys_postproc
-            if self.save:
-                self.postprocess_tfms_keys += _SEG_SAVE_KEYS
+        cls = type(self)
+        self.keys_postproc = _finalize_postproc_keys(
+            cls.keys_postproc,
+            cls.keys_postproc_safe,
+            safe_mode=self.safe_mode,
+            k_largest=self.k_largest,
+            save=self.save,
+        )
+        self.postprocess_tfms_keys = self.keys_postproc
 
 
-# %%
-# SECTION:-------------------- setup-------------------------------------------------------------------------------------- <CR>
 if __name__ == "__main__":
+    from pathlib import Path
+
+    import SimpleITK as sitk
+    import torch
+    from fran.inference import helpers
     from fran.inference.cascade import img_bbox_collated
-    from fran.inference.helpers import load_images_nifti
-    from fran.utils.common import COMMON_PATHS
+    from fran.inference.common_vars import *
+    from label_analysis.geometry_pt import LabelMapGeometryPT
     from utilz.fileio import load_yaml
     from utilz.helpers import pp
     from utilz.imageviewers import ImageBBoxViewer, ImageMaskViewer
 
-    fldr = Path("/media/UB/datasets/lidc_all/images")
-    imgs = [Path("/media/UB/datasets/lidc_all/images/lidc_0008.nii.gz")]
-    imgs = list(fldr.glob("*.nii.gz"))
+    from fran.utils.common import COMMON_PATHS
 
-# %%
+    devices = [0]
+    safe_mode = True
+    patch_overlap = 0.5
+    overwrite = True
+    debug_ = False
+    chunksize = 1
+
     def default_run_w():
         fn = Path(COMMON_PATHS["cold_storage_folder"]) / "conf" / "best_runs.yaml"
         return load_yaml(fn)["totalseg"]["whole"]["runs"][0]
 
-    En = DetCascadeInfererRetinaUNet(
-        run_w=default_run_w(),
-        run_p="LIDCA-GYRO",
-        project_title="lidca",
-        devices=[1],
-        localiser_labels=[6],
-        safe_mode=True,
-        patch_overlap=0.5,
+
+# %%
+# SECTION:-------------------- LIDC cascade — 0 config -------------------------------------------------------------------
+    run_w = "TOTALSEG-NJUGU"
+    run_p = "LIDCA-QUARK"
+    localiser_labels = [6]
+    project_title = "lidca"
+
+    lidc_all_fldr = Path("/media/UB/datasets/lidc_all/images")
+    lidc_all_lm = Path("/media/UB/datasets/lidc_all/lms")
+    fldr_k = Path("/s/xnat_shadow/misc/images")
+    imgs_k = sorted(fldr_k.glob("*.nii.gz"), key=lambda p: p.stat().st_mtime)
+
+
+# %%
+# SECTION:-------------------- LIDC cascade — 1 inferer -----------------------------------------------------------------
+
+    imgs = sorted(lidc_all_fldr.glob("*.nii.gz"))
+    case_id = "misc_00008"
+    print(imgs)
+    En = DetSegBBoxCascadeInferer(
+        run_w=run_w,
+        run_p=run_p,
+        project_title=project_title,
+
+        devices=devices,
+        localiser_labels=localiser_labels,
+        safe_mode=safe_mode,
+        patch_overlap=patch_overlap,
         save=True,
-        debug=False,
+        save_localiser=False,
+        debug=debug_,
     )
-# %%
-    preds = En.run(imgs, chunksize=4, overwrite=True)
-# %%
-    imgs_pt = load_images_nifti(imgs)
-    img = imgs_pt[0]["image"]
+    print("patch postproc", En.P.keys_postproc)
+    print("cascade postproc", En.keys_postproc)
 
 # %%
-    preds[0].keys()
-    lm = preds[0]["pred_seg"][0]
-    # ImageMaskViewer([img, lm],'im')
-    bbo = preds[0]["pred_box_voxel"]
-    scores = preds[0]["pred_score"]
-    idx = preds[0]["pred_score"].sort(descending=True)
-
-    scores[idx.indices]
-    print(bbo)
-    bbox = bbo[idx.indices[0]]
-    ImageBBoxViewer(img, bbox)
-
+    # imgs = imgs[:10]
+    imgs= imgs_k
+    imgs = [p for p in imgs_k if case_id in p.name]
+    preds = En.run(imgs, chunksize=chunksize, overwrite=overwrite)
 # %%
-    data = imgs_pt
-# %%
-
-    # /home/ub/code/det3d/det3d/inference/cascade.py  # T:block_donor|/home/ub/code/det3d/det3d/inference/cascade.py
-# SECTION:-------------------- patch_prediction --------------------------------------------------------------------------------------  # T:block_meta|DetCascadeInfererRetinaUNet.patch_prediction <CR>
-    sources = []
-    crop_shapes = []
-    dat = next(iter(data))  # T:loop_probe|for dat in data:
-    sources.append(
-        dat["image"].meta["filename_or_obj"]
-    )  # T:indent|    sources.append(dat["image"].meta["filename_or_obj"])
-    crop_shapes.append(
-        tuple(int(v) for v in dat["image"].shape[-3:])
-    )  # T:indent|    crop_shapes.append(tuple(int(v) for v in dat["image"].shape[-3:]))
-# %%
-    if hasattr(En.W, "model"):  # T:self_ref|if hasattr(self.W, "model"):
-        del En.W.model  # T:self_ref|    del self.W.model
-    torch.cuda.empty_cache()
-# %%
-    print("Starting patch data prep and prediction")
-    preds_all_runs = {}
-    preds_all_runs[
-        En.P.run_name
-    ] = []  # T:self_ref|preds_all_runs[self.P.run_name] = []
-    En.P.setup()  # T:self_ref|self.P.setup()
-    En.P.prepare_data(
-        data=data, collate_fn=img_bbox_collated
-    )  # T:self_ref|self.P.prepare_data(data=data, collate_fn=img_bbox_collated)
-    En.P.create_and_set_postprocess_transforms()  # T:self_ref|self.P.create_and_set_postprocess_transforms()
-    batch = next(iter(En.P.predict()))  # T:loop_probe|for batch in self.P.predict():
-# %%
-    batch.keys()
-    img = batch["image"][0][0]
-    box = batch["merged_boxes"][0]
-# %%
-    monai = torch.empty_like(box)
-    monai[0] = box[0]
-    monai[1] = box[3]
-    monai[2] = box[2]
-    monai[3] = box[1]
-    monai[4] = box[4]
-    monai[5] = box[5]
-    ImageBBoxViewer(img, box)
-# %%
-    img.meta
-    ImageBBoxViewer(img, bo)
-
-# %%
-    batch = En.P.postprocess(batch)  # T:self_ref|    batch = self.P.postprocess(batch)
-    preds_all_runs[En.P.run_name].append(
-        batch
-    )  # T:self_ref|    preds_all_runs[self.P.run_name].append(batch)
-    preds = preds_all_runs  # T:return|return preds_all_runs
-# %%
-    i, batch = next(
-        iter(enumerate(preds[En.P.run_name]))
-    )  # T:loop_probe|for i, batch in enumerate(preds[self.P.run_name]):
-    batch["source_image"] = sources[
-        i
-    ]  # T:indent|    batch["source_image"] = sources[i]
-    batch["crop_spatial_shape"] = crop_shapes[
-        i
-    ]  # T:indent|    batch["crop_spatial_shape"] = crop_shapes[i]
-    patch_prediction_result = preds  # T:return|return preds
-# SECTION:-------------------- patch_prediction end --------------------------------------------------------------------------------------  # T:block_meta_end|DetCascadeInfererRetinaUNet.patch_prediction <CR>
-    # end PythonMethodScratch  # T:block_end|DetCascadeInfererRetinaUNet.patch_prediction
-
-# %%
+# SECTION:-------------------- LIDC cascade — 2 localiser bboxes --------------------------------------------------------
     imgs_sublist = imgs
-# %%
-    # /home/ub/code/fran/fran/inference/cascade.py  # T:block_donor|/home/ub/code/fran/fran/inference/cascade.py
-# SECTION:-------------------- process_data_sublist --------------------------------------------------------------------------------------  # T:block_meta|DetCascadeInfererRetinaUNet.process_data_sublist <CR>
-    En.create_and_set_postprocess_transforms()  # T:self_ref|self.create_and_set_postprocess_transforms()
-    data = En.load_images(
-        imgs_sublist
-    )  # T:self_ref|data = self.load_images(imgs_sublist)
-    image_paths = imgs_sublist
-# %%
-    En.bboxes = En.extract_fg_bboxes(  # T:self_ref|self.bboxes = self.extract_fg_bboxes(
+    data = En.load_images(imgs_sublist)
+    En.bboxes = En.extract_fg_bboxes(data, overwrite=overwrite)
+    pp(En.bboxes[0])
+    En.create_and_set_postprocess_transforms()
+    data = En.load_images(imgs_sublist)
+    image_paths = helpers.image_paths_from_data(data)
+    En.bboxes = En.extract_fg_bboxes(
         data,
-        overwrite=En.localiser_overwrite,  # T:self_ref|    overwrite=self.localiser_overwrite,
+        overwrite=En.localiser_overwrite,
     )
-# %%
-    data = En.load_images(
-        image_paths
-    )  # T:self_ref|data = self.load_images(image_paths)
-    data = En.apply_bboxes(
-        data, En.bboxes
-    )  # T:self_ref|data = self.apply_bboxes(data, self.bboxes)
+    data = En.load_images(image_paths)
+    data = En.apply_bboxes(data, En.bboxes)
+
     full_metas = [dat["full_meta"] for dat in data]
-    pred_patches = En.patch_prediction(
-        data
-    )  # T:self_ref|pred_patches = self.patch_prediction(data)
-# %%
-    pred_patches = En.decollate_patches(
-        pred_patches, En.bboxes, full_metas
-    )  # T:self_ref|pred_patches = self.decollate_patches(pred_patches, self.bboxes, full_metas)
+    pred_patches = En.patch_prediction(data)
+    pred_patches = En.decollate_patches(pred_patches, En.bboxes, full_metas)
     pred_patches[0].keys()
-    pred_patches[0]["pred_seg"].shape
-    pred_patches[0]["pred_box"]
-    box_p = pred_patches[0]["pred_box"].clone()
-# %%
-    img = pred_patches[0]["image"]
-    im = img[0]
-    lm = pred_patches[0]["pred_seg"]
+    pred = pred_patches[0]["LIDCA-QUARK"]
     bbo = pred_patches[0]["pred_box"]
-    ImageMaskViewer([im, lm], "im")
-# %%
-    En.cuda_clear()  # T:self_ref|self.cuda_clear()
-    process_data_sublist_result = output  # T:return|return output
-# SECTION:-------------------- process_data_sublist end --------------------------------------------------------------------------------------  # T:block_meta_end|DetCascadeInfererRetinaUNet.process_data_sublist <CR>
-    # end PythonMethodScratch  # T:block_end|DetCascadeInfererRetinaUNet.process_data_sublist
+    scores = pred_patches[0]["pred_score"]
+    _,idx = torch.sort(scores, descending=True)
+    bbo_sorted = bbo[idx]
+    bbo2 = bbo_sorted[:50]
+    
+    img = data[0]["image"].detach().cpu()
+    ImageMaskBboxViewer(img, pred[0], bbo2)
+    torch.save(pred_patches[0], "/s/agent_rw/tmp/misc_00008.pt")
 
-# %%
-    data = preds[self.P.run_name]
-    chunksize = 12
-    overwrite = False
-# %%
-    # /home/ub/code/fran/fran/inference/cascade.py  # T:block_donor|/home/ub/code/fran/fran/inference/cascade.py
-# %%
-    out = preds[0]
-    bbo_keys = [k for k in out.keys() if "box" in k]
-    pp(sorted(out.keys()))
-    print("pred_seg fg", int(out["pred_seg"].sum()))
-    print("n_boxes", out["pred_box"].shape[0])
-    print("sidecar", out["sidecar_path"])
-# %%
-    out["pred_score"]
-    out["pred_box"]
-    out["pred_box_voxel"]
-    out["pred_box_world"]
-    lm = out["pred_seg"]
-    out["image"].shape
-    bbos = out["pred_box_voxel"]
-    idx = out["pred_score"].argsort(descending=True)
-    # bb1 =[110.07772827148438, 320.0018615722656, 32.85981750488281, 119.0731430053711, 333.905029296875, 42.902252197265625]
-# %%
-    bb1 = bbos[4]
-    ImageBBoxViewer(img, bb1)
-# %%
-    ImageMaskViewer([img, lm], "im")
 
+    
 # %%
-    from utilz.fileio import load_json
-
-    sc = load_json("/s/agent_rw/tmp/lidc_gyro_sidecar_test/lidc_0007.json")
-    sc["markups"][0]
-# %%
-    sc = load_json("/s/fran_storage/predictions/lidca/LIDCA-GYRO/lidc_0007.json")
-    df = pd.DataFrame(sc["predictions"])
-    df.to_csv("/s/agent_rw/tmp/lidc_gyro_sidecar_test/lidc_0007.csv", index=False)
-
-# %%
-    "Pre,SqL,BoxPts,Clip,SegScale,Argmax,WrapSeg,FillSeg,Dust,Off,VoxCopy,FullMeta,World,WorldCopy,Mode,Meta"
-    En.keys_postproc
 
     dici = pred_patches[0]
 # %%
+    En.keys_postproc
+    'SqL,MR,W,F,R,Off,BoxR,S'
     tfms = En.postprocess_transforms_dict
-    dici = tfms["Pre"](dici)
-    print(dici["image"].shape)
-    print(dici["pred_box_pre_tfm"])
+# %%
+    S = tfms["SqL"]
+    dici = S(dici)
 
-    print(dici["pred_box"])
-    dici = tfms["SqL"](dici)
-    dici = tfms["BoxPts"](dici)
-    print(dici["image"].shape)
+    M = tfms["MR"]
+    dici = M(dici)
 
-    dici = tfms["Clip"](dici)
-    print(dici["image"].shape)
+    W = tfms["W"]
+    dici = W(dici)
+    dici["pred"].shape
 
-    dici = tfms["SegScale"](dici)
-    print(dici["image"].shape)
+    F = tfms["F"]
+    dici = F(dici)
+    dici['pred'].shape
+    b1 = dici["bounding_box"]
+    bbo = dici["pred_box"][0]
 
-    dici = tfms["Argmax"](dici)
-    print(dici["image"].shape)
+    R = tfms["R"]
+    dici = R(dici)
 
-    dici = tfms["WrapSeg"](dici)
-    print(dici["image"].shape)
+    O = tfms["Off"]
+    dici = O(dici)
 
-    dici = tfms["FillSeg"](dici)
-    print(dici["image"].shape)
+    B = tfms["BoxR"]
+    dici = B(dici)
+    bbo2 = dici["pred_box"][0]
+    ImageMaskBboxViewer(dici["pred"][0], dici["pred"][0], bbo2)
+    pred = dici["pred"][0]
 
-    dici = tfms["Dust"](dici)
-    print(dici["image"].shape)
+    S2 = tfms["S"]
+    dici = S2(dici)
+# %%
+# %%
+#SECTION:-------------------- postprocess end --------------------------------------------------------------------------------------  # T:block_meta_end|CascadeInferer.postprocess
+    # end PythonMethodScratch  # T:block_end|CascadeInferer.postprocess
+# %%
+# SECTION:-------------------- LIDC cascade — 3 crop + patch (patch post only) -------------------------------------------
+    image_paths = helpers.image_paths_from_data(data)
+    data = En.load_images(image_paths)
+    data = En.apply_bboxes(data, En.bboxes)
+    full_metas = [dat["full_meta"] for dat in data]
+    print("crop shape", tuple(data[0]["image"].shape))
+    data[0]["image"]
+    data[0].keys()
+    img = data[0]["image"].detach().cpu()
+    # ImageMaskViewer([img,img],'im') # works
 
-    dici = tfms["Off"](dici)
-    print(dici["image"].shape)
+# %%
+    En.P.setup()
+    En.P.prepare_data(data=data, collate_fn=img_bbox_collated)
+    En.P.create_and_set_postprocess_transforms()
 
-    dici = tfms["VoxCopy"](dici)
-    print(dici["image"].shape)
+# %%
+    batch = next(iter(En.P.predict()))
+# %%
+    print("pre-postprocess keys", sorted(batch.keys()))
+    img = batch["image"]
+    img.shape
+    batch.keys()
+    batch.keys()
+    bbo = batch["merged_boxes"]
+    scores = batch["merged_scores"]
+    pred = batch["stitched_seg"]
+    bbo2 = bbo[0]
+    lm  =pred[0,1]
+    im = img[0,0]
+    # ImageMaskViewer([im, lm],'im')
+    ImageBBoxViewer(im,bbo2)
+# %%
+    dici0 = batch
+    img = dici0["image"]
+    pred = dici0["stitched_seg"]
+    dici0.keys()
+    torch.save(dici0, "/s/agent_rw/tmp/lidc_020.pt")
 
-    dici = tfms["FullMeta"](dici)
-    print(dici["image"].shape)
+# %%
 
-    dici = tfms["World"](dici)
-    print(dici["image"].shape)
+    # img2 = img[0,0]
+    # img2.shape
+    # ImageBBoxViewer(img2,bbo2) #HACK: perfect bbox and pred
 
-    dici = tfms["WorldCopy"](dici)
-    print(dici["image"].shape)
+    batch2 = En.P.postprocess(batch)
+    batch2['image'].shape
+    batch2['pred'].shape
+    batch2['pred_box'][0]
 
-    dici = tfms["Mode"](dici)
-    print(dici["image"].shape)
+    pred = batch2['pred'][0]
+    bbo2 = batch2['pred_box'][0]
+    ImageMaskBboxViewer(pred, pred, bbo2)
+    # end PythonMethodScratch  # T:block_end|PackRetinaUNetPredsd.__call__
+# %%
+# SECTION:-------------------- LIDC cascade — 4 decollate + cascade post stepwise --------------------------------------
+    pred_patches = En.patch_prediction(data)
+    decollated = En.decollate_patches(pred_patches, En.bboxes, full_metas)
+    dici = decollated[0]
+    print("decollated keys", sorted(dici.keys()))
+    dici["pred_box"][0]
+    dici["pred"].shape
 
-    dici = tfms["Meta"](dici)
-    print(dici["image"].shape)
+# %%
+    En.create_and_set_postprocess_transforms()
+    tfms = En.postprocess_transforms_dict
+    keys = En.keys_postproc.split(",")
+    for key in keys:
+        if key == "S":
+            continue
+        dici = tfms[key](dici)
+        fg = int(dici["pred"].sum()) if "pred" in dici else None
+        nbox = dici["pred_box"].shape[0] if "pred_box" in dici else None
+        print(key, "pred fg", fg, "n_boxes", nbox)
 
-c %%
+# %%
+# SECTION:-------------------- LIDC cascade — 5 viz full volume ----------------------------------------------------------
+    src = helpers.load_images_nifti(imgs)[0]["image"].detach().cpu()
+    pred_full = dici["pred"][0].detach().cpu()
+    boxes_full = dici["pred_box"].detach().cpu()
+    src.shape
+    pred_full.shape
+    ImageMaskViewer([src, pred_full], "im")
+    ImageBBoxViewer(src, boxes_full)
+
+# %%
+# SECTION:-------------------- LIDC cascade — 6 CC vs GT ----------------------------------------------------------------
+    gt_fn = lidc_all_lm / f"{case_id}.nii.gz"
+    gt_arr = sitk.GetArrayFromImage(sitk.ReadImage(str(gt_fn)))
+    gt_t = torch.from_numpy(gt_arr).permute(2, 1, 0).contiguous()
+    pred_t = pred_full.squeeze(0)
+    L_gt = LabelMapGeometryPT(li=gt_t, ignore_labels=[0], compute_feret=False)
+    L_pr = LabelMapGeometryPT(li=pred_t, ignore_labels=[0], compute_feret=False)
+    if len(L_gt.nbrhoods) and len(L_pr.nbrhoods):
+        cc_gt = L_gt.nbrhoods.iloc[0][["centroid_x", "centroid_y", "centroid_z"]].astype(float)
+        cc_pr = L_pr.nbrhoods.iloc[0][["centroid_x", "centroid_y", "centroid_z"]].astype(float)
+        dist = float(((cc_gt - cc_pr) ** 2).sum() ** 0.5)
+        print("CC dist voxels", dist, "gt", cc_gt.tolist(), "pred", cc_pr.tolist())
+    else:
+        print("CC skip: gt nbrhoods", len(L_gt.nbrhoods), "pred nbrhoods", len(L_pr.nbrhoods))
+
+# %%
+# SECTION:-------------------- LIDC cascade — 7 full run (optional save) -----------------------------------------------
+    En.save = True
+    preds = En.run(imgs, chunksize=chunksize, overwrite=overwrite)
+    out = preds[0]
+    print("saved keys", sorted(out.keys()))
+    print("pred fg", int(out["pred"].sum()), "n_boxes", out["pred_box"].shape[0])

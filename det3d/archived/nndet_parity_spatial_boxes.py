@@ -16,14 +16,14 @@ import numpy as np
 import torch
 
 from det3d.detection.nndet_train import det3d_batch_to_nndet
-from det3d.extra.nndet_parity_cp0_4 import (
+from det3d.archived.nndet_parity_cp0_4 import (
     CASE_ID,
     DET3D_PLAN_ID,
     DET3D_PROJECT,
     LBD_FOLDER,
     PARITY_SEED,
 )
-from det3d.extra.nndet_parity_disk_boxes_post_aug import (
+from det3d.archived.nndet_parity_disk_boxes_post_aug import (
     _apply_item_key,
     compare_instance_aligned,
     find_case_idx,
@@ -31,7 +31,7 @@ from det3d.extra.nndet_parity_disk_boxes_post_aug import (
     pre_trafo_oracle_boxes,
     setup_parity_dm,
 )
-from det3d.extra.nndet_parity_pre_trafo import (
+from det3d.archived.nndet_parity_pre_trafo import (
     DATA_ATOL,
     pre_trafo_train_targets,
     run_pre_trafo_stepped,
@@ -362,7 +362,7 @@ def compare_nndet_target_boxes(
     *,
     boxes_atol: float = SPATIAL_BOXES_ATOL,
 ) -> dict:
-    from det3d.extra.nndet_parity_disk_boxes_post_aug import (
+    from det3d.archived.nndet_parity_disk_boxes_post_aug import (
         match_instance_aligned_pairs,
     )
 

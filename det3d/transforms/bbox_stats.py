@@ -19,14 +19,12 @@ class DetectionBBoxStatsd(MapTransform):
         dusting_threshold=3.0,
         dusting_method="major_axis",
         ignore_labels=None,
-        gt_box_mode="cccwhd",
     ):
         super().__init__([image_key, lm_key], False)
         self.image_key = image_key
         self.lm_key = lm_key
         self.ignore_labels = ignore_labels or []
         self.dusting_threshold = dusting_threshold
-        self.gt_box_mode = gt_box_mode
         assert dusting_method in ["major_axis", "bbox_smallest_side"]
 
     def __call__(self, data):
@@ -38,7 +36,8 @@ class DetectionBBoxStatsd(MapTransform):
             compute_feret=False,
         )
         L.dust(self.dusting_threshold)
-        rec = L.to_voxel_detection_records("xyzxyz")
+        # xyzxyz voxels — same contract as bbox sidecars and det3d_batch_to_nndet.
+        rec = L.to_voxel_detection_records()
         d["LMG"] = L
         d["nbrhoods"] = L.nbrhoods
         boxes = rec["box"]
@@ -53,7 +52,7 @@ class DetectionBBoxStatsd(MapTransform):
 
 
 class AttachDetectionGTd(MapTransform):
-    """LMG on cropped patch; patch-voxel gt_box_mode box/label on data dict."""
+    """LMG on cropped patch; patch-voxel xyzxyz box/label on data dict."""
 
     def __init__(
         self,
@@ -61,14 +60,12 @@ class AttachDetectionGTd(MapTransform):
         lm_key="lm",
         dusting_threshold=3.0,
         ignore_labels=None,
-        gt_box_mode="cccwhd",
     ):
         super().__init__([image_key, lm_key], False)
         self.image_key = image_key
         self.lm_key = lm_key
         self.ignore_labels = ignore_labels or []
         self.dusting_threshold = dusting_threshold
-        self.gt_box_mode = gt_box_mode
 
     def __call__(self, data):
         d = dict(data)
@@ -85,7 +82,7 @@ class AttachDetectionGTd(MapTransform):
             matched = L.nbrhoods[L.nbrhoods["label_cc"] == label_cc]
             if len(matched) > 0:
                 L.nbrhoods = matched
-        rec = L.to_voxel_detection_records(self.gt_box_mode)
+        rec = L.to_voxel_detection_records()
         if len(rec["box"]) == 0:
             return d
         d["box"] = rec["box"]

@@ -1,59 +1,27 @@
-import numpy as np
 import torch
-from det3d.detection.nndet_train import (
+from det3d.managers.helpers.nndet_retinaunet import (
+    ensure_nndet_importable,
+    nndet_batch_to_xyzxyz,
     offset_nndet_xyxyzz_boxes,
 )
+from det3d.utils.tensor import plain_tensor
 from fran.inference.base import BaseInferer
 from fran.inference.cascade import img_bbox_collated
 from fran.transforms.inferencetransforms import SqueezeListofListsd
-from monai.transforms import EnsureTyped, ScaleIntensityRanged
-from nndet.core.retina import BaseRetinaNet
+from monai.data.meta_tensor import MetaTensor
+from monai.transforms import Compose, EnsureChannelFirstd, EnsureTyped, ScaleIntensityRanged
+from monai.transforms.post.dictionary import Invertd
 from utilz.cprint import cprint
 
-from det3d.managers.retinanet import RetinaNetManager
 
+class DetPatchInfererBase(BaseInferer):
+    arch_name = "base"
 
-class DetPatchInferer(BaseInferer):
-    keys_preproc = "E,S,Norm,Dtype"
-    keys_postproc = "SqL"
+    def bind_preprocess_transforms(self):
+        for key, value in self.preprocess_transforms_dict.items():
+            setattr(self, key, value)
 
-    def __init__(
-        self,
-        run_name,
-        project_title=None,
-        patch_overlap=0.25,
-        devices=(0,),
-        safe_mode=False,
-        save=False,
-        params=None,
-        debug=False,
-        **kwargs,
-    ):
-        cprint("Setting up detection patch inference", color="red", bold=True)
-        self.patch_overlap = patch_overlap
-        super().__init__(
-            run_name=run_name,
-            project_title=project_title,
-            patch_overlap=patch_overlap,
-            devices=devices,
-            safe_mode=safe_mode,
-            save=save,
-            save_channels=False,
-            params=params,
-            debug=debug,
-            keys_preproc=self.keys_preproc,
-            keys_postproc=self.keys_postproc,
-            model_manager=RetinaNetManager,
-            **kwargs,
-        )
-
-    def check_plan_compatibility(self):
-        pass
-
-    def set_preprocess_tfms_keys(self):
-        self.preprocess_tfms_keys = self.keys_preproc
-
-    def _norm_dtype_transforms(self):
+    def norm_dtype_transforms(self):
         clip = self.dataset_params["intensity_clip_range"]
         norm = ScaleIntensityRanged(
             keys=["image"],
@@ -66,135 +34,122 @@ class DetPatchInferer(BaseInferer):
         dtype = EnsureTyped(keys=["image"], dtype=torch.float16)
         return {"Norm": norm, "Dtype": dtype}
 
-    def _bind_preprocess_transforms(self):
-        for key, value in self.preprocess_transforms_dict.items():
-            setattr(self, key, value)
-
-    def create_preprocess_transforms(self):
-        super().create_preprocess_transforms()
-        del self.preprocess_transforms_dict["N"]
-        self.preprocess_transforms_dict.update(self._norm_dtype_transforms())
-        self._bind_preprocess_transforms()
-
-    def create_postprocess_transforms(self, preprocess_transform):
-        self.postprocess_transforms_dict = {
-            "SqL": SqueezeListofListsd(keys=["bounding_box"]),
-        }
+    def set_preprocess_tfms_keys(self):
+        self.keys_preproc = type(self).keys_preproc
+        self.preprocess_tfms_keys = self.keys_preproc
 
     def set_postprocess_tfms_keys(self):
-        self.postprocess_tfms_keys = self.keys_postproc
+        chain = type(self).keys_postproc
+        if not self.save:
+            chain = ",".join(k for k in chain.split(",") if k != "S")
+        self.keys_postproc = chain
+        self.postprocess_tfms_keys = chain
+
+    def set_preprocess_transforms(self):
+        transform = self.tfms_from_dict(
+            self.keys_preproc, self.preprocess_transforms_dict
+        )
+        self.preprocess_compose = Compose(transform)
+
+    def set_postprocess_transforms(self):
+        self.postprocess_transforms = self.tfms_from_dict(
+            self.keys_postproc, self.postprocess_transforms_dict
+        )
+        self.postprocess_compose = Compose(self.postprocess_transforms)
+
+    def check_plan_compatibility(self):
+        pass
 
     def prepare_data(self, data, collate_fn=img_bbox_collated):
         super().prepare_data(data, collate_fn=collate_fn)
 
-    def predict_inner(self, batch):
-        img = batch["image"].float()
-        detector = self.model.detector
-        detector.eval()
-        if img.dim() == 5:
-            val_inputs = [img[i] for i in range(img.shape[0])]
-        elif img.dim() == 4:
-            val_inputs = [img]
-        else:
-            val_inputs = [img.unsqueeze(0)]
-        use_inferer = val_inputs[0][0, ...].numel() >= int(
-            np.prod(self.model.val_patch_size)
+
+class DetPatchRetinaUNet(DetPatchInfererBase):
+    keys_preproc = "L,E,S,O,Norm,Dtype"
+    keys_postproc = "Pack,SqL,InvP,InvPreBox"
+
+    def __init__(
+        self,
+        run_name,
+        project_title=None,
+        patch_overlap=0.25,
+        devices=(0,),
+        safe_mode=False,
+        save=False,
+        params=None,
+        ckpt=None,
+        debug=False,
+        **kwargs,
+    ):
+        cprint("Setting up RetinaUNet Det patch inference", color="red", bold=True)
+        from det3d.inference.transforms import LoadInferImaged
+        from det3d.managers.retinaunet import RetinaUNetManager
+        from fran.inference.helpers import load_params
+
+        if params is None:
+            params = load_params(run_name)
+        self.patch_overlap = patch_overlap
+        self._box_acc = []
+        super().__init__(
+            run_name=run_name,
+            project_title=project_title,
+            patch_overlap=patch_overlap,
+            devices=devices,
+            safe_mode=safe_mode,
+            save=save,
+            save_channels=False,
+            params=params,
+            ckpt=ckpt,
+            debug=debug,
+            keys_preproc=self.keys_preproc,
+            keys_postproc=self.keys_postproc,
+            model_manager=RetinaUNetManager,
+            **kwargs,
         )
-        with torch.inference_mode():
-            outputs = detector(val_inputs, use_inferer=use_inferer)
-        out = outputs[0]
-        batch["pred_box"] = out[detector.target_box_key].detach()
-        batch["pred_label"] = out[detector.target_label_key].detach()
-        batch["pred_score"] = out[detector.pred_score_key].detach()
-        return batch
 
-
-class DetPatchInfererRetinaUNetCore(DetPatchInferer):
     def create_preprocess_transforms(self):
-        from monai.transforms import EnsureChannelFirstd
+        from monai.transforms import Orientationd, Spacingd
+        from utilz.stringz import ast_literal_eval
+
+        from det3d.inference.transforms import LoadInferImaged
 
         self.preprocess_transforms_dict = {
+            "L": LoadInferImaged(keys=["image"]),
             "E": EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
-            **self._norm_dtype_transforms(),
+            **self.norm_dtype_transforms(),
         }
-        self._bind_preprocess_transforms()
+        spacing = ast_literal_eval(self.params["configs"]["plan_train"]["spacing"])
+        self.preprocess_transforms_dict["S"] = Spacingd(keys=["image"], pixdim=spacing)
+        self.preprocess_transforms_dict["O"] = Orientationd(keys=["image"], axcodes="RAS")
+        self.bind_preprocess_transforms()
 
+    def create_postprocess_transforms(self, preprocess_transform):
+        from det3d.inference.post import InvPreprocessBoxd, PackRetinaUNetPredsd
 
-class DetPatchInfererRetinaUNet(DetPatchInfererRetinaUNetCore):
-    """RetinaUNet patch inferer (det + seg); use with DetCascadeInfererRetinaUNet."""
-
-    keys_preproc = "L,E,S,O,Norm,Dtype"
-    keys_postproc = "Pack,SqL,WrapSeg,Re,BoxInv,R,Int"
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        from det3d.managers.retinaunet import RetinaUNetManager
-        self.model_manager = RetinaUNetManager
-        self._box_acc = []
+        self.postprocess_transforms_dict = {
+            "Pack": PackRetinaUNetPredsd(),
+            "SqL": SqueezeListofListsd(keys=["bounding_box"]),
+            "InvP": Invertd(
+                keys=["pred"],
+                transform=preprocess_transform,
+                orig_keys=["image"],
+            ),
+            "InvPreBox": InvPreprocessBoxd(),
+        }
+        for key, value in self.postprocess_transforms_dict.items():
+            setattr(self, key, value)
 
     def setup(self):
         super().setup()
         self.inferer.with_coord = True
 
-    def create_preprocess_transforms(self):
-        from fran.inference.helpers import get_patch_spacing
-        from monai.transforms import Orientationd, Spacingd
-
-        from det3d.inference.transforms import LoadInferImaged
-
-        super().create_preprocess_transforms()
-        base = self.preprocess_transforms_dict
-        spacing = get_patch_spacing(self.run_name)
-        self.preprocess_transforms_dict = {
-            "L": LoadInferImaged(keys=["image"]),
-            "E": base["E"],
-            "S": Spacingd(keys=["image"], pixdim=spacing),
-            "O": Orientationd(keys=["image"], axcodes="RAS"),
-            "Norm": base["Norm"],
-            "Dtype": base["Dtype"],
-        }
-        self._bind_preprocess_transforms()
-
-    def create_postprocess_transforms(self, preprocess_transform):
-        from fran.transforms.spatialtransforms import (
-            RestoreOriginalOrientationd,
-            ResizeToMetaSpatialShaped,
-        )
-        from monai.transforms.utility.dictionary import CastToTyped
-
-        from det3d.inference.transforms import (
-            PackRetinaUNetPredsd,
-            RetinaUNetBoxInversed,
-            WrapPredSegMetad,
-        )
-
-        postproc_keys = self.keys_postproc.replace(" ", "")
-        if "BoxInv" in postproc_keys:
-            self.postprocess_transforms_dict = {
-                "Pack": PackRetinaUNetPredsd(),
-                "SqL": SqueezeListofListsd(keys=["bounding_box"]),
-                "WrapSeg": WrapPredSegMetad(seg_key="pred_seg", image_key="image"),
-                "Re": ResizeToMetaSpatialShaped(keys=["pred_seg"], mode="nearest"),
-                "BoxInv": RetinaUNetBoxInversed(),
-                "R": RestoreOriginalOrientationd(keys=["pred_seg"]),
-                "Int": CastToTyped(keys=["pred_seg"], dtype=torch.uint8),
-            }
-        else:
-            self.postprocess_transforms_dict = {
-                "Pack": PackRetinaUNetPredsd(),
-                "SqL": SqueezeListofListsd(keys=["bounding_box"]),
-                "Int": CastToTyped(keys=["pred_seg"], dtype=torch.uint8),
-            }
-        for key, value in self.postprocess_transforms_dict.items():
-            setattr(self, key, value)
-
     def inference_params(self):
         net = self.model.net
-        from det3d.detection.nndet_train import ensure_nndet_importable
         ensure_nndet_importable()
         from nndet.inference.detection.model import batched_weighted_nms_model
+
         params = {
-            "model_score_thresh": float(self.model.plan["score_thresh"]),
+            "model_score_thresh": 0.0,
             "model_topk": int(net.topk_candidates),
             "model_detections_per_image": int(net.detections_per_img),
             "remove_small_boxes": float(net.remove_small_boxes),
@@ -204,16 +159,14 @@ class DetPatchInfererRetinaUNet(DetPatchInfererRetinaUNetCore):
         return params
 
     @staticmethod
-    def _tile_origin(unravel_entry):
+    def tile_origin(unravel_entry):
         spatial = unravel_entry[2:]
         return [int(spatial[0].start), int(spatial[1].start), int(spatial[2].start)]
 
-    def _offset_boxes(self, boxes, origin):
+    def offset_boxes(self, boxes, origin):
         return offset_nndet_xyxyzz_boxes(boxes, origin)
 
-    def _box_tile_weight(self, boxes, tile_size):
-        from det3d.detection.nndet_train import ensure_nndet_importable
-
+    def box_tile_weight(self, boxes, tile_size):
         ensure_nndet_importable()
         from nndet.core.boxes.ops import box_center
         from nndet.inference.ensembler.detection import BoxEnsemblerSelective
@@ -221,9 +174,19 @@ class DetPatchInfererRetinaUNet(DetPatchInfererRetinaUNetCore):
         centers = box_center(boxes) if boxes.numel() else boxes
         return BoxEnsemblerSelective._get_box_in_tile_weight(centers, tile_size)
 
-    def filter_boxes(self, boxes, probs, labels, weights, spatial):
-        from det3d.detection.nndet_train import ensure_nndet_importable
+    def clip_boxes_xyzxyz(self, boxes, spatial):
+        if boxes.numel() == 0:
+            return boxes
+        out = boxes.clone()
+        out[:, 0] = out[:, 0].clamp(0, spatial[0])
+        out[:, 1] = out[:, 1].clamp(0, spatial[1])
+        out[:, 2] = out[:, 2].clamp(0, spatial[2])
+        out[:, 3] = out[:, 3].clamp(0, spatial[0])
+        out[:, 4] = out[:, 4].clamp(0, spatial[1])
+        out[:, 5] = out[:, 5].clamp(0, spatial[2])
+        return out
 
+    def filter_boxes(self, boxes, probs, labels, weights, spatial):
         ensure_nndet_importable()
         from nndet.core.boxes.clip import clip_boxes_to_image
         from nndet.core.boxes.ops import remove_small_boxes
@@ -231,8 +194,6 @@ class DetPatchInfererRetinaUNet(DetPatchInfererRetinaUNetCore):
         params = self.inference_params()
         p_sorted, idx_sorted = probs.sort(descending=True)
         idx_sorted = idx_sorted[: params["model_topk"]]
-        keep_idxs = probs[idx_sorted] > params["model_score_thresh"]
-        idx_sorted = idx_sorted[keep_idxs]
 
         b = boxes[idx_sorted]
         p = probs[idx_sorted]
@@ -254,7 +215,7 @@ class DetPatchInfererRetinaUNet(DetPatchInfererRetinaUNetCore):
         b = b[:cap]
         p = p[:cap]
         l = l[:cap]
-        return b, p, l
+        return nndet_batch_to_xyzxyz(b), p, l
 
     def merge_tile_boxes(self, acc, spatial):
         if not acc:
@@ -271,19 +232,19 @@ class DetPatchInfererRetinaUNet(DetPatchInfererRetinaUNetCore):
         weights = torch.cat([item["weights"] for item in acc])
         return self.filter_boxes(boxes, probs, labels, weights, spatial)
 
-    def _needs_swi(self, img):
-        patch_size = self.model.forward_patch_size
+    def needs_swi(self, img):
+        patch_size = [int(v) for v in self.model.plan["patch_size"]]
         spatial = tuple(int(v) for v in img.shape[-3:])
         return any(s > p for s, p in zip(spatial, patch_size))
 
-    def _forward_tile(self, img):
+    def forward_tile(self, img):
         x = img.unsqueeze(0)
         device_type = x.device.type
         with torch.autocast(device_type, enabled=device_type == "cuda"):
             pred = self.model.net.inference_step(x)
         return pred
 
-    def _swi_predictor(self, win_data, unravel_slice):
+    def swi_predictor(self, win_data, unravel_slice):
         device_type = win_data.device.type
         with torch.autocast(device_type, enabled=device_type == "cuda"):
             pred = self.model.net.inference_step(win_data)
@@ -292,9 +253,9 @@ class DetPatchInfererRetinaUNet(DetPatchInfererRetinaUNetCore):
             boxes = pred["pred_boxes"][i].detach()
             scores = pred["pred_scores"][i].detach()
             labels = pred["pred_labels"][i].detach()
-            origin = self._tile_origin(unravel_slice[i])
-            boxes = self._offset_boxes(boxes, origin)
-            weights = self._box_tile_weight(boxes, tile_size)
+            origin = self.tile_origin(unravel_slice[i])
+            boxes = self.offset_boxes(boxes, origin)
+            weights = self.box_tile_weight(boxes, tile_size)
             self._box_acc.append(
                 {
                     "boxes": boxes,
@@ -305,334 +266,309 @@ class DetPatchInfererRetinaUNet(DetPatchInfererRetinaUNetCore):
             )
         return pred["pred_seg"]
 
-    def _run_swi(self, img):
+    def run_swi(self, img):
         self._box_acc = []
-        stitched_seg = self.inferer(inputs=img, network=self._swi_predictor)
+        stitched_seg = self.inferer(inputs=img, network=self.swi_predictor)
         spatial = tuple(int(v) for v in img.shape[-3:])
         boxes, scores, labels = self.merge_tile_boxes(self._box_acc, spatial)
         return stitched_seg, boxes, scores, labels
 
     def predict_inner(self, batch):
-        from det3d.detection.nndet_train import _plain_tensor
         device = next(self.model.net.parameters()).device
-        img = _plain_tensor(batch["image"]).float().to(device)
+        img = plain_tensor(batch["image"]).float().to(device)
         if img.dim() == 5:
             img = img[0]
         if img.dim() == 3:
             img = img.unsqueeze(0)
         self.model.eval()
-        if self._needs_swi(img):
+        if self.needs_swi(img):
             vol = img.unsqueeze(0)
-            seg, boxes, scores, labels = self._run_swi(vol)
+            seg, boxes, scores, labels = self.run_swi(vol)
             batch["stitched_seg"] = seg
             batch["merged_boxes"] = boxes
             batch["merged_scores"] = scores
             batch["merged_labels"] = labels
             return batch
-        batch["raw_pred"] = self._forward_tile(img)
+        batch["raw_pred"] = self.forward_tile(img)
         return batch
 
 
-class DetPatchInfererRetinaUNetLBD(DetPatchInfererRetinaUNet):
-    """RetinaUNet on pre-spaced LBD .pt crops; whole crop is inference domain."""
+class DetPatchRetinaNet(DetPatchInfererBase):
+    keys_preproc = "L,E,S,O,Norm,Dtype"
+    keys_postproc = "Pack,SqL,InvPreBox"
 
-    keys_preproc = "L_pt,E,Norm,Dtype"
-    keys_postproc = "Pack,SqL,Int"
+    def __init__(
+        self,
+        run_name,
+        project_title=None,
+        patch_overlap=0.25,
+        devices=(0,),
+        safe_mode=False,
+        save=False,
+        params=None,
+        ckpt=None,
+        debug=False,
+        **kwargs,
+    ):
+        cprint("Setting up RetinaNet Det patch inference", color="red", bold=True)
+        from det3d.managers.retinanet import RetinaNetManager
+        from fran.inference.helpers import load_params
+
+        if params is None:
+            params = load_params(run_name)
+        super().__init__(
+            run_name=run_name,
+            project_title=project_title,
+            patch_overlap=patch_overlap,
+            devices=devices,
+            safe_mode=safe_mode,
+            save=save,
+            save_channels=False,
+            params=params,
+            ckpt=ckpt,
+            debug=debug,
+            keys_preproc=self.keys_preproc,
+            keys_postproc=self.keys_postproc,
+            model_manager=RetinaNetManager,
+            **kwargs,
+        )
+
+    def create_preprocess_transforms(self):
+        from monai.transforms import Orientationd, Spacingd
+        from utilz.stringz import ast_literal_eval
+
+        from det3d.inference.transforms import LoadInferImaged
+
+        self.preprocess_transforms_dict = {
+            "L": LoadInferImaged(keys=["image"]),
+            "E": EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
+            **self.norm_dtype_transforms(),
+        }
+        spacing = ast_literal_eval(self.params["configs"]["plan_train"]["spacing"])
+        self.preprocess_transforms_dict["S"] = Spacingd(keys=["image"], pixdim=spacing)
+        self.preprocess_transforms_dict["O"] = Orientationd(keys=["image"], axcodes="RAS")
+        self.bind_preprocess_transforms()
+
+    def create_postprocess_transforms(self, preprocess_transform):
+        from det3d.inference.post import InvPreprocessBoxd, PackRetinaNetPredsd
+
+        self.postprocess_transforms_dict = {
+            "Pack": PackRetinaNetPredsd(),
+            "SqL": SqueezeListofListsd(keys=["bounding_box"]),
+            "InvPreBox": InvPreprocessBoxd(),
+        }
+        for key, value in self.postprocess_transforms_dict.items():
+            setattr(self, key, value)
+
+    def predict_inner(self, batch):
+        device = next(self.model.parameters()).device
+        img = plain_tensor(batch["image"]).float().to(device)
+        if img.dim() == 5:
+            img = img[0]
+        if img.dim() == 3:
+            img = img.unsqueeze(0)
+        detector = self.model.detector
+        detector.eval()
+        val_input = img.contiguous()
+        patch_size = self.model.val_patch_size
+        use_inferer = val_input[0, ...].numel() >= int(torch.prod(torch.tensor(patch_size)))
+        with torch.inference_mode():
+            outputs = detector([val_input], use_inferer=use_inferer)
+        batch["raw_pred"] = outputs[0]
+        return batch
+
+
+class DetPatchLBD(DetPatchRetinaUNet):
+    """Pre-spaced LBD .pt crops; patch post includes save when save=True."""
+
+    keys_preproc = "L,E,Norm,Dtype"
+    keys_postproc = "Pack,SqL,A,Int,W,S"
 
     def create_preprocess_transforms(self):
         from det3d.inference.transforms import LoadInferImaged
-        super(DetPatchInfererRetinaUNetCore, self).create_preprocess_transforms()
-        base = self.preprocess_transforms_dict
+
         self.preprocess_transforms_dict = {
-            "L_pt": LoadInferImaged(keys=["image"]),
-            "E": base["E"],
-            "Norm": base["Norm"],
-            "Dtype": base["Dtype"],
+            "L": LoadInferImaged(keys=["image"]),
+            "E": EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
+            **self.norm_dtype_transforms(),
         }
-        self._bind_preprocess_transforms()
+        self.bind_preprocess_transforms()
 
-    def check_plan_compatibility(self):
-        pass
+    def create_postprocess_transforms(self, preprocess_transform):
+        import numpy as np
+        from fran.transforms.inferencetransforms import MakeWritabled
+        from monai.transforms.post.dictionary import AsDiscreted
+        from monai.transforms.utility.dictionary import CastToTyped
 
-    def load_images(self, images):
-        from fran.inference.helpers import load_images_pt
+        from det3d.inference.post import PackRetinaUNetPredsd, SaveDetOutputd
 
-        return load_images_pt(images)
-
+        self.postprocess_transforms_dict = {
+            "Pack": PackRetinaUNetPredsd(),
+            "SqL": SqueezeListofListsd(keys=["bounding_box"]),
+            "A": AsDiscreted(keys=["pred"], argmax=True),
+            "Int": CastToTyped(keys=["pred"], dtype=np.uint8),
+            "W": MakeWritabled(keys=["pred"]),
+            "S": SaveDetOutputd(
+                output_dir=self.output_folder,
+                run_w="",
+                run_p=self.run_name,
+                write_seg=True,
+            ),
+        }
+        for key, value in self.postprocess_transforms_dict.items():
+            setattr(self, key, value)
 
 # %%
-# SECTION:-------------------- setup--------------------------------------------------------------------------------------
+# SECTION:-------------------- setup --------------------------------------------------------------------------------------
 if __name__ == "__main__":
     from pathlib import Path
 
+    import torch
     from fran.inference import helpers
+    from fran.inference.cascade import img_bbox_collated
+    from fran.inference.common_vars import *
     from utilz.imageviewers import ImageBBoxViewer, ImageMaskViewer
 
-    devices = [1]
-
+    devices = [0]
     safe_mode = True
-    patch_overlap = 0.5
-    debug_ = True
-
-    fldr_lidc2 = Path("/media/UB/datasets/lidc2/images/")
-    fldr_lidc = Path("/media/UB/datasets/lidc/images/")
-    fldr_pt = Path("/r/datasets/preprocessed/lidca/lbd/spc_070_070_125_rlb40c36831_rlb40c36831_ex000/images")
-
-# %%
-    imgs = sorted(fldr_lidc2.glob("*.nii.gz"))
-    imgs = sorted(fldr_pt.glob("*.pt"))
-    cid = "lidc_0008"
-    img = [im for im in imgs if cid in im.name][0]
-    imgs2 = [img]
-
-
+    patch_overlap = 0.25
+    debug_ = False
 
 
 # %%
-# SECTION:-------------------- RetinaUNet patch — 0 setup -----------------------------------------------------
-    run_p = "LIDCA-GYRO"
-    run_p = "LIDCA-DIET"
+# SECTION:-------------------- LIDC patch — 0 paths ---------------------------------------------------------------------
+    run_p = "LIDCA-QUARK"
     project_title = "lidca"
-    D = DetPatchInfererRetinaUNetLBD(
+    case_id = "lidc_0001"
+
+    lidc_all_fldr = Path("/media/UB/datasets/lidc_all/images")
+    lbd_pt_fldr = Path(
+        "/r/datasets/preprocessed/lidca/lbd/spc_080_080_150_rlb40c36831_rlb40c36831_ex000/images"
+    )
+    imgs_nii = [p for p in sorted(lidc_all_fldr.glob("*.nii.gz")) if case_id in p.name]
+    imgs_pt = sorted(lbd_pt_fldr.glob("*.pt"))
+    imgs_pt = [p for p in imgs_pt if case_id in p.name]
+
+# %%
+# SECTION:-------------------- LIDC RetinaUNet nifti — 1 setup ----------------------------------------------------------
+    D = DetPatchRetinaUNet(
         run_name=run_p,
         project_title=project_title,
         devices=devices,
         safe_mode=safe_mode,
         patch_overlap=patch_overlap,
         debug=debug_,
+        save=False,
     )
-# %%
-    data = helpers.load_images_pt(imgs2)
+    data_nii = helpers.load_images_nifti(imgs_nii)
     D.setup()
-
-    D.model.net.score_thresh =0.3
-    D.model.net.detections_per_img = 25
-    D.model.net.nms_thresh = 0.15
-    D.prepare_data(data=data, collate_fn=None)
+    D.prepare_data(data=data_nii, collate_fn=img_bbox_collated)
     D.create_and_set_postprocess_transforms()
-    print("patch_size", D.model.forward_patch_size)
-    print(
-        "keys_preproc",
-        D.keys_preproc,
-        "keys_postproc",
-        D.keys_postproc,
-    )
-    
-    
-# %%
-    type(D.model.net)
-    D.model.net.nms_thresh
+    print("preproc", D.keys_preproc)
+    print("postproc", D.keys_postproc)
+    print("patch_size", [int(v) for v in D.model.plan["patch_size"]])
 
 # %%
-# SECTION:-------------------- RetinaUNet LBD — 1 preprocessed batch -----------------------------------------------------
+# SECTION:-------------------- LIDC RetinaUNet nifti — 2 predict_inner ---------------------------------------------------
     batch = next(iter(D.pred_dl))
     batch = D.predict_inner(batch)
-    batch.keys()
-    batch['merged_boxes']
-    batch["merged_scores"]
-    img = batch["image"][0, 0].detach().cpu()
-    bbox = batch["merged_boxes"].detach().cpu()
-    ImageBBoxViewer(img, bbox)
-# %%
-# %%  # T:block_start|DetPatchInfererRetinaUNetLBD.predict_inner
-# /home/ub/code/det3d/det3d/inference/patch.py  # T:block_donor|/home/ub/code/det3d/det3d/inference/patch.py
-#SECTION:-------------------- predict_inner --------------------------------------------------------------------------------------  # T:block_meta|DetPatchInfererRetinaUNetLBD.predict_inner
-    # end PythonMethodScratch  # T:block_end|DetPatchInfererRetinaUNetLBD.predict_inner
-    img = batch["image"][0,0]
-# %%
-    patch_size = [128,128,64]
-    print(img.shape)
-    start_x = 60
-    start_y =00
-    start_z = 100
-    end_x = start_x+patch_size[0]
-    end_y = start_y+patch_size[1]
-    end_z = start_z+patch_size[2]
-    slc = (slice(start_x, end_x), slice(start_y, end_y), slice(start_z, end_z))
-# %%
-    im2 = img[slc]
-# %%
-    ImageMaskViewer([im2, im2],'im')
-# %%
-# /home/ub/code/det3d/det3d/inference/patch.py  # T:block_donor|/home/ub/code/det3d/det3d/inference/patch.py
-#SECTION:-------------------- predict_inner --------------------------------------------------------------------------------------  # T:block_meta|DetPatchInfererRetinaUNetLBD.predict_inner
-    im2 = img[slc]
-    im2 = im2.to("cuda:1")
-    im3 = im2.clone().unsqueeze(0)
-
-    batch["image"]=im3
-    from det3d.detection.nndet_train import _plain_tensor
-    im3 = _plain_tensor(batch["image"]).float()
-    if im3.dim() == 5:
-        im3 = im3[0]
-    if im3.dim() == 3:
-        im3 = im3.unsqueeze(0)
-    D.model.eval()  # T:self_ref|self.model.eval()
-    if D._needs_swi(im3):  # T:self_ref|if self._needs_swi(im3):
-        vol = im3.unsqueeze(0)
-        seg, boxes, scores, labels = D._run_swi(vol)  # T:self_ref|    seg, boxes, scores, labels = self._run_swi(vol)
-        batch["stitched_seg"] = seg
-        batch["merged_boxes"] = boxes
-        batch["merged_scores"] = scores
-        batch["merged_labels"] = labels
-        pass  # T:early_return|    return batch
-# %%
-# %%
-#SECTION:-------------------- single patch--------------------------------------------------------------------------------------
-    net = D.model.net
-    batch["raw_pred"] = D._forward_tile(im3)  # T:self_ref|batch["raw_pred"] = self._forward_tile(img)
-    raw_pred = batch["raw_pred"]
-    raw_pred["pred_boxes"]
-
-
-    batch2 = D.postprocess(batch)
-    batch2.keys()
-    batch2['pred_score']
-    bbo = batch2['pred_box']
-    n=1
-    bb1 = bbo[n,:].detach().cpu()
-    img = batch2["image"][0 ].detach().cpu()
-    ImageBBoxViewer(img,bb1)
-# %%
-#SECTION:-------------------- predict_inner end --------------------------------------------------------------------------------------  # T:block_meta_end|DetPatchInfererRetinaUNetLBD.predict_inner
-    # end PythonMethodScratch  # T:block_end|DetPatchInfererRetinaUNetLBD.predict_inner
-# %%
-#SECTION:-------------------- RetinaUNet internsl: inference_step--------------------------------------------------------------------------------------
-    net = D.model.net
-    images = img
-    images = images.unsqueeze(0)
-    device_type = images.device.type
-# %%
-    with torch.autocast(device_type, enabled=device_type == "cuda"):
-        pred_detection, anchors, pred_seg = net(images)
-# %%
-    prediction = net.postprocess_for_inference(
-            images=images,
-            pred_detection=pred_detection,
-            pred_seg=pred_seg,
-            anchors=anchors,
-        )
-# %%
-
-    image_shapes = [images.shape[2:]] * images.shape[0]
-# %%
-# %%
-# /home/ub/code/nnDetection/nndet/core/retina.py  # T:block_donor|/home/ub/code/nnDetection/nndet/core/retina.py
-#SECTION:-------------------- postprocess_detections end --------------------------------------------------------------------------------------  # T:block_meta_end|BaseRetinaNet.postprocess_detections
-    # end PythonMethodScratch  # T:block_end|BaseRetinaNet.postprocess_detections
-# %%
-
-    boxes, probs, labels = net.postprocess_detections(
-        pred_detection=pred_detection,
-        anchors=anchors,
-        image_shapes=image_shapes,
-    )
-    prediction = {"pred_boxes": boxes, "pred_scores": probs, "pred_labels": labels}
-# %%
-
-    if net.segmenter is not None:
-        prediction["pred_seg"] = net.segmenter.postprocess_for_inference(pred_seg)["pred_seg"]
-# %%
-# SECTION:-------------------- RetinaUNet LBD — 2 predict_inner -----------------------------------------------------
-    batch = D.predict_inner(batch)
     if "raw_pred" in batch:
-        print("path: fast (single tile)")
+        print("path: single tile")
+        raw = batch["raw_pred"]
+        print("raw boxes", raw["pred_boxes"].shape, "raw seg", raw["pred_seg"].shape)
     else:
-        print("path: swi", batch["merged_boxes"].shape)
+        print("path: swi", batch["merged_boxes"].shape, batch["stitched_seg"].shape)
+
 # %%
-    print(batch.keys())
-    img = batch["image"][0, 0].detach().cpu()
-    boxes = batch["pred_box"].detach().cpu()
-    lm = batch["stitched_seg"].detach().cpu()
-    scores = batch["pred_score"].detach().cpu()
-    ImageMaskViewer([img, lm[0,1]], "ii")
+# SECTION:-------------------- LIDC RetinaUNet nifti — 3 postprocess stepwise -------------------------------------------
+    tfms = D.postprocess_transforms_dict
+    dici = dict(batch)
+    for key in D.keys_postproc.split(","):
+        dici = tfms[key](dici)
+        print(
+            key,
+            "pred fg",
+            int(dici["pred"].sum()),
+            "n_boxes",
+            dici["pred_box"].shape[0],
+        )
+    img = dici["image"][0, 0].detach().cpu()
+    pred = dici["pred"][0].detach().cpu()
+    boxes = dici["pred_box"].detach().cpu()
+    ImageMaskViewer([img, pred], "nifti")
     ImageBBoxViewer(img, boxes)
 
-
 # %%
-# SECTION:-------------------- RetinaUNet LBD — 3 postprocess -----------------------------------------------------
-    batch2 = D.postprocess(batch)
-    print("pred_box", batch2["pred_box"].shape)
-    print("pred_seg", batch2["pred_seg"].shape, "fg_voxels", int(batch2["pred_seg"].sum()))
-
-# %%
-# SECTION:-------------------- RetinaUNet LBD — 4 viz -----------------------------------------------------
-    img = batch2["image"][0, 0].detach().cpu()
-    boxes = batch2["merged_boxes"].detach().cpu()
-    lm = batch2["stitched_seg"].detach().cpu()
-    scores = batch2["merged_scores"].detach().cpu()
-    box = boxes
-# %%
-    bbo = nndet_batch_to_xyzxyz(boxes[1, :])
-    ImageBBoxViewer(img, bbo)
-                    
-# %%
-# SECTION:-------------------- RetinaUNet nifti — 0 setup -----------------------------------------------------
-    D = DetPatchInfererRetinaUNet(
+# SECTION:-------------------- LIDC RetinaUNet LBD .pt — 4 setup --------------------------------------------------------
+    D = PatchInfererLBD(
         run_name=run_p,
         project_title=project_title,
         devices=devices,
         safe_mode=safe_mode,
         patch_overlap=patch_overlap,
         debug=debug_,
+        save=False,
     )
-    data_nii = helpers.load_images_nifti(imgs[:1])
+    from det3d.inference.lbd_pt import load_lbd_pt_patch_data
+
+    data_pt = load_lbd_pt_patch_data(imgs_pt)
     D.setup()
-    D.prepare_data(data=data_nii, collate_fn=None)
+    D.prepare_data(data=data_pt, collate_fn=img_bbox_collated)
     D.create_and_set_postprocess_transforms()
-    print(
-        "nifti keys_preproc",
-        D.keys_preproc,
-        "keys_postproc",
-        D.keys_postproc,
-    )
+    print("LBD crop shape", tuple(data_pt[0]["image"].shape))
 
 # %%
-# SECTION:-------------------- RetinaUNet nifti — 1 batch + postprocess -----------------------------------------------------
-    batch_nii = next(iter(D.pred_dl))
-    batch_nii = D.predict_inner(batch_nii)
-    batch_nii = D.postprocess(batch_nii)
-    print(
-        "nifti spatial",
-        tuple(batch_nii["image"].shape),
-        "pred_seg",
-        batch_nii["pred_seg"].shape,
-        "pred_box",
-        batch_nii["pred_box"].shape,
-    )
+# SECTION:-------------------- LIDC RetinaUNet LBD .pt — 5 predict + postprocess ---------------------------------------
+    batch = next(iter(D.pred_dl))
+    batch = D.predict_inner(batch)
+    batch = D.postprocess(batch)
+    img = batch["image"][0, 0].detach().cpu()
+    pred = batch["pred"][0].detach().cpu()
+    boxes = batch["pred_box"].detach().cpu()
+    scores = batch["pred_score"].detach().cpu()
+    print("LBD fg", int(pred.sum()), "n_boxes", boxes.shape[0], "score_max", float(scores.max()))
+    ImageMaskViewer([img, pred], "lbd")
+    ImageBBoxViewer(img, boxes)
 
 # %%
+# SECTION:-------------------- LIDC patch — 6 single-tile probe ---------------------------------------------------------
+    batch = next(iter(D.pred_dl))
+    img = plain_tensor(batch["image"]).float()
+    if img.dim() == 5:
+        img = img[0]
+    if img.dim() == 3:
+        img = img.unsqueeze(0)
+    patch_size = [int(v) for v in D.model.plan["patch_size"]]
+    sx, sy, sz = 60, 0, 100
+    slc = (
+        slice(sx, sx + patch_size[0]),
+        slice(sy, sy + patch_size[1]),
+        slice(sz, sz + patch_size[2]),
+    )
+    im_tile = img[slc].unsqueeze(0).to(next(D.model.net.parameters()).device)
+    raw = D.forward_tile(im_tile)
+    print("tile raw boxes", raw["pred_boxes"].shape)
 
-# SECTION:-------------------- RetinaNet patch (single LBD crop) --------------------------------------------------------
-    run_p = "LIDCA-GYRO"
-    project_title = "lidca"
-    P = DetPatchInferer(
+# %%
+# SECTION:-------------------- LIDC RetinaNet patch — 7 setup -----------------------------------------------------------
+    P = PatchInferer(
         run_name=run_p,
         project_title=project_title,
         devices=devices,
         safe_mode=safe_mode,
         patch_overlap=patch_overlap,
         debug=debug_,
+        save=False,
     )
-
-    data = helpers.load_images_pt(imgs2)
     P.setup()
-    P.prepare_data(data=data, collate_fn=img_bbox_collated)
-# %%
-    iteri = iter(P.pred_dl)
-    batch = next(iter(P.predict()))
-    batch = P.predict_inner(batch)
-    img = batch["image"][0, 0].detach().cpu()
-    boxes = batch["pred_box"].detach().cpu()
-    scores = batch["pred_score"].detach().cpu()
-    crop = tuple(int(v) for v in img.shape)
-    print(
-        "crop",
-        crop,
-        "n_boxes",
-        boxes.shape[0],
-        "score_max",
-        float(scores.max()) if scores.numel() else None,
-    )
-    ImageBBoxViewer(img, boxes)
+    P.prepare_data(data=data_pt, collate_fn=img_bbox_collated)
+    P.create_and_set_postprocess_transforms()
 
+# %%
+    batch = next(iter(P.pred_dl))
+    batch = P.predict_inner(batch)
+    batch = P.postprocess(batch)
+    img = batch["image"][0, 0].detach().cpu()
+    boxes = nndet_batch_to_xyzxyz(batch["pred_box"]).detach().cpu()
+    print("RetinaNet n_boxes", boxes.shape[0])
+    ImageBBoxViewer(img, boxes)

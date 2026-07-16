@@ -5,7 +5,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import torch
-from det3d.extra.luna16_view_cases import N_VIEW, PRED_DIR, list_val_cases, print_val_cases
+from det3d.archived.luna16_view_cases import N_VIEW, PRED_DIR, list_val_cases, print_val_cases
 from monai.apps.detection.transforms.dictionary import AffineBoxToImageCoordinated
 from monai.data import box_utils
 from monai.transforms import Compose, EnsureChannelFirstd, EnsureTyped, LoadImaged, Orientationd, ScaleIntensityRanged

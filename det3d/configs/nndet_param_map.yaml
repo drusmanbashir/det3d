@@ -1,0 +1,54 @@
+# nnDet v001 trainer_cfg / model_cfg / plan keys → det3d Excel / configs.
+# precedence: fran | det_sheet | plan_row | runtime | ignore
+
+training_runtime:
+  max_num_epochs: {excel: "CLI epochs → model_params.max_epochs", precedence: fran}
+  initial_lr: {excel: model_params.lr, precedence: fran}
+  num_train_batches_per_epoch: {precedence: ignore}
+  num_val_batches_per_epoch: {precedence: ignore}
+  gpus: {precedence: runtime}
+  precision: {precedence: runtime}
+  deterministic: {excel: nndet.deterministic, precedence: det_sheet}
+  benchmark: {excel: nndet.benchmark, precedence: det_sheet}
+  monitor_key: {excel: scheduler_params.scheduler_monitor, precedence: det_sheet}
+
+optimizer:
+  initial_lr: {excel: model_params.lr, precedence: fran}
+  weight_decay: {excel: nndet.weight_decay, precedence: det_sheet}
+  sgd_momentum: {excel: nndet.momentum, precedence: det_sheet}
+  sgd_nesterov: {excel: nndet.nesterov, precedence: det_sheet}
+  optimizer: {excel: nndet.optimizer, precedence: det_sheet}
+
+lr_schedule:
+  plateau: {excel: scheduler_params.*, precedence: det_sheet, note: always ReduceLROnPlateau}
+  warm_iterations: {precedence: ignore}
+  poly_gamma: {precedence: ignore}
+
+matcher_sampler:
+  matcher_kwargs.num_candidates: {excel: loss_params.matcher_num_candidates, precedence: det_sheet}
+  matcher_kwargs.center_in_gt: {excel: loss_params.matcher_center_in_gt, precedence: det_sheet}
+  head_sampler_kwargs: {excel: loss_params.sampler_*, precedence: det_sheet}
+
+retinanet_only:
+  head_classifier_kwargs.loss_weight: {excel: retinanet.w_cls, precedence: det_sheet}
+  head_regressor_kwargs.loss_weight: {excel: retinanet.w_reg, precedence: det_sheet}
+  cls_loss: {excel: retinanet.cls_loss, precedence: det_sheet}
+  reg_loss: {excel: retinanet.reg_loss, precedence: det_sheet}
+
+architecture:
+  plan_pickle: {reference: nndet_arch_reference.xlsx, precedence: runtime_pickle}
+  encoder_decoder: {excel: model_params.encoder_*, precedence: det_sheet}
+  anchors: {excel: retinanet.base_anchor_shapes, precedence: det_sheet}
+
+postproc:
+  score_thresh: {excel: postproc_params.score_thresh, precedence: det_sheet}
+  nms_thresh: {excel: postproc_params.nms_thresh, precedence: det_sheet}
+  detections_per_img: {excel: postproc_params.detections_per_img, precedence: det_sheet}
+  topk_candidates_per_level: {excel: postproc_params.topk_candidates_per_level, precedence: det_sheet}
+  remove_small_boxes: {excel: postproc_params.remove_small_boxes, precedence: det_sheet}
+
+data_aug:
+  oversample_foreground_percent: {excel: dataset_params.fgbg_ratio, precedence: fran}
+
+inference:
+  val_patch_size: {excel: plans_det.val_patch_size → plan_valid, precedence: plan_row}

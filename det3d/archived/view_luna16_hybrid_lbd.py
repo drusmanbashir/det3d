@@ -2,7 +2,7 @@
 # %%
 import matplotlib.pyplot as plt
 import torch
-from det3d.extra.luna16_view_cases import N_VIEW, PRED_DIR, list_val_cases, print_val_cases
+from det3d.archived.luna16_view_cases import N_VIEW, PRED_DIR, list_val_cases, print_val_cases
 from det3d.inference.hybrid_lbd import build_hybrid_detector
 from det3d.inference.hybrid_samples import eval_dataset_for_cases, infer_batch
 from utilz.imageviewers import ImageBBoxViewer

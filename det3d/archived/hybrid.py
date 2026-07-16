@@ -31,7 +31,7 @@ from det3d.detection.retinaunet_v001_det3d import (
     build_nndet_retinaunet_det3d_module,
     fast_nndet_batch_to_device,
 )
-from det3d.extra.nndet_native_lbd import setup_nndet_env
+from det3d.archived.nndet_native_lbd import setup_nndet_env
 from det3d.managers.data import DataManagerDualDet, DataManagerDualDetBTfms
 from det3d.managers.data.batch_tfms import DataManagerDetLBDBTfms
 from det3d.managers.data.main import DataManagerDetLBD

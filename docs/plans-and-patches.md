@@ -21,7 +21,7 @@ Example (lidc lungs plans 3 vs 4 — only patch dims differ):
 | plan src_dims | [176,176,106] | [140,140,70] |
 | data_folder_lbd | same | same |
 
-`build_experiment_configs_det.py` must emit `patch_dim0`/`patch_dim1`, not `patch_size`.
+Edit `plans_det` in `~/code/fran/configurations/experiment_configs_det.xlsx` directly — use `patch_dim0`/`patch_dim1`, not a `patch_size` column.
 
 ## Three different `src_dims`
 

@@ -6,9 +6,9 @@ from monai.losses.giou_loss import BoxGIoULoss
 def apply_detector_loss_plan(detector, configs):
     plan = configs["plan_train"]
     arch = str(configs["model_params"]["arch"]).lower()
-    cls_loss = str(plan.get("cls_loss", "bce")).lower()
-    reg_loss = str(plan.get("reg_loss", "smooth_l1")).lower()
-    if arch in ("retinaunet", "retinaunet_v3"):
+    cls_loss = str(plan["cls_loss"]).lower()
+    reg_loss = str(plan["reg_loss"]).lower()
+    if arch == "retinaunet":
         reg_loss = "giou"
 
     if cls_loss == "focal":
@@ -28,22 +28,13 @@ def apply_detector_loss_plan(detector, configs):
 
 def apply_detector_sampler_plan(detector, configs):
     plan = configs["plan_train"]
-    arch = str(configs["model_params"]["arch"]).lower()
-    if arch in ("retinaunet", "retinaunet_v3"):
-        batch_size_per_image = 32
-        positive_fraction = 0.33
-        min_neg = 1
-    else:
-        batch_size_per_image = int(plan.get("sampler_batch_size_per_image", 64))
-        positive_fraction = float(plan.get("balanced_sampler_pos_fraction", 0.3))
-        min_neg = int(plan.get("sampler_min_neg", 16))
     detector.set_atss_matcher(
-        num_candidates=int(plan.get("matcher_num_candidates", 4)),
-        center_in_gt=bool(plan.get("matcher_center_in_gt", False)),
+        num_candidates=int(plan["matcher_num_candidates"]),
+        center_in_gt=bool(plan["matcher_center_in_gt"]),
     )
     detector.set_hard_negative_sampler(
-        batch_size_per_image=batch_size_per_image,
-        positive_fraction=positive_fraction,
-        pool_size=int(plan.get("sampler_pool_size", 20)),
-        min_neg=min_neg,
+        batch_size_per_image=int(plan["sampler_batch_size_per_image"]),
+        positive_fraction=float(plan["balanced_sampler_pos_fraction"]),
+        pool_size=int(plan["sampler_pool_size"]),
+        min_neg=int(plan["sampler_min_neg"]),
     )

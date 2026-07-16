@@ -63,6 +63,28 @@ class RetinaNetDetector2(RetinaNetDetector):
 
         return super().forward(input_images, targets, use_inferer=use_inferer)
 
+    def generate_anchors(self, images: Tensor, head_outputs: dict[str, list[Tensor]]) -> None:
+        super().generate_anchors(images, head_outputs)
+        device = head_outputs[self.cls_key][0].device
+        self.anchors = [anchors.to(device) for anchors in self.anchors]
+
+    def compute_cls_loss(
+        self, cls_logits: Tensor, targets: list[dict[str, Tensor]], matched_idxs: list[Tensor]
+    ) -> Tensor:
+        device = cls_logits.device
+        matched_idxs = [m.to(device) for m in matched_idxs]
+        return super().compute_cls_loss(cls_logits, targets, matched_idxs)
+
+    def compute_box_loss(
+        self,
+        box_regression: Tensor,
+        targets: list[dict[str, Tensor]],
+        anchors: list[Tensor],
+        matched_idxs: list[Tensor],
+    ) -> Tensor:
+        matched_idxs = [m.to(anchors[i].device) for i, m in enumerate(matched_idxs)]
+        return super().compute_box_loss(box_regression, targets, anchors, matched_idxs)
+
 
 Detector2 = RetinaNetDetector2
 

@@ -7,11 +7,15 @@ import torch
 from det3d.detection.visualize_image import normalize_image_to_uint8
 from det3d.utils.bbox_sidecar import load_inference_sidecar
 from fran.inference.helpers import infer_project, load_params
-from utilz.stringz import strip_extension
+from utilz.stringz import info_from_filename, strip_extension
 
 
 def list_sidecar_files(pred_dir):
-    return sorted(p for p in Path(pred_dir).glob("*.json") if not p.name.endswith(".mrk.json"))
+    return sorted(
+        p
+        for p in Path(pred_dir).rglob("*.json")
+        if not p.name.endswith(".mrk.json")
+    )
 
 
 def sidecar_file_at_index(pred_dir, index):
@@ -26,7 +30,8 @@ def resolve_sidecar_path(run_p, case, project=None):
         params = load_params(run_p)
         project = infer_project(params)
     stem = strip_extension(case)
-    return project.predictions_folder / run_p / f"{stem}.json"
+    proj_title = info_from_filename(stem, full_caseid=False)["proj_title"]
+    return project.predictions_folder / run_p / proj_title / f"{stem}.json"
 
 
 def list_prediction_sidecars(run_p, project=None):
@@ -34,7 +39,9 @@ def list_prediction_sidecars(run_p, project=None):
         params = load_params(run_p)
         project = infer_project(params)
     fldr = project.predictions_folder / run_p
-    return sorted(p for p in fldr.glob("*.json") if not p.name.endswith(".mrk.json"))
+    return sorted(
+        p for p in fldr.rglob("*.json") if not p.name.endswith(".mrk.json")
+    )
 
 
 def sidecar_at_index(run_p, index, project=None):

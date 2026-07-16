@@ -4,7 +4,8 @@ from lightning.pytorch import LightningModule
 
 
 class DetectionManager(Protocol):
-    detector: object
+    """Protocol for Lightning detection training managers."""
+
     plan: dict
     configs: dict
     class_names: list
@@ -18,40 +19,20 @@ from det3d.architectures.create_detector import arch_from_conf
 
 
 def resolve_detector_manager(configs: dict):
-    detector = arch_from_conf(configs)
-    if detector == "retinaunet_v3":
-        from det3d.managers.retinaunet_v3 import RetinaUNetManagerV3
-        return RetinaUNetManagerV3
-    if detector == "retinaunet":
-        if configs["model_params"].get("pre_trafo", False):
-            from det3d.managers.retinaunet_v2 import RetinaUNetManagerV2
-            return RetinaUNetManagerV2
+    arch = arch_from_conf(configs)
+    if arch == "retinaunet":
         from det3d.managers.retinaunet import RetinaUNetManager
 
         return RetinaUNetManager
-    from det3d.managers.retinanet import RetinaNetManager
+    if arch == "retinanet":
+        from det3d.managers.retinanet import RetinaNetManager
 
-    return RetinaNetManager
+        return RetinaNetManager
+    raise ValueError(f"unsupported arch {arch!r}; use retinanet or retinaunet")
 
 
 def build_detector_manager(project_title, configs, lr=None, sync_dist=False) -> LightningModule:
-    detector = configs["model_params"]["arch"]
-    if detector == "retinaunet_v3":
-        from det3d.managers.retinaunet_v3 import RetinaUNetManagerV3
-
-        manager_cls = RetinaUNetManagerV3
-    elif detector == "retinaunet":
-        if configs["model_params"].get("pre_trafo", False):
-            from det3d.managers.retinaunet_v2 import RetinaUNetManagerV2
-
-            manager_cls = RetinaUNetManagerV2
-        else:
-            from det3d.managers.retinaunet import RetinaUNetManager
-
-            manager_cls = RetinaUNetManager
-    else:
-        from det3d.managers.retinanet import RetinaNetManager
-        manager_cls = RetinaNetManager
+    manager_cls = resolve_detector_manager(configs)
     N = manager_cls(
         project_title=project_title,
         configs=configs,
