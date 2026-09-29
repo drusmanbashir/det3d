@@ -1,11 +1,12 @@
 """Map ConfigMakerDet output onto nnDet trainer_cfg defaults."""
 
+import os
 from copy import deepcopy
 from pathlib import Path
 
 import yaml
 
-NNDET_ROOT = Path("/home/ub/code/nnDetection")
+NNDET_ROOT = Path(os.environ.get("NNDET_ROOT", "/home/ub/code/nnDetection"))  # HPC: set NNDET_ROOT
 NNDET_TRAIN_CFG = NNDET_ROOT / "nndet/conf/train/v001.yaml"
 
 
