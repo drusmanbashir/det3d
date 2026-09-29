@@ -14,6 +14,10 @@ DEFAULT_STRIDES_3D = [[1, 1, 1], [2, 2, 2], [2, 2, 2], [2, 2, 2], [2, 2, 2]]
 
 
 def encoder_abs_strides_from_plan(plan):
+    if plan.get("encoder_type") == "resencl":
+        from det3d.detection.arch.nndet.encoder.resenc import ResEncLEncoder
+
+        return ResEncLEncoder(int(plan.get("n_input_channels", 1))).get_strides()
     arch = _plan_arch(plan)
     dim = int(plan.get("spatial_dims", 3))
     strides = arch["strides"]

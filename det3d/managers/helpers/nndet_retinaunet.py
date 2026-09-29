@@ -52,6 +52,15 @@ def plan_architecture_from_det3d(plan_train):
     arch["detections_per_img"] = int(plan_train["detections_per_img"])
     arch["topk_candidates"] = int(plan_train.get("topk_candidates_per_level", 1000))
     arch["remove_small_boxes"] = float(plan_train.get("remove_small_boxes", 0.0))
+    if plan_train.get("encoder_type") == "resencl":
+        from det3d.detection.arch.nndet.encoder.resenc import OUT_CHANNELS, STRIDES
+
+        arch["conv_kernels"] = [[3, 3, 3]] * len(OUT_CHANNELS)
+        arch["strides"] = [[1, 1, 1]] + [list(s) for s in STRIDES]
+        arch["encoder_pretrained"] = plan_train.get("encoder_pretrained")
+        # GYRO's nnDetection encoder stack is [1,1,2,4,8]; ResEncL returns stem+6 stages [1,1,2,4,8,16,32],
+        # so GYRO's decoder_levels (1,2,3,4) keep head strides 1,2,4,8 and anchors unchanged.
+        assert tuple(arch["decoder_levels"]) == (1, 2, 3, 4), "resencl needs GYRO's decoder_levels (1, 2, 3, 4)"
     return arch
 
 
@@ -96,6 +105,8 @@ def build_nndet_retinaunet_module(configs):
     from nndet.ptmodule.retinaunet.v001 import RetinaUNetV001
 
     plan_train = configs["plan_train"]
+    if plan_train.get("encoder_type") == "resencl":
+        from det3d.managers.helpers.nndet_resenc import RetinaUNetV001ResEnc as RetinaUNetV001
     model_cfg, _ = load_nndet_train_cfgs()
     model_cfg = apply_det3d_plan_to_nndet_model_cfg(model_cfg, plan_train)
     trainer_cfg = build_nndet_trainer_cfg(configs)
