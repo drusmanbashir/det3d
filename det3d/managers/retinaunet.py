@@ -78,6 +78,7 @@ class RetinaUNetManager(LightningModule):
         self.val_loss_sums = {}
         self.val_loss_count = 0
         self._val_patch_stream = False
+        self._nndet_wandb_grid_val_batches = []  # else val batches (GPU) pile up across epochs when no W&B grid callback clears them
         self.nndet_module.box_evaluator.reset()
         self.nndet_module.seg_evaluator.reset()
 
