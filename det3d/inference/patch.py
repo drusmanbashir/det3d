@@ -253,9 +253,9 @@ class DetPatchRetinaUNet(DetPatchInfererBase):
             boxes = pred["pred_boxes"][i].detach()
             scores = pred["pred_scores"][i].detach()
             labels = pred["pred_labels"][i].detach()
+            weights = self.box_tile_weight(boxes, tile_size)  # tile-local centres, as nnDetection (before offset)
             origin = self.tile_origin(unravel_slice[i])
             boxes = self.offset_boxes(boxes, origin)
-            weights = self.box_tile_weight(boxes, tile_size)
             self._box_acc.append(
                 {
                     "boxes": boxes,
