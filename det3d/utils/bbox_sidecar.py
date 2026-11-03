@@ -13,6 +13,7 @@ from fran.utils.bbox_sidecar import (
 )
 from utilz.fileio import save_json
 
+
 NBRHOOD_SIDECAR_EXT = ".csv"
 DETECTION_JSON_EXT = ".json"
 

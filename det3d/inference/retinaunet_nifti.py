@@ -16,6 +16,7 @@ from fran.utils.folder_names import FolderNames
 from utilz.fileio import save_json
 
 
+
 def case_id_from_nifti(nifti_path):
   #AI
     stem = Path(nifti_path).name

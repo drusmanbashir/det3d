@@ -7,6 +7,7 @@ import numpy as np
 import SimpleITK as sitk
 from utilz.fileio import save_json
 
+
 SCHEMA_URL = (
     "https://raw.githubusercontent.com/slicer/slicer/master/"
     "Modules/Loadable/Markups/Resources/Schema/markups-schema-v1.0.3.json#"

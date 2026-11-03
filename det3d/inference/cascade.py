@@ -14,6 +14,8 @@ from monai.transforms.post.dictionary import AsDiscreted
 from monai.transforms.utility.dictionary import ApplyTransformToPointsd, CastToTyped
 
 from utilz.imageviewers import ImageMaskBboxViewer
+from utilz.fileio import load_yaml
+
 
  
 def _finalize_postproc_keys(postproc, postproc_safe, *, safe_mode, k_largest, save):
@@ -255,7 +257,6 @@ if __name__ == "__main__":
     from fran.inference.cascade import img_bbox_collated
     from fran.inference.common_vars import *
     from label_analysis.geometry_pt import LabelMapGeometryPT
-    from utilz.fileio import load_yaml
     from utilz.helpers import pp
     from utilz.imageviewers import ImageBBoxViewer, ImageMaskViewer
 
@@ -276,7 +277,7 @@ if __name__ == "__main__":
 # %%
 # SECTION:-------------------- LIDC cascade — 0 config -------------------------------------------------------------------
     run_w = "TOTALSEG-NJUGU"
-    run_p = "LIDCA-QUARK"
+    run_p = "LIDCA-GYRO"
     localiser_labels = [6]
     project_title = "lidca"
 
@@ -312,7 +313,21 @@ if __name__ == "__main__":
     # imgs = imgs[:10]
     imgs= imgs_k
     imgs = [p for p in imgs_k if case_id in p.name]
-    preds = En.run(imgs, chunksize=chunksize, overwrite=overwrite)
+    # preds = En.run(imgs, chunksize=chunksize, overwrite=overwrite)
+
+# %%
+    # preds_file = Path("/s/agent_rw/tmp/runs") / f"{case_id}_{run_w}_{run_p}_preds.pt"
+    # preds_file.parent.mkdir(parents=True, exist_ok=True)
+    # torch.save(preds, preds_file)
+
+# %%
+    preds_file = Path("/s/agent_rw/tmp/runs") / f"{case_id}_{run_w}_{run_p}_preds.pt"
+    preds = torch.load(preds_file, weights_only=False)
+
+    img = sitk.GetArrayFromImage(sitk.ReadImage(str(imgs[0]))).transpose(2, 1, 0)
+    img_pt = torch.from_numpy(img)
+# %%
+    ImageMaskBboxViewer(img_pt, preds[0]["pred"][0], preds[0]["pred_box"][0])
 # %%
 # SECTION:-------------------- LIDC cascade — 2 localiser bboxes --------------------------------------------------------
     imgs_sublist = imgs

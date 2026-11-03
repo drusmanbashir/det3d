@@ -2,6 +2,8 @@ from pathlib import Path
 
 from utilz.helpers import chunks
 from utilz.listify import listify
+from utilz.fileio import load_json
+
 
 
 class DetLBDRunner:
@@ -97,7 +99,6 @@ if __name__ == "__main__":
 
     import torch
     from fran.inference.common_vars import *
-    from utilz.fileio import load_json
     from utilz.imageviewers import ImageBBoxViewer, ImageMaskViewer
 
     devices = [0]

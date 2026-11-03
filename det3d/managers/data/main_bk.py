@@ -55,6 +55,8 @@ from monai.transforms.spatial.dictionary import ConvertBoxToPointsd, ConvertPoin
 from monai.transforms.utility.dictionary import ApplyTransformToPointsd
 from fran.utils.folder_names import FolderNames
 from utilz.stringz import info_from_filename
+from utilz.fileio import load_dict
+
 
 
 class LoadHDF5DetShardIndexd(MapTransform):
@@ -429,7 +431,6 @@ class DataManagerDet(DataManager):
         pass
 
     def set_preprocessing_params(self):
-        from utilz.fileio import load_dict
 
         global_properties = load_dict(self.project.global_properties_filename)
         self.dataset_params = self.configs["dataset_params"]

@@ -4,18 +4,18 @@ import pandas as pd
 import ray
 from fastcore.basics import listify
 from det3d.preprocessing.helpers import dusting_threshold
-from det3d.transforms.bbox_stats import AttachDetectionGTd
+from det3d.transforms.bbox_stats import AttachDetectionGTd, BBoxInfoStatsd2
 from det3d.transforms.patch_size import NbrhoodsToPatchesOBDD
 from det3d.utils.bbox_sidecar import bbox_sidecar_path, save_detection_sidecar
-from dot.transforms.transforms import BBoxInfoStatsd2
 from fran.preprocessing.preprocessor import CPUS_PER_ACTOR, Preprocessor
 from fran.preprocessing.rayworker_base import RayWorkerBase
 from fran.transforms.imageio import LoadTorchd
 from fran.utils.folder_names import FolderNames
 from monai.transforms import ScaleIntensityRanged
 from monai.transforms.utility.dictionary import EnsureChannelFirstd, ToDeviced
-from utilz.fileio import maybe_makedirs
 from utilz.stringz import strip_extension
+from utilz.fileio import maybe_makedirs
+
 
 class _OBJWorker(RayWorkerBase):
     """Object-bounded detection worker: fixed_spacing PT in → strict-bbox patches out.
@@ -294,7 +294,7 @@ class ObjectBoundedDataGenerator(Preprocessor):
 
 
 # %%
-# SECTION:-------------------- --------------------------------------------------------------------------------------
+# SECTION:-------------------- -------------------------------------------------------------------------------------- <CR>
 if __name__ == "__main__":
     from det3d.configs.parser import ConfigMakerDet
     from fran.managers import Project
@@ -340,5 +340,3 @@ if __name__ == "__main__":
     row = df_pt_run.iloc[0]
     L._process_row(row)
 # %%
-
-

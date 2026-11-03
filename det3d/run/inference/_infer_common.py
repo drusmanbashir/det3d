@@ -3,12 +3,13 @@
 from pathlib import Path
 
 from label_analysis.totalseg import TotalSegmenterLabels
-from utilz.fileio import load_yaml
 
 from fran.data.dataregistry import DS
 from fran.inference.helpers import load_params
 from fran.run.inference.infer import get_run_row, tsl_label_loc
 from fran.utils.common import COMMON_PATHS
+from utilz.fileio import load_yaml
+
 
 
 def default_run_w(run_p=None):

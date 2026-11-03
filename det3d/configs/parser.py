@@ -15,6 +15,8 @@ from fran.configs.parser import (
 from fran.configs.plan_parse import parse_plan_row
 from fran.preprocessing import Mnemonics
 from utilz.stringz import ast_literal_eval
+from utilz.fileio import load_yaml
+
 
 
 DET_PLAN_LIST_KEYS = (
@@ -106,7 +108,6 @@ def merge_param_dicts(base: dict, overlay: dict) -> dict:
 
 
 def nndet_conf_root() -> Path:
-    from utilz.fileio import load_yaml
 
     cfg = load_yaml(Path(os.environ["FRAN_CONF"]) / "config.yaml")
     return Path(cfg["nndet_conf"])
@@ -121,7 +122,6 @@ def resolve_nndet_plan_path(mnemonic: str) -> Path:
 
     lits / liver / litsmc → yaml key ``liver``; lidc / lungs / lung → ``lungs``.
     """
-    from utilz.fileio import load_yaml
 
     canonical = Mnemonics.match(mnemonic)
     paths_file = nndet_plan_paths_file()
