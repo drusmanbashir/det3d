@@ -340,3 +340,13 @@ if __name__ == "__main__":
     row = df_pt_run.iloc[0]
     L._process_row(row)
 # %%
+    b_inv = np.linalg.inv(b)
+# %%
+    aa = np.array([[3,1],[1,1]])
+    c = np.array([[1/2,-1/2],[-1/2,3/2]])
+    b = np.array([[1/3,-1/3],[+2/3, 1/3]])
+    D = 3*aa@c@b
+# %%
+    final = np.array([[1,-1],[2,1]])
+# %%
+

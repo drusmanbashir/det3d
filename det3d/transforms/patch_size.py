@@ -15,7 +15,7 @@ def _ensure_4d(t):
 class NbrhoodsToPatchesOBDD(MapTransform):
     """N2P with strict lesion bbox crop (expand_by=0); 4D channel for downstream tfms."""
 
-    def __init__(  #AI
+    def __init__(  # AI
         self,
         keys,
         expand_mode="mm",
@@ -36,7 +36,7 @@ class NbrhoodsToPatchesOBDD(MapTransform):
             [expand_by] * 3 if isinstance(expand_by, int | float) else expand_by
         )
 
-    def expanded_bbox(self, dat, row):  #AI
+    def expanded_bbox(self, dat, row):  # AI
         """Convert an ITK start-size bbox to expanded spatial slices."""
         bbox = ast_literal_eval(row["bbox"])
         if self.expand_mode == "pct":
@@ -54,7 +54,7 @@ class NbrhoodsToPatchesOBDD(MapTransform):
         )
         return roi
 
-    def crop_patch_tensors(self, dat, bbox):  #AI
+    def crop_patch_tensors(self, dat, bbox):  # AI
         """Crop each image and label map while retaining its channel dimension."""
         crop = SpatialCrop(roi_slices=bbox)
         out = {self.bbox_key: bbox}
@@ -62,7 +62,7 @@ class NbrhoodsToPatchesOBDD(MapTransform):
             out[key] = crop(_ensure_4d(dat[key])).contiguous()
         return out
 
-    def __call__(self, data):  #AI
+    def __call__(self, data):  # AI
         """Create one patch and its lesion statistics per neighborhood row."""
         dat = dict(data)
         outputs = []
