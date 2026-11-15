@@ -4,37 +4,26 @@
 
 ## Data flow and ownership
 
-```text
-FRAN / det3d                                  Native nnDetection
-Project's registered datasources              Cases in one task's cropped-data folder
-    │                                             │
-Pool per-case, per-label histograms            Collect foreground voxels (every tenth voxel),
-across datasources; collect geometry           geometry and annotated instance boxes
-    │                                             │
-Project.global_properties                     dataset_properties.pkl
-    │                                             │
-    │                                         Experiment planner (D3V001)
-    │                                             │
-    │                       ┌─────────────────────┴──────────────────────┐
-    │                       │                                            │
-    │                Intensity statistics                       Geometry + instance boxes
-    │                Mean, std, percentiles                     Choose spacing and axis order
-    │                       │                                            │
-    │                       │                                   Architecture planner (BoxC002)
-    │                       │                                   Patch → network → memory check
-    │                       │                                   → fitted anchors
-    │                       │                                            │
-    │                       └─────────────────────┬──────────────────────┘
-    │                                         Saved experiment plan
-    │                                             │
-    │                       ┌─────────────────────┴──────────────────────┐
-    │                       │                                            │
-    │                Preprocess images                            Construct the model
-    │                Resample, clip, normalize                     Network + anchors
-    │                (GenericPreprocessor)
-    │
-Integration inputs: intensity statistics for normalization;
-geometry + instance boxes + selected spacing for BoxC002.
+```mermaid
+flowchart TB
+    subgraph fran["FRAN / det3d: project-level collection"]
+        sources["All registered datasources"] --> pool["Pool per-case, per-label histograms<br/>and collect geometry"]
+        pool --> project["Project statistics<br/>Project.global_properties"]
+    end
+    subgraph native["Native nnDetection: task-level collection"]
+        cases["Cases in one task's cropped-data folder"] --> collect["Collect every tenth foreground voxel,<br/>geometry and annotated instance boxes"]
+        collect --> props["Dataset statistics<br/>dataset_properties.pkl"]
+    end
+    props --> intensity["Foreground mean, std and percentiles"]
+    props --> geometry["Image geometry and instance boxes"]
+    geometry --> outer["Choose spacing and axis order<br/>D3V001"]
+    outer --> architecture["Fit patch and network to memory;<br/>then fit anchors<br/>BoxC002"]
+    intensity --> plan["Save experiment plan<br/>D3V001"]
+    architecture --> plan
+    plan --> preprocess["Resample, clip and normalize images<br/>GenericPreprocessor"]
+    plan --> model["Construct network and anchors"]
+    project -. "Intensity input for integration" .-> intensity
+    project -. "Spatial input for integration;<br/>instance boxes also required" .-> geometry
 ```
 
 FRAN starts at `Project.maybe_store_projectwide_properties()` → `GlobalProperties`. It considers all registered datasources, but defaults to sampling **100 cases across the combined project**; each datasource is not guaranteed representation. Set `max_cases=None` to include all case IDs. Patch sources select one image row per sampled case for whole-image statistics.
@@ -51,13 +40,17 @@ Statistics are stored per image channel in `plan["dataset_properties"]["intensit
 
 **Where:** outer experiment planner (`D3V001`).
 
-```text
-Take the median spacing on each axis
-    ├─ Coarsest axis spacing > 3 × the smallest other-axis spacing
-    │  AND its median voxel count × 3 < the smallest other-axis count?
-    │      └─ Yes: replace its spacing with that axis's 10th percentile;
-    │              if below the smallest other-axis spacing, use that spacing + 1e-5
-    └─ Otherwise: retain the medians
+```mermaid
+flowchart TB
+    median["Take median spacing and voxel count per axis"] --> test{"Coarsest spacing > 3 × smallest other spacing<br/>AND coarse-axis voxel count × 3<br/>< smallest other-axis count?"}
+    test -- No --> keep["Retain median spacings"]
+    test -- Yes --> percentile["Use the coarse axis's 10th-percentile spacing"]
+    percentile --> floor{"Below the smallest other-axis spacing?"}
+    floor -- Yes --> clamp["Use smallest other-axis spacing + 1e-5"]
+    floor -- No --> selected["Keep the 10th-percentile spacing"]
+    keep --> result["Target spacing"]
+    clamp --> result
+    selected --> result
 ```
 
 Resample each case's shape to this spacing and take the median shape. Pass spacing and median shape to `BoxC002`. Spacing changes also require rebuilding FRAN's spacing-dependent preprocessing outputs.
@@ -74,14 +67,14 @@ Resample each case's shape to this spacing and take the median shape. Pass spaci
 
 **Where:** architecture planner (`BoxC002`) with `MemoryEstimatorDetection`.
 
-```text
-Start with a patch roughly cubic in millimetres, capped by median image shape
-    → derive kernels, strides and detection levels (§2.4–2.5)
-    → build a candidate network and estimate training memory
-      using batch size 4 and an estimated lesion count per patch
-        ├─ Fits the memory target (default 11 GB)? Keep this configuration
-        └─ Does not fit? Shrink the axis largest relative to median image shape
-                        → recompute architecture and divisibility → check again
+```mermaid
+flowchart TB
+    initial["Start with a patch roughly cubic in millimetres;<br/>cap by median resampled image shape"] --> derive["Derive kernels, strides, detection levels<br/>and patch divisibility"]
+    derive --> estimate["Build candidate network and estimate training memory<br/>Batch size 4; estimated lesion count per patch"]
+    estimate --> fits{"Fits memory target?<br/>Default: 11 GB"}
+    fits -- Yes --> accept["Keep patch and architecture;<br/>proceed to anchor fitting"]
+    fits -- No --> shrink["Shrink the axis largest relative<br/>to median image shape"]
+    shrink --> derive
 ```
 
 **det3d:** patch and batch sizes are workbook inputs; GPU memory is not consulted. Patch size also determines minimum crop shape, extended boxes and shard folder tags.
@@ -118,10 +111,11 @@ Transform annotated boxes to the selected spacing and axis order → filter box-
 
 **Where:** outer planner, after architecture planning.
 
-```text
-Longest patch side / shortest patch side > 3?
-    ├─ Yes: set dummy-2D augmentation; spatial deformation operates in-plane
-    └─ No: use ordinary 3D spatial augmentation
+```mermaid
+flowchart TB
+    ratio{"Longest patch side / shortest side > 3?"}
+    ratio -- Yes --> slices["Set dummy-2D augmentation:<br/>apply spatial deformation in-plane"]
+    ratio -- No --> volume["Use ordinary 3D spatial augmentation"]
 ```
 
 **det3d:** rotation ranges are workbook inputs; there is no corresponding automatic flag.
@@ -130,12 +124,13 @@ Longest patch side / shortest patch side > 3?
 
 **Where:** outer planner, after the full-resolution architecture plan.
 
-```text
-Compute the per-axis 99.5th-percentile annotated box size and reorder axes
-    → Does any size exceed the corresponding full-resolution patch side?
-        ├─ No: save only D3V001_3d.pkl
-        └─ Yes: also repeat planning at twice the base spacing
-                → save D3V001_3dlr1.pkl
+```mermaid
+flowchart TB
+    full["Save full-resolution plan<br/>D3V001_3d.pkl"] --> sizes["Compute per-axis 99.5th-percentile<br/>annotated box size; reorder axes"]
+    sizes --> exceeds{"Does any box size exceed<br/>the corresponding patch side?"}
+    exceeds -- No --> stop["Keep only the full-resolution plan"]
+    exceeds -- Yes --> repeat["Repeat planning at twice the base spacing"]
+    repeat --> low["Also save low-resolution plan<br/>D3V001_3dlr1.pkl"]
 ```
 
 The trigger compares stored box voxel sizes directly with patch sizes; it does not rescale boxes to target spacing. Generating the extra plan does not automatically train or combine a second model. A low-resolution workflow remains outside the assigned first integration.
