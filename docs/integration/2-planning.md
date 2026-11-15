@@ -6,35 +6,151 @@
 
 ```mermaid
 flowchart TB
-    subgraph fran["FRAN / det3d: project-level collection"]
-        sources["All registered datasources"] --> pool["Pool per-case, per-label histograms<br/>and collect geometry"]
-        pool --> project["Project statistics<br/>Project.global_properties"]
-    end
     subgraph native["Native nnDetection: task-level collection"]
-        cases["Cases in one task's cropped-data folder"] --> collect["Collect every tenth foreground voxel,<br/>geometry and annotated instance boxes"]
-        collect --> props["Dataset statistics<br/>dataset_properties.pkl"]
+        cases["Cases in one task's cropped-data folder"] --> collect["Collect every tenth foreground voxel,<br/>geometry and annotated instance boxes<br/>(DatasetAnalyzer)"]
+        collect --> props["Dataset statistics<br/>dataset_properties.pkl<br/>(DatasetAnalyzer; dictionary)"]
     end
-    props --> intensity["Foreground mean, std and percentiles"]
-    props --> geometry["Image geometry and instance boxes"]
-    geometry --> outer["Choose spacing and axis order<br/>D3V001"]
-    outer --> architecture["Fit patch and network to memory;<br/>then fit anchors<br/>BoxC002"]
-    intensity --> plan["Save experiment plan<br/>D3V001"]
+    subgraph fran["FRAN / det3d: project-level collection"]
+        sources["All registered datasources"] --> pool["Pool per-case, per-label histograms<br/>and collect geometry<br/>(GlobalProperties)"]
+        pool --> project["Project statistics<br/>Project.global_properties<br/>(Project; dictionary)"]
+    end
+    props --> intensity["Foreground mean, std and percentiles<br/>(DatasetAnalyzer; dictionary)"]
+    props --> geometry["Image geometry and instance boxes<br/>(DatasetAnalyzer)"]
+    geometry --> outer["Choose spacing and axis order<br/>(D3V001)"]
+    outer --> architecture["Fit patch and network to memory;<br/>then fit anchors<br/>(BoxC002)"]
+    intensity --> plan["Save experiment plan<br/>(D3V001; dictionary)"]
     architecture --> plan
-    plan --> preprocess["Resample, clip and normalize images<br/>GenericPreprocessor"]
-    plan --> model["Construct network and anchors"]
+    plan --> preprocess["Resample, clip and normalize images<br/>(GenericPreprocessor)"]
+    plan --> model["Construct network and anchors<br/>(RetinaUNetModule)"]
     project -. "Intensity input for integration" .-> intensity
     project -. "Spatial input for integration;<br/>instance boxes also required" .-> geometry
+    click pool "#globalproperties" "GlobalProperties operations"
+    click project "#globalproperties" "GlobalProperties operations"
+    click collect "#datasetanalyzer" "DatasetAnalyzer operations"
+    click props "#dataset-properties" "Dictionary keys"
+    click intensity "#intensity-properties" "Dictionary keys"
+    click geometry "#dataset-properties" "Dictionary keys"
+    click outer "#d3v001" "D3V001 operations"
+    click architecture "#boxc002" "BoxC002 operations"
+    click plan "#experiment-plan" "Dictionary keys"
+    click preprocess "#genericpreprocessor" "GenericPreprocessor operations"
+    click model "#model-construction" "Model construction operations"
 ```
 
-FRAN starts at `Project.maybe_store_projectwide_properties()` → `GlobalProperties`. It considers all registered datasources, but defaults to sampling **100 cases across the combined project**; each datasource is not guaranteed representation. Set `max_cases=None` to include all case IDs. Patch sources select one image row per sampled case for whole-image statistics.
+Class headings name the owner; `method()` denotes a callable; `name` without parentheses denotes a variable or dictionary key.
 
-FRAN stores both foreground `mean_fg` / `std_fg` from pooled histograms and whole-image `mean_dataset_clipped` / `std_dataset_clipped` after clipping. Native nnDetection CT normalization uses **foreground** mean and std:
+## nnDetection objects
 
-```python
-image = (clip(image, foreground_p0_5, foreground_p99_5) - foreground_mean) / foreground_std
-```
+<a id="datasetanalyzer"></a>
+### DatasetAnalyzer — class
 
-Statistics are stored per image channel in `plan["dataset_properties"]["intensity_properties"]`; `D3V001.create_preprocessor()` passes them to `GenericPreprocessor`. `BoxC002` consumes spatial and instance properties, rather than these normalization values.
+1. Collect cropped image sizes, spacings and crop-size reductions across the task's cases.
+2. Collect instance boxes, class mappings, counts and overlaps.
+3. Pool every tenth foreground voxel per case and channel; compute global and per-case intensity statistics.
+4. Combine analysis-function results and save `dataset_properties.pkl` (`analyze_dataset()`).
+
+<a id="dataset-properties"></a>
+### dataset_properties — dictionary
+
+- `dim`
+- `all_sizes`
+- `all_spacings`
+- `size_reductions`
+- `modalities`
+- `class_dct`
+- `all_classes`
+- `instance_props_per_patient`
+- `num_instances`
+- `class_ious`
+- `all_ious`
+- `intensity_properties`
+
+<a id="intensity-properties"></a>
+### intensity_properties[channel_id] — dictionary
+
+- `median`
+- `mean`
+- `std`
+- `min`
+- `max`
+- `percentile_00_5`
+- `percentile_99_5`
+- `local_props[case_id]`
+
+<a id="d3v001"></a>
+### D3V001 — class
+
+1. Choose target spacing (`determine_target_spacing()`) and axis order (`determine_forward_backward_permutation()`); [2.1–2.2](#21-target-spacing).
+2. Select normalization scheme and masking per channel (`determine_normalization()`, `determine_whether_to_use_mask_for_norm()`; inherited from `AbstractPlanner`).
+3. Compute median image shape at target spacing; call `BoxC002` with shape, spacing and axis order (`AbstractPlanner.plan_base_stage()`, `create_architecture_planner()`).
+4. Merge architecture, anchors and dataset statistics into the plan (`AbstractPlanner.plan_base()`, `AbstractPlanner.plan_base_stage()`).
+5. Set the dummy-2D flag (`AbstractPlanner.plan_base_stage()`); decide whether to generate a second plan at twice the spacing (`trigger_low_res_model()`); [2.8–2.9](#28-dummy-2d-flag).
+6. Save the plan (`AbstractPlanner.save_plan()`); create `GenericPreprocessor` from its settings (`create_preprocessor()`).
+
+<a id="boxc002"></a>
+### BoxC002 — class
+
+1. Set input-channel and class counts (`process_properties()`); compute class weights (`BaseBoxesPlanner.compute_class_weights()`).
+2. Set 3D defaults: batch size 4; encoder channels 32–320; pyramid/head channels 128 (`create_default_settings()`).
+3. Compute patch size, stage count, kernels and strides; shrink and repeat until the network fits memory (`_plan_architecture()`, with `MemoryEstimatorDetection.estimate()`); [2.3–2.4](#23-patch-size-and-memory-fit).
+4. Select detection levels: six stages → `(2, 3, 4, 5)` (`_plan_architecture()`); [2.5](#25-decoder-levels).
+5. Fit anchor sizes: three sizes per axis → **27 anchors per feature-map position** in 3D; scale sizes by detection level (`_plan_anchors()`); [2.7](#27-anchors).
+6. Return dictionary keys `patch_size`, `batch_size`, `architecture` and `anchors` (`plan()`, via `BoxC001.plan()`).
+
+<a id="experiment-plan"></a>
+### Experiment plan — dictionary
+
+- `mode`
+- `target_spacing`
+- `normalization_schemes`
+- `use_mask_for_norm`
+- `anisotropy_threshold`
+- `resample_anisotropy_threshold`
+- `target_spacing_percentile`
+- `dim`
+- `num_modalities`
+- `all_classes`
+- `num_classes`
+- `transpose_forward`
+- `transpose_backward`
+- `dataset_properties`
+- `planner_id`
+- `network_dim`
+- `dataloader_kwargs`
+- `data_identifier`
+- `postprocessing`
+- `patch_size`
+- `batch_size`
+- `architecture`
+- `anchors`
+- `target_spacing_transposed`
+- `median_shape_transposed`
+- `do_dummy_2D_data_aug`
+- `trigger_lr1` (full-resolution plan)
+
+<a id="genericpreprocessor"></a>
+### GenericPreprocessor — class
+
+1. Reorder axes and resample images and masks to planned spacing (`transpose()`, `resample()`).
+2. For standard CT normalization, clip to foreground percentiles 0.5–99.5 and apply `(image - foreground_mean) / foreground_std` using `dataset_properties["intensity_properties"]` for each channel (`normalize_ct()`).
+3. Apply the planned normalization mask (`normalize_ct()`) and save preprocessed data and supporting properties (`run_process()`).
+
+<a id="model-construction"></a>
+### RetinaUNetModule — class
+
+1. Build the network from the planned architecture (`from_config_plan()`).
+2. Build the anchor generator from fitted per-level anchor sizes (`from_config_plan()`).
+
+## FRAN / det3d objects
+
+<a id="globalproperties"></a>
+### GlobalProperties — class
+
+1. Collect cases (`collate_project_cases()`, called from `Project.maybe_store_projectwide_properties()`) across the project's registered datasources; sample up to 100 case IDs by default, or all with `max_cases=None`. Sampling does not guarantee every datasource is represented.
+2. Pool per-case, per-label histograms (`_pooled_histogram()`); compute `mean_fg`, `std_fg` and foreground percentiles (`store_projectwide_properties()`).
+3. Collect spatial properties (`_retrieve_h5_properties()`) and compute median spacing (`store_projectwide_properties()`).
+4. Compute `mean_dataset_clipped` and `std_dataset_clipped` (`compute_std_mean_dataset()`); select one image row per sampled case for patch sources (`filter_img_fnames_for_sampling()`).
+5. Store results in `Project.global_properties` (`store_projectwide_properties()`, `compute_std_mean_dataset()`).
 
 ## 2.1 Target spacing
 
