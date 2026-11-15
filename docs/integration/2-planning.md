@@ -154,7 +154,7 @@ Class headings name the owner; `method()` denotes a callable; `name` without par
 
 ## 2.1 Target spacing
 
-**Where:** outer experiment planner (`D3V001`).
+`D3V001`
 
 ```mermaid
 flowchart TB
@@ -175,13 +175,15 @@ Resample each case's shape to this spacing and take the median shape. Pass spaci
 
 ## 2.2 Axis order
 
-**Where:** outer experiment planner (`D3V001`). Move the coarsest axis first, retain the other axes' relative order, and save the inverse permutation. Apply the same order to shapes, spacing, boxes, kernels and anchors; undo it during inference.
+`D3V001`
+
+Move the coarsest axis first, retain the other axes' relative order, and save the inverse permutation. Apply the same order to shapes, spacing, boxes, kernels and anchors; undo it during inference.
 
 **det3d:** stage A uses RAS x, y, z. Convert axis order consistently when exchanging nnDetection plans and properties.
 
 ## 2.3 Patch size and memory fit
 
-**Where:** architecture planner (`BoxC002`) with `MemoryEstimatorDetection`.
+`BoxC002`
 
 ```mermaid
 flowchart TB
@@ -197,7 +199,7 @@ flowchart TB
 
 ## 2.4 Stage count, kernels and strides
 
-**Where:** inside the architecture/memory loop (`BoxC001.plan_pool_and_conv_pool_late`, inherited by `BoxC002`).
+`BoxC002`
 
 For each axis, downsample while the feature map can remain at least 4 voxels wide. Delay downsampling a coarse axis until the finer axes approach its spacing; use kernel size 1 along that axis while it remains coarse. Derive stage count and patch divisibility from the resulting downsampling sequence.
 
@@ -205,19 +207,23 @@ For each axis, downsample while the feature map can remain at least 4 voxels wid
 
 ## 2.5 Decoder levels
 
-**Where:** inside the same architecture/memory loop (`BoxC002`). For `n` stages, start at `min(max(1, n - 4), 2)` and use every level through `n - 1`. Six stages therefore select `(2, 3, 4, 5)`. These feature maps feed the detection heads and determine anchor locations.
+`BoxC002`
+
+For `n` stages, start at `min(max(1, n - 4), 2)` and use every level through `n - 1`. Six stages therefore select `(2, 3, 4, 5)`. These feature maps feed the detection heads and determine anchor locations.
 
 **det3d:** levels are typed in the workbook. Consume planned levels together with planned strides; the current stride mismatch puts the first detection level at full patch resolution ([A1](issues.md)).
 
 ## 2.6 Channel widths
 
-**Where:** architecture planner defaults. Start with 32 channels, double per downsampling stage up to 320; feature pyramid and detection head use 128 channels. These are fixed 3D defaults, not dataset-derived decisions.
+`BoxC002`
+
+Start with 32 channels, double per downsampling stage up to 320; feature pyramid and detection head use 128 channels. These are fixed 3D defaults, not dataset-derived decisions.
 
 **det3d:** uses the same values.
 
 ## 2.7 Anchors
 
-**Where:** after the patch/network memory loop (`BoxC002._plan_anchors`).
+`BoxC002`
 
 Transform annotated boxes to the selected spacing and axis order → filter box-size extremes outside the 0.5th–99.5th percentiles → fit three sizes per axis to maximize mean best box–anchor IoU. Run differential evolution three times and retain the best result. Combine sizes into 27 anchors per position in 3D and scale sizes for each detection level's stride.
 
@@ -225,7 +231,7 @@ Transform annotated boxes to the selected spacing and axis order → filter box-
 
 ## 2.8 Dummy-2D flag
 
-**Where:** outer planner, after architecture planning.
+`D3V001`
 
 ```mermaid
 flowchart TB
@@ -238,7 +244,7 @@ flowchart TB
 
 ## 2.9 Low-resolution plan
 
-**Where:** outer planner, after the full-resolution architecture plan.
+`D3V001`
 
 ```mermaid
 flowchart TB
