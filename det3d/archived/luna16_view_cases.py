@@ -22,7 +22,7 @@ def resolve_nifti(path_str):
     stem = Path(path_str).name
     if not stem.endswith(".nii.gz"):
         stem = f"{Path(path_str).stem}.nii.gz"
-    for ds in (DS.lidc, DS.lidc2):
+    for ds in (DS.lidc,):
         candidate = ds.folder / "images" / stem
         if candidate.is_file():
             return candidate
@@ -42,7 +42,7 @@ def list_val_cases(n=N_VIEW, project="lidca", plan_id=1, fold=0, pred_dir=PRED_D
     _, val_data, _meta = load_lidc_train_val(
         project_title="lidc",
         plan_id=1,
-        ds_name="lidc_all",
+        ds_name="lidc",
         fold=0,
     )
     dm, _plan, _configs = setup_hybrid_dm(project, plan_id, fold=fold, batch_tfms=True)

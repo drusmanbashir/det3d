@@ -36,9 +36,9 @@ def lbd_pt_for_case(project, plan, case_id):
     return pt_path
 
 
-def select_lidc2_nifti(n=10):
+def select_lidc_nifti(n=10):
   #AI
-    return sorted((DS.lidc2.folder / "images").glob("*.nii.gz"))[: int(n)]
+    return sorted((DS.lidc.folder / "images").glob("*.nii.gz"))[: int(n)]
 
 
 def load_retinaunet_manager(ckpt_path, device):
@@ -201,7 +201,7 @@ def run_lidc2_seg_infer(
     spacing = spacing_from_plan(plan)
 
     manifest = []
-    nifti_paths = select_lidc2_nifti(n=n_cases)
+    nifti_paths = select_lidc_nifti(n=n_cases)
     for index, nifti_path in enumerate(nifti_paths):
         case_id = case_id_from_nifti(nifti_path)
         pt_path = lbd_pt_for_case(project, plan, case_id)

@@ -281,8 +281,8 @@ if __name__ == "__main__":
     localiser_labels = [6]
     project_title = "lidca"
 
-    lidc_all_fldr = Path("/media/UB/datasets/lidc_all/images")
-    lidc_all_lm = Path("/media/UB/datasets/lidc_all/lms")
+    lidc_fldr = Path("/media/UB/datasets/lidc/images")
+    lidc_lm = Path("/media/UB/datasets/lidc/lms")
     fldr_k = Path("/s/xnat_shadow/misc/images")
     imgs_k = sorted(fldr_k.glob("*.nii.gz"), key=lambda p: p.stat().st_mtime)
 
@@ -290,7 +290,7 @@ if __name__ == "__main__":
 # %%
 # SECTION:-------------------- LIDC cascade — 1 inferer -----------------------------------------------------------------
 
-    imgs = sorted(lidc_all_fldr.glob("*.nii.gz"))
+    imgs = sorted(lidc_fldr.glob("*.nii.gz"))
     case_id = "misc_00008"
     print(imgs)
     En = DetSegBBoxCascadeInferer(
@@ -491,7 +491,7 @@ if __name__ == "__main__":
 
 # %%
 # SECTION:-------------------- LIDC cascade — 6 CC vs GT ----------------------------------------------------------------
-    gt_fn = lidc_all_lm / f"{case_id}.nii.gz"
+    gt_fn = lidc_lm / f"{case_id}.nii.gz"
     gt_arr = sitk.GetArrayFromImage(sitk.ReadImage(str(gt_fn)))
     gt_t = torch.from_numpy(gt_arr).permute(2, 1, 0).contiguous()
     pred_t = pred_full.squeeze(0)

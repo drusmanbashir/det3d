@@ -14,7 +14,7 @@ from det3d.inference.post import InvPreprocessBoxd, Offd
 from fran.inference.helpers import load_images_nifti
 
 CASE_ID = "lidc_0001"
-LIDC_ROOT = Path("/media/UB/datasets/lidc_all")
+LIDC_ROOT = Path("/media/UB/datasets/lidc")
 LM_FN = LIDC_ROOT / "lms" / f"{CASE_ID}.nii.gz"
 IGNORE_LABELS = [1]
 SPACING = (0.8, 0.8, 1.5)

@@ -26,7 +26,7 @@ Trigger when the user asks for help debugging **inference alignment**: seg/bbox 
 | Name | Use |
 |------|-----|
 | `pseudo_cuboid` | Stand-in image + 2 cuboid lesions; native spacing = plan spacing |
-| `lidc_0001` | Real `/media/UB/datasets/lidc_all/`; 2 lesions (`ignore_labels=[6]`) |
+| `lidc_0001` | Real `/media/UB/datasets/lidc/`; 2 lesions (`ignore_labels=[6]`) |
 
 ## Interactive (real model)
 

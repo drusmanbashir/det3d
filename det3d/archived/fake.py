@@ -20,7 +20,7 @@ from monai.transforms import Compose
 
 from det3d.inference.patch import DetPatchInfererRetinaUNet
 
-REF_NIFTI = Path("/media/UB/datasets/lidc_all/images/lidc_0001.nii.gz")
+REF_NIFTI = Path("/media/UB/datasets/lidc/images/lidc_0001.nii.gz")
 PATCH_SIZE = (128, 128, 64)
 PATCH_OVERLAP = 0.5
 SCORE_THRESH = 0.01

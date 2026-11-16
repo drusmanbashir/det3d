@@ -19,7 +19,7 @@ CASE_ID = "lidc_0007"
 SCORE_MIN = 0.02
 SHOW = "sidecar"  # sidecar | pipeline | both
 ORIENTATION = "axial"
-LIDC_ROOT = Path("/media/UB/datasets/lidc_all")
+LIDC_ROOT = Path("/media/UB/datasets/lidc")
 PRED_DIR = Path("/s/fran_storage/predictions/lidca") / RUN_P
 
 # RetinaUNet cascade bbox handoff (patch -> cascade):

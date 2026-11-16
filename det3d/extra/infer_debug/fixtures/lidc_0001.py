@@ -1,4 +1,4 @@
-"""Fixture case: lidc_all lidc_0001 real image + LM (2 label-1 lesions, ignore 6)."""
+"""Fixture case: lidc lidc_0001 real image + LM (2 label-1 lesions, ignore 6)."""
 
 from copy import deepcopy
 from pathlib import Path
@@ -17,7 +17,7 @@ from det3d.extra.infer_debug.fixtures._geom import (
 from fran.inference.helpers import full_meta_from_image, load_images_nifti
 
 CASE_ID = "lidc_0001"
-LIDC_ROOT = Path("/media/UB/datasets/lidc_all")
+LIDC_ROOT = Path("/media/UB/datasets/lidc")
 IMAGE_FN = LIDC_ROOT / "images" / f"{CASE_ID}.nii.gz"
 LM_FN = LIDC_ROOT / "lms" / f"{CASE_ID}.nii.gz"
 IGNORE_LABELS = [6]

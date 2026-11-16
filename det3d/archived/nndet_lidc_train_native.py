@@ -25,7 +25,7 @@ from utilz.imageviewers import ImageBBoxViewer, ImageMaskViewer
 NNDET_ROOT = Path("/home/ub/code/nnDetection")
 DEFAULT_DET_DATA = Path("/r/datasets/nndet_data")
 DEFAULT_DET_MODELS = Path("/s/agent_rw/nndet_models")
-DEFAULT_LIDC_SOURCE = Path("/media/UB/datasets/lidc_all")
+DEFAULT_LIDC_SOURCE = Path("/media/UB/datasets/lidc")
 LIDC_LESION_STATS = DEFAULT_LIDC_SOURCE / "label_analysis" / "lesion_stats.csv"
 LIDC_LMS_DIR = DEFAULT_LIDC_SOURCE / "lms"
 TASK = "Task012_LIDC"

@@ -18,7 +18,7 @@ infer_debug/
   metrics.py             # fg count, LMG component masks, box deltas
   fixtures/
     pseudo_cuboid.py     # in-memory 2-cuboid LM (exact roundtrip target)
-    lidc_0001.py         # real CT + LM (`/media/UB/datasets/lidc_all/`)
+    lidc_0001.py         # real CT + LM (`/media/UB/datasets/lidc/`)
   streams/
     cascade_retinaunet.py    # patch + cascade post dict builders, fake batch
     cascade_lm_roundtrip.py  # end-to-end roundtrip + stage reports

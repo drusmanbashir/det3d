@@ -13,8 +13,8 @@ if __name__ == '__main__':
 #SECTION:-------------------- setup --------------------------------------------------------------------------------------
     
     case = "lidc_0583"
-    img = sitk.ReadImage(f"/media/UB/datasets/lidc_all/images/{case}.nii.gz")
-    lm  = sitk.ReadImage(f"/media/UB/datasets/lidc_all/lms/{case}.nii.gz")
+    img = sitk.ReadImage(f"/media/UB/datasets/lidc/images/{case}.nii.gz")
+    lm  = sitk.ReadImage(f"/media/UB/datasets/lidc/lms/{case}.nii.gz")
     inst = sitk.ReadImage(f"/r/datasets/nndet_data/Task012_LIDC/raw_splitted/labelsTr/{case}.nii.gz")
 # %%
     ImageMaskViewer([img, inst],'im')
