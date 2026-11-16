@@ -1,0 +1,80 @@
+# Integration feature map
+
+This file records the agreed integration scope and distinguishes it from candidates that still need a decision. The [pipeline comparison](../nndetection-integration.md) and [phase details](2-planning.md) describe the audited implementation; their findings are not all assignments to change it.
+
+## nnDetection execution order
+
+This is the native nnDetection pipeline. Importing `BoxC002` supplies the planning step; the custom data-loading and training paths remain separate integration boundaries.
+
+| Order | Stage and owning code | What happens and where the mapped features fit |
+|---|---|---|
+| 1 | Dataset analysis: [`ImageCropper`](../../../nnDetection/nndet/preprocessing/crop.py), [`DatasetAnalyzer`](../../../nnDetection/nndet/planning/analyzer.py) | Crop to the nonzero image region and collect geometry, intensity and instance statistics. This produces the planner's dataset properties. |
+| 2 | Experiment/architecture planning: [`D3V001`](../../../nnDetection/nndet/planning/experiment/v001.py), [`BoxC002`](../../../nnDetection/nndet/planning/architecture/boxes/c002.py) | The outer planner chooses spacing and axis order. `BoxC002` jointly determines patch size, topology and memory fit, then fits anchors. These decisions precede training batches. |
+| 3 | Stored preprocessing: [`GenericPreprocessor`](../../../nnDetection/nndet/preprocessing/preprocessor.py) | Apply the planned array order, spacing and normalisation; save volumes, instance masks and supporting properties. The assigned integration can retain FRAN's preprocessing with a consistent resolved plan. |
+| 4 | Training-loader setup: [`Datamodule.setup` and `train_dataloader`](../../../nnDetection/nndet/io/datamodule/bg_module.py) | Set the final patch/batch sizes, derive the larger generator crop from augmentation settings, and connect the loader to the augmentation wrapper. [`DataLoader3DFast.build_cache`](../../../nnDetection/nndet/io/datamodule/bg_loader.py) builds the case list and dataset-wide `(case_id, instance_id)` list. |
+| 5 | Per-batch case/lesion sampling: [`DataLoader3DFast.select` and `generate_train_batch`](../../../nnDetection/nndet/io/datamodule/bg_loader.py) | Choose random-case versus forced-foreground slots; for foreground slots select a lesion from the dataset-wide instance list. Open the selected case arrays, choose crop locations through `DataLoader3DOffset.get_fg_crop` or `get_bg_crop`, and extract oversized patches. This is where the sampling-policy candidate applies. |
+| 6 | Per-batch augmentation: [`BaseMoreAug.get_training_transforms`](../../../nnDetection/nndet/io/augmentation/bg_aug.py) | Spatial augmentation produces the final training patch, followed by intensity augmentation and mirroring. Crop-margin calculation, dummy-2D handling and exact gamma policy belong here or in setup immediately before it. |
+| 7 | Target creation and model/loss: [`RetinaUNetModule.training_step`](../../../nnDetection/nndet/ptmodule/retinaunet/base.py), [`BaseRetinaNet.train_step`](../../../nnDetection/nndet/core/retina.py) | Rebuild boxes/classes from the augmented instance mask, run the encoder/decoder and heads, match anchors with ATSS, sample hard negatives and calculate losses. det3d already supplies its own synchronised box targets before calling the upstream model. |
+| 8 | Optimisation, validation and inference | Update weights and learning rate during training. Whole-scan prediction, parameter sweeps, test-time mirroring and model/fold fusion happen downstream; the latter two are parked below. [Training](5-training.md), [inference](6-inference.md), [evaluation](7-evaluation.md). |
+
+### Where the sampling policy kicks in
+
+`generate_train_batch()` calls `select()` for every new batch, before opening the selected image/mask arrays and extracting crops. The default `DataLoader3DOffset` inherits this selection policy from `DataLoader3DFast`.
+
+For batch size 4 and `oversample_foreground_percent=0.5`, `select()` assigns two random-case slots and two forced-foreground slots. Each foreground slot draws uniformly from the training fold's complete instance list, determining both the case and lesion. A random-case crop can still contain lesions; these slots are not guaranteed negative examples.
+
+`DataLoader3DOffset.get_fg_crop()` then chooses a random offset that accommodates the selected lesion within the final patch where feasible; augmentation follows crop extraction. The current custom path instead selects cases through its loader, then [`RandCropExtendedBBoxd`](../../det3d/managers/data/main.py) independently decides foreground/background and samples a lesion-associated centre range within that case. Both paths already sample foreground/background; their case/lesion probabilities and batch quotas differ.
+
+The custom foreground/background draw is weighted, not uniform: construction passes `pos=dataset_params["fgbg_ratio"]` and `neg=1`, and the sampler evaluates `self.R.rand() < self.pos / (self.pos + self.neg)`. With foreground available and ratio `r`, the probabilities are `P(FG)=r/(r+1)` and `P(BG)=1/(r+1)`; for example, `r=3` gives 75%/25%. This is an independent weighted random draw for each crop, so the realised foreground count can vary by batch. The same formula is used by FRAN's flat-index and extended-box crop samplers. For the extended-box path, foreground chooses a lesion-associated centre range within the case; the background branch tries centres outside those ranges. Neither branch labels the entire resulting patch as exclusively foreground or background.
+
+The custom training loaders use `DataLoader(..., shuffle=True)` without a replacement sampler: a complete epoch visits every case in the loader's training dataset once, producing `samples_per_file` crops for each case. This is coverage of cases, not an exhaustive visit to every lesion or voxel. Native nnDetection instead draws cases/instances repeatedly at random and defines an epoch by `num_batches_per_epoch` (default 2,500), with no guaranteed complete case pass. Partial epochs or externally configured training limits can shorten the custom pass. Compare sampling policies at matched optimisation steps or patch counts, not equal epoch counts.
+
+This patch sampling chooses which image regions the model sees. Hard-negative sampling in step 7 chooses which predicted anchors contribute to the detection loss; it is already reused and is a separate operation.
+
+## Assigned work
+
+| Feature | Status | Scope and ownership |
+|---|---|---|
+| Sliding-window box weights | Implemented locally | [`swi_predictor`](../../det3d/inference/patch.py) computes the tile weight before adding the tile origin. The focused CPU check failed before the correction and passed afterward; real-image effects remain unmeasured. |
+| Encoder depth, kernels, strides and detection levels | Assigned; not implemented | Import nnDetection's `BoxC002` planning rather than maintain constant `auto` values. Respect its inter-stage stride convention and correct dependent stride calculations. [Planning 2.4–2.5](2-planning.md#24-stage-count-kernels-and-strides). |
+| Patch-size computation and memory fit | Assigned; not implemented | Compute patch size and architecture together from target spacing, median resampled image dimensions, network configuration, memory budget and estimated lesion count per patch. `BoxC002` uses batch 4 for its default 3D fit. Resolve the plan before constructing `PreprocessingManager` in [`process_plan`](../../../fran/fran/run/preproc/analyze_resample.py), so resampling and LBD preprocessing consume the result. |
+| Planner input statistics | Required for the assigned planner integration | Collect training-case image geometry and lesion boxes, classes, counts and overlaps using the intended label/instance policy. Reuse FRAN's analysis where suitable; det3d translates detection statistics into the `dataset_properties.pkl` expected by nnDetection. Completed LBD crops cannot be the prerequisite for choosing the patch size they already depend on. |
+| Fitted anchors | Included with complete `BoxC002` integration | Consume fitted anchor parameters and their scaling by detection level. Replace the typed anchor-shape conversion on the planned RetinaUNet path. [Planning 2.7](2-planning.md#27-anchors). |
+| One resolved plan across the pipeline | Assigned design | Save the final plan before preprocessing; consume it consistently during preprocessing, model construction and inference. Keep existing checkpoint architectures reproducible. Replace `PlanAdvisorDet` and reduce `plan_from_det3d` to connecting the resolved plan. |
+| Shared FRAN benefit | Assigned approach | Work primarily on detection. Put common geometry analysis and plan handling in FRAN where both libraries use it; keep `BoxC002`, anchors and detection-level policy in det3d. FRAN's [`_compute_topology`](../../../fran/fran/architectures/nnunet.py) already uses nnU-Net v2. Signpost how earlier plan resolution could let it consume a full nnU-Net memory-fitted plan. |
+| Coordinate conventions and experiment overrides | Required throughout | Preserve the chosen target spacing and existing coordinate switches for the first integration. Convert box layout, axis order and stride conventions explicitly. nnU-Net v2 includes the initial identity stride; nnDetection expects only inter-stage transitions. Keep explicit overrides for custom experiments and agent-driven hyperparameter search, recalculating dependent fields and memory fit before saving. |
+
+Completion of planning integration means the saved patch dimensions, actual network stages/strides, preprocessing geometry and inference geometry agree. Accuracy improvements require measurement.
+
+## Parked inference work
+
+| Feature | Status | Reuse and boundary |
+|---|---|---|
+| Test-time mirroring | Parked | Predict original and mirrored patches, restore box coordinates and retain separate prediction sets. Reuse nnDetection's mechanism when resumed. [Inference 6.2](6-inference.md#62-test-time-mirroring). |
+| Model/fold fusion | Parked | Combine predictions across mirrored variants and model/fold checkpoints using Weighted Box Clustering. Multiple-fold training is a prerequisite for fold fusion. Evaluate accuracy and inference cost when resumed. [Inference 6.5–6.7](6-inference.md#65-fusion-across-sets). |
+
+## Existing capabilities to reuse
+
+These findings come from the current source paths, not from executing a training run. A different probability, range or statistic does not make an existing capability absent.
+
+| Capability | Verified implementation | Integration consequence |
+|---|---|---|
+| CT clipping and standardisation | FRAN's [`NormaliseClip`](../../../fran/fran/transforms/intensitytransforms.py) clips then applies `(image - mean) / std`. [`DataManager.create_transforms`](../../../fran/fran/managers/data/main.py) supplies `mean_fg`/`std_fg`; [`fixed_spacing`](../../../fran/fran/preprocessing/fixed_spacing.py) also supports clipped dataset statistics. | Normalisation already exists. Detection's [`DataManagerDetSource`](../../det3d/managers/data/main.py) uses clipping and scaling to 0–1 instead. A choice between these policies is a separate experiment, not a missing normalisation implementation. |
+| Foreground/background sampling | FRAN's [`RandCropByFlatIndicesd` and `RandCropExtendedBBoxd`](../../../fran/fran/managers/data/main.py), and det3d's [`RandCropExtendedBBoxd`](../../det3d/managers/data/main.py), already choose foreground/background crops using `fgbg_ratio`. Both libraries reuse [`sample_crop_center_from_extended_boxes`](../../../fran/fran/transforms/crop_indices.py). | Reuse the shared crop machinery. Compare the specific lesion-selection and batch-composition policies below. |
+| Oversized crop before augmentation | FRAN and det3d compute the source crop as `patch_size * prezoom_scale`, then apply affine augmentation and crop/pad to the final patch. See their `DataManagerSource`/`DataManagerDetSource` paths above. | The mechanism exists; whether a run uses an oversized crop depends on `prezoom_scale`. Do not add a duplicate implementation. |
+| Spatial and intensity augmentation | FRAN's source path has flips, affine rotation/scaling, intensity scaling, noise, shifting and gamma-based contrast. det3d additionally includes Gaussian smoothing and another gamma transform. Their [FRAN](../../../fran/fran/managers/data/batch_tfms.py) and [det3d](../../det3d/managers/data/batch_tfms.py) batch paths also perform spatial augmentation. | Reuse these transforms and box synchronisation. Only concrete upstream policy differences are candidates below. |
+| Segmentation topology planning | FRAN's [`_compute_topology`](../../../fran/fran/architectures/nnunet.py) derives stages, kernels and strides from the supplied spacing and patch. | Already data-dependent. The additional opportunity is full patch/memory planning before preprocessing. |
+| Detector model, matching, losses and evaluation | The active RetinaUNet path already uses nnDetection's model, ATSS matching, hard-negative sampling, detection/auxiliary segmentation losses and evaluators. [Training 5.1–5.2](5-training.md#51-matching-and-sampling). | Retain upstream implementations. |
+
+## Specific candidates requiring a decision
+
+| Difference | Current source evidence | Possible work |
+|---|---|---|
+| Lesion selection across cases and foreground quota within a batch | nnDetection's [`DataLoader3DFast.select`](../../../nnDetection/nndet/io/datamodule/bg_loader.py) selects foreground instances uniformly from a dataset-wide instance list and reserves a fixed number of foreground slots per batch. The custom loaders make a shuffled pass through cases per complete epoch, then draw foreground/background independently for each crop. | Compare sampling distributions at matched steps or patch counts; importing generic foreground/background cropping is unnecessary. |
+| Generator crop dimensions tied to augmentation limits | nnDetection's [`get_patch_size_generator`](../../../nnDetection/nndet/io/augmentation/bg_aug.py) derives extra crop dimensions from rotation/scale ranges. The custom paths use the configured `prezoom_scale`. | Consider deriving that margin from augmentation settings using upstream logic. |
+| Anisotropy-aware augmentation and exact gamma policy | nnDetection's active [`BaseMoreAug`](../../../nnDetection/nndet/io/augmentation/bg_aug.py) supports `dummy_2D` and inverted/statistics-preserving gamma. These mechanisms were not found in the inspected custom source/batch chains; ordinary gamma and spatial augmentation already exist. | Compare these exact policies, including their ranges and probabilities. No replacement augmentation stack is assigned. |
+| Learning-rate recipe | FRAN's [`UNetManager`](../../../fran/fran/managers/unet.py) supports `ReduceLROnPlateau` or no scheduler; [`configure_detection_optimizers`](../../det3d/managers/det_schedule.py) also uses plateau scheduling and disables warm-up. | Upstream warm-up plus per-iteration polynomial decay is a distinct candidate; compare at controlled training budgets. |
+| Automatic target spacing | Target spacing is an input to the assigned `BoxC002` integration. Selection from dataset spacing statistics belongs to nnDetection's outer planner or nnU-Net's full planner. [Planning 2.1](2-planning.md#21-target-spacing). | Consider after the first integration; account for preprocessing and coordinate consequences. |
+| Whole-scan validation and inference-parameter tuning | Full-case inference and offline scoring exist, while the coordinated prediction-preservation and parameter-sweep workflow is incomplete. [Inference 6.6](6-inference.md#66-parameter-sweep), [evaluation 7.2](7-evaluation.md#72-whole-case-validation-scoring). | Preserve candidates before lossy filtering and compare tuned settings on whole validation scans. This remains a separate assignment. |
+
+Low-resolution plan generation alone does not supply an operational low-resolution training and inference workflow. It remains outside the assigned first integration.

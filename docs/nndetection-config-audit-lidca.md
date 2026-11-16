@@ -25,7 +25,7 @@ These values were checked by calling `ConfigMakerDet(Project("lidca")).setup(4)`
 | `model_params.arch` | `retinanet` | Detection sheet `model_params`; `--arch retinaunet` overrides it before manager selection. No nnDetection code runs on the default `retinanet` path. |
 | `model_params.lr` | `0.01` | Inherited from Fran's base workbook; CLI `--lr` can change the training LR. |
 | `model_params.max_epochs` | absent | Training setup inserts CLI `--epochs` (default 600); nnDetection's YAML default 50 is overwritten in the internal module. |
-| `dataset_params.datasources` | `lidc, lidc2` | Detection `data_params` sheet; these are `det3d` data inputs. |
+| `dataset_params.datasources` | `lidc` | Detection `data_params` sheet; these are `det3d` data inputs. |
 | `dataset_params.fold`, `batch_size`, `valid_impl` | `0`, `4`, `bbox_anchor` | Detection `data_params` sheet; training CLI can override fold and batch size. nnDetection's data loader is not used. |
 | `dataset_params.spacing` | `[0.703125, 0.703125, 1.25]` | Detection `data_params` sheet. This is a distinct value from plan 4's spacing below. |
 | `plan_train.spacing` | `(0.8, 0.8, 1.5)` | `plans_det` row 4 overrides the shared plan default. Not selected by nnDetection. |

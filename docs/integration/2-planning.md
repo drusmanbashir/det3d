@@ -74,6 +74,8 @@ Class headings name the owner; `method()` denotes a callable; `name` without par
 
 ### BoxC002 — class
 
+[Architecture and computations](BoxC002.md).
+
 1. Set input-channel and class counts (`process_properties()`); compute class weights (`BaseBoxesPlanner.compute_class_weights()`).
 2. Set 3D defaults: batch size 4; encoder channels 32–320; pyramid/head channels 128 (`create_default_settings()`).
 3. Compute patch size, stage count, kernels and strides; shrink and repeat until the network fits memory (`_plan_architecture()`, with `MemoryEstimatorDetection.estimate()`); [2.3–2.4](#2.3%20Patch%20size%20and%20memory%20fit).
