@@ -14,8 +14,15 @@ from fran.configs.parser import (
 )
 from fran.configs.plan_parse import parse_plan_row
 from fran.preprocessing import Mnemonics
+from fran.preprocessing.plan_registry import PlanRegistry
 from utilz.stringz import ast_literal_eval
 from utilz.fileio import load_yaml
+from det3d.configs.nndet_planning import (
+    apply_nndet_plan,
+    load_nndet_plan,
+    nndet_plan_input_key,
+    nndet_plan_path,
+)
 
 
 
@@ -308,11 +315,17 @@ class ConfigMakerDet(ConfigMaker):
         return out
 
     def _parse_det_plan(self, plan: dict) -> dict:
+        auto_spacing = plan.get("spacing") == "auto"
+        if auto_spacing:
+            plan.pop("spacing")
         plan = parse_excel_dict(plan, DET_PLAN_LIST_KEYS)
         for key in DET_PLAN_LIST_KEYS:
             if key in plan and isinstance(plan[key], str):
                 plan[key] = ast_literal_eval(plan[key])
-        return parse_plan_row(plan)
+        plan = parse_plan_row(plan)
+        if auto_spacing:
+            plan["spacing"] = "auto"
+        return plan
 
     def _plan_row_extras(self, plan_id: int) -> dict:
         row = dict(self.plans.loc[plan_id])
@@ -338,6 +351,8 @@ class ConfigMakerDet(ConfigMaker):
         plan_selected.update(self._plan_row_extras(plan_id))
         for key in DET_PLAN_EXCLUDED_KEYS:
             plan_selected.pop(key, None)
+        plan_selected["identified_preprocessing"] = True
+        plan_selected["prezoom_scale"] = float(self.configs["dataset_params"].get("prezoom_scale", 1.0))
         return self._parse_det_plan(plan_selected)
 
     def compare_plan_with_advisor(self, plan_id: int) -> pd.DataFrame:
@@ -348,11 +363,40 @@ class ConfigMakerDet(ConfigMaker):
         suggested = self.advisor.suggest(fold=fold, spacing=spacing, patch_size_hint=patch_size)
         return self.advisor.compare(plan, suggested)
 
-    def setup(self, plan_train: int, verbose=True):
+    def setup(self, plan_train: int, verbose=True, load_computed=True):
         plan_valid = plan_train
         plan_test = plan_train
         self._set_active_plans(plan_train, plan_valid, plan_test)
+        if load_computed:
+            self._load_computed_plan(plan_train)
         self.add_dataset_props()
+
+    def _load_computed_plan(self, plan_id):
+        plan_path = nndet_plan_path(self.project, plan_id)
+        registry = PlanRegistry(self.project)
+        saved = registry.lookup(plan_id)
+        if saved is None:
+            if plan_path.exists():
+                raise FileNotFoundError(
+                    f"BoxC002 plan {plan_path} has no current PlanRegistry record"
+                )
+            if self.configs["plan_train"]["spacing"] == "auto":
+                raise FileNotFoundError(
+                    f"Plan {plan_id} uses automatic spacing; run preprocessing and BoxC002 planning first"
+                )
+            return
+
+        row = dict(self.plans.loc[plan_id])
+        registry.require_current(plan_id, row, saved["input_key"])
+        computed = load_nndet_plan(self.project, plan_id)
+        if "target_spacing" in computed:
+            self.configs["plan_train"]["spacing"] = list(computed["target_spacing"])
+        lbd_folder = Path(json.loads(saved["files_json"])[1])
+        input_key = nndet_plan_input_key(
+            self.project, self.configs["plan_train"], lbd_folder
+        )
+        registry.require_current(plan_id, row, input_key)
+        apply_nndet_plan(self.configs, computed)
 
     def _set_active_plans(self, plan_train, plan_valid, plan_test):
         for plan_id, suffix in [

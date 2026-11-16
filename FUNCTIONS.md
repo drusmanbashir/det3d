@@ -1,4 +1,5 @@
 # FUNCTIONS.md
+Scope: `det3d/configs/nndet_planning.py`
 
 ## run/preprocessing
 
@@ -46,6 +47,10 @@ Detection LBD preproc: `fran/run/preproc/analyze_resample.py --pipeline det` (Co
 ## det/architectures
 
 - `create_detector.py` — `detector_arch_from_conf`, `create_detector_from_conf` (fran `create_network` pattern; retinanet | retinaunet)
+
+## Libraries (import, not run)
+
+- `det3d/configs/nndet_planning.py` — build/load BoxC002 plans from selected FRAN LBD cases, fingerprint inputs, and merge computed runtime fields
 
 ## det/detection
 

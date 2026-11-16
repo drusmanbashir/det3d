@@ -25,6 +25,8 @@ def ensure_nndet_importable():
 
 def plan_anchors_from_det3d(plan_train):
     # AI
+    if "nndet_anchors" in plan_train:
+        return deepcopy(plan_train["nndet_anchors"])
     shapes = plan_train["base_anchor_shapes"]
     n_levels = len(plan_train["decoder_levels"])
     while len(shapes) < n_levels:
@@ -61,16 +63,32 @@ def plan_from_det3d(plan_train, plan_path=None):
         raise ValueError(
             "nnDet plan pickle is not read at RetinaUNet build; use plan_path=None"
         )
-    return {
-        "architecture": plan_architecture_from_det3d(plan_train),
+    architecture = plan_architecture_from_det3d(plan_train)
+    if "nndet_anchors" in plan_train:
+        architecture["seg_classes"] = len(plan_train["fg_labels"])
+    plan = {
+        "architecture": architecture,
         "anchors": plan_anchors_from_det3d(plan_train),
         "patch_size": [int(v) for v in plan_train["patch_size"]],
     }
+    return plan
 
 
 def apply_det3d_plan_to_nndet_model_cfg(model_cfg, plan_train):
     # AI
     model_cfg = deepcopy(model_cfg)
+    start_channels = int(plan_train["encoder_start_channels"])
+    fpn_channels = start_channels * 4
+    model_cfg["plan_arch_overwrites"].update(
+        {
+            "dim": int(plan_train["spatial_dims"]),
+            "in_channels": int(plan_train["n_input_channels"]),
+            "start_channels": start_channels,
+            "max_channels": int(plan_train["encoder_max_channels"]),
+            "fpn_channels": fpn_channels,
+            "head_channels": fpn_channels,
+        }
+    )
     model_cfg["matcher_kwargs"]["num_candidates"] = int(
         plan_train["matcher_num_candidates"]
     )
@@ -225,8 +243,11 @@ def det3d_batch_to_nndet(
         label = torch.as_tensor(batch["label"][i], dtype=torch.long).reshape(-1)
         target_classes_raw.append(label)
     target_classes = nndet_target_classes(target_boxes, target_classes_raw, fg_labels)
-    lm = batch[seg_key]
-    target_seg = lm.squeeze(1).long()
+    lm = batch[seg_key].squeeze(1).long()
+    label_to_seg = {int(label): index + 1 for index, label in enumerate(fg_labels)}
+    target_seg = torch.zeros_like(lm)
+    for label, mapped in label_to_seg.items():
+        target_seg[lm == label] = mapped
     out = {
         "data": data,
         "target_boxes": target_boxes,
