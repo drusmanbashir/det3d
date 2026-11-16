@@ -30,6 +30,7 @@ pyrightconfig.json
 *.zip
 .mypy*
 cufil*
+.agent/INDEX.*
 
 # Shared block synced from agent/templates/shared_gitignore_common.txt
 # Shared gitignore template for fran, localiser, utilz, and label_analysis.
