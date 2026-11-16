@@ -245,6 +245,7 @@ class DetPatchRetinaUNet(DetPatchInfererBase):
         return pred
 
     def swi_predictor(self, win_data, unravel_slice):
+        """Weight boxes within each tile, then shift them into crop coordinates."""
         device_type = win_data.device.type
         with torch.autocast(device_type, enabled=device_type == "cuda"):
             pred = self.model.net.inference_step(win_data)
@@ -254,8 +255,8 @@ class DetPatchRetinaUNet(DetPatchInfererBase):
             scores = pred["pred_scores"][i].detach()
             labels = pred["pred_labels"][i].detach()
             origin = self.tile_origin(unravel_slice[i])
-            boxes = self.offset_boxes(boxes, origin)
             weights = self.box_tile_weight(boxes, tile_size)
+            boxes = self.offset_boxes(boxes, origin)
             self._box_acc.append(
                 {
                     "boxes": boxes,
@@ -441,11 +442,11 @@ if __name__ == "__main__":
     project_title = "lidca"
     case_id = "lidc_0001"
 
-    lidc_all_fldr = Path("/media/UB/datasets/lidc_all/images")
+    lidc_fldr = Path("/media/UB/datasets/lidc/images")
     lbd_pt_fldr = Path(
         "/r/datasets/preprocessed/lidca/lbd/spc_080_080_150_rlb40c36831_rlb40c36831_ex000/images"
     )
-    imgs_nii = [p for p in sorted(lidc_all_fldr.glob("*.nii.gz")) if case_id in p.name]
+    imgs_nii = [p for p in sorted(lidc_fldr.glob("*.nii.gz")) if case_id in p.name]
     imgs_pt = sorted(lbd_pt_fldr.glob("*.pt"))
     imgs_pt = [p for p in imgs_pt if case_id in p.name]
 
