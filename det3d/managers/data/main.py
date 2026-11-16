@@ -585,7 +585,7 @@ class DataManagerDet(DataManager):
         self.dl = DataLoader(self.ds, **dl_kwargs)
 
     def derive_data_folder(self, plan):
-        data_folder = Path(FolderNames(self.project, plan).folders["data_folder_lbd"])
+        data_folder = Path(FolderNames(self.project, plan).lbd_folder)
         data_folder = ensure_rapid_data_folder(data_folder)
         if not data_folder.exists():
             raise FileNotFoundError(f"Data folder {data_folder} does not exist")

@@ -157,11 +157,13 @@ def resolve_input_folder(project, plan, input_folder=None):
     """Fixed_spacing PT folder (orientation/spacing/remap already applied)."""
     if input_folder is not None:
         return Path(input_folder)
-    return Path(FolderNames(project, plan).folders["data_folder_source"])
+    return Path(FolderNames(project, plan).source_folder)
 
 
 class ObjectBoundedDataGenerator(Preprocessor):
     hdf5_shards = False
+    subfolder_key = "data_folder_obd"
+    folder_property = "obd_folder"
 
     actor_cls = OBJWorkerImpl
     local_worker_cls = OBJWorkerLocal
@@ -193,7 +195,7 @@ class ObjectBoundedDataGenerator(Preprocessor):
             self.output_folder = Path(output_folder)
         else:
             self.output_folder = Path(
-                FolderNames(self.project, self.plan).folders["data_folder_obd"]
+                FolderNames(self.project, self.plan, write_stage=self.subfolder_key).obd_folder
             )
 
     def create_output_folders(self):
