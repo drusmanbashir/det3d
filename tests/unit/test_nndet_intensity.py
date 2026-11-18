@@ -1,6 +1,7 @@
 import pickle
 import sqlite3
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import h5py
 import numpy as np
@@ -84,19 +85,63 @@ def test_scale01_keeps_main_arithmetic_for_identical_bounds():  #AI
     assert torch.equal(legacy({"image": image})["image"], old({"image": image})["image"])
 
 
-def test_fitted_plan_missing_intensity_requires_refit(tmp_path, monkeypatch):  #AI
-    """Fail explicitly for pre-intensity fit files before applying them."""
-    project = SimpleNamespace(project_folder=tmp_path)
+def _det_plan_maker(tmp_path, row, batch_size):  #AI
+    """Supply one workbook row and a private pickle location to setup."""
     maker = object.__new__(parser.ConfigMakerDet)
-    maker.project = project
-    plan = {"mode": "lbd", "plan_name": 1, "spacing": "auto"}
-    maker.configs = {"plan_train": plan}
-    pkl = nndet_plan_path(project, plan)
+    maker.project = SimpleNamespace(project_folder=tmp_path)
+    maker.plans = parser.pd.DataFrame([row], index=[1])
+    maker.configs = {"dataset_params": {"batch_size": batch_size}}
+    maker._workbook_batch = {"batch_size": batch_size}
+    return maker
+
+
+def test_detection_config_loads_without_pickle(tmp_path):  #AI
+    """Load the workbook even while a fitted value is still unresolved."""
+    maker = _det_plan_maker(tmp_path, {
+        "mode": "lbd", "spacing": "auto", "patch_dim0": 192, "patch_dim1": 96,
+    }, batch_size=4)
+    maker.setup(1)
+    assert maker.configs["plan_train"]["spacing"] == "auto"
+    assert maker.configs["plan_train"]["patch_size"] == [192, 192, 96]
+    assert maker.configs["dataset_params"]["batch_size"] == 4
+
+
+@pytest.mark.parametrize("batch_size", [4, "auto", None])
+def test_detection_pickle_only_fills_allowed_missing_values(tmp_path, batch_size):  #AI
+    """Preserve fixed workbook values and accept a partial saved fit."""
+    maker = _det_plan_maker(tmp_path, {
+        "mode": "lbd", "spacing": [1, 1, 2], "patch_dim0": None, "patch_dim1": None,
+        "decoder_levels": None, "fg_labels": [2], "intensity_properties": "auto",
+        "val_patch_size": [64, 64, 64],
+    }, batch_size)
+    pkl = nndet_plan_path(maker.project, {"plan_name": 1})
     pkl.parent.mkdir()
-    pkl.write_bytes(pickle.dumps({"plan": plan, "input_key": "old"}))
-    monkeypatch.setattr(parser, "apply_nndet_plan", lambda configs, computed: configs)
-    with pytest.raises(ValueError, match="intensity_properties.*[Rr]erun"):
-        maker._load_computed_plan(1)
+    intensity = {"mean": 1, "sd": 2, "percentile_00_5": -3, "percentile_99_5": 5}
+    pkl.write_bytes(pickle.dumps({
+        "target_spacing": [0.5, 0.5, 2], "patch_size": [96, 96, 64],
+        "decoder_levels": (2, 3, 4), "fg_labels": [9], "batch_size": 2,
+        "strides": [[2, 2, 1]], "intensity_properties": intensity,
+        "optimizer": "unused", "val_patch_size": [32, 32, 32],
+    }))
+    maker.configs["model_params"] = {"decoder_levels": (1, 2, 3)}
+
+    maker.setup(1)
+    for split in ("train", "valid", "test"):
+        plan = maker.configs[f"plan_{split}"]
+        assert plan["spacing"] == [1, 1, 2]
+        assert plan["patch_size"] == [96, 96, 64]
+        assert plan["decoder_levels"] == (1, 2, 3)
+        assert plan["fg_labels"] == [2]
+        assert plan["encoder_strides"] == [[2, 2, 1]]
+        assert plan["intensity_properties"] == intensity
+        assert plan["val_patch_size"] == [64, 64, 64]
+        assert "optimizer" not in plan
+        assert "encoder_conv_kernels" not in plan
+    assert maker.configs["dataset_params"]["batch_size"] == (4 if batch_size == 4 else 2)
+
+    pkl.unlink()
+    maker.setup(1)
+    assert maker.configs["dataset_params"]["batch_size"] == batch_size
 
 
 def test_fixed_spacing_worker_accepts_missing_legacy_stats(tmp_path, monkeypatch):  #AI
@@ -121,12 +166,14 @@ def test_plan_rejects_datasources_sharing_one_preprocessing_alias(monkeypatch): 
         nndet_intensity.selected_detection_cases(object(), {"plan_name": 1, "datasources": "first,second"})
 
 
-def test_detection_planning_updates_intensity_and_preserves_the_fit(tmp_path, monkeypatch):  #AI
+@pytest.mark.parametrize("workbook_patch", [None, [24, 24, 8]])
+def test_detection_planning_updates_intensity_and_preserves_the_fit(tmp_path, monkeypatch, workbook_patch):  #AI
     """Keep the early spacing record and add intensity to a compatible BoxC002 fit."""
     from det3d.configs import nndet_planning
     from fran.run.preproc.analyze_resample import configure_plan
 
-    plan = {"mode": "lbd", "plan_name": 1, "spacing": [1, 1, 2], "prezoom_scale": 1.0}
+    plan = {"mode": "lbd", "plan_name": 1, "spacing": [1, 1, 2], "prezoom_scale": 1.0,
+            "patch_size": workbook_patch}
     project = SimpleNamespace(project_folder=tmp_path)
     maker = SimpleNamespace(
         setup=lambda plan_id, load_computed: None,
@@ -141,13 +188,15 @@ def test_detection_planning_updates_intensity_and_preserves_the_fit(tmp_path, mo
     intensity = {"mean": 1.0, "sd": 0.5, "percentile_00_5": 0.1, "percentile_99_5": 1.9}
     monkeypatch.setattr(nndet_planning, "plan_intensity_properties", lambda p, s: (intensity, [2]))
     monkeypatch.setattr(nndet_planning, "nndet_plan_input_key", lambda p, s, folder: "measured boxes")
-    monkeypatch.setattr(nndet_planning, "append_lbd_center_ranges", lambda folder, patch, scale: None)
+    append_ranges = Mock()
+    monkeypatch.setattr(nndet_planning, "append_lbd_center_ranges", append_ranges)
     output = nndet_planning.build_nndet_plan_from_lbd(
         project, configs["plan_train"], tmp_path, pkl,
         plan_snapshot=configs["nndet_plan_snapshot"],
     )
     assert output == pickle.loads(pkl.read_bytes())
     assert output == dict(fitted, intensity_properties=intensity)
+    append_ranges.assert_called_once_with(tmp_path, workbook_patch or fitted["patch_size"], 1.0)
     before = pkl.read_bytes()
     monkeypatch.setattr(nndet_planning, "plan_intensity_properties", lambda p, s: (intensity, [3]))
     with pytest.raises(ValueError, match="ambiguous detection foreground"):
@@ -158,7 +207,7 @@ def test_detection_planning_updates_intensity_and_preserves_the_fit(tmp_path, mo
     assert pkl.read_bytes() == before
     concurrent = dict(output, plan=dict(plan, prezoom_scale=1.2))
     pkl.write_bytes(pickle.dumps(concurrent))
-    with pytest.raises(parser.StalePlanError, match="changed during preprocessing"):
+    with pytest.raises(nndet_planning.StalePlanError, match="changed during preprocessing"):
         nndet_planning.build_nndet_plan_from_lbd(
             project, configs["plan_train"], tmp_path, pkl,
             plan_snapshot=configs["nndet_plan_snapshot"],

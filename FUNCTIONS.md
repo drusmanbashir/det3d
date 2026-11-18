@@ -50,10 +50,10 @@ Detection LBD preprocessing uses `fran/run/preproc/analyze_resample.py --pipelin
 
 ## Libraries (import, not run)
 
-- `det3d/configs/nndet_planning.py` — save target spacing, intensity statistics and the BoxC002 fit in `plans/<plan_id>.pkl`. Check GPU usage and add missing LBD centre ranges.
+- `det3d/configs/nndet_planning.py` — save target spacing, intensity statistics and the BoxC002 fit in `plans/<plan_id>.pkl`. `ConfigMakerDet` can load the workbook by itself. When a pickle exists, it fills only missing or `auto` plan fields from `PLAN_PICKLE_FIELDS` and missing or `auto` batch size. Detection preprocessing adds LBD centre ranges for the selected training patch.
 - `det3d/configs/nndet_intensity.py` — pool the native per-label HU histograms for the detection foreground after plan remaps and connected-component exclusions
 - `det3d/transforms/box_tracker.py` — track LBD boxes through crops and spatial augmentation. The detection workbook defaults to `hull`, which uses `hull_xyz` and checks mask occupancy. `corner` warps box corners. `remeasure` rebuilds boxes from the warped `inst` map. For missing tracker data, rerun detection LBD with `--overwrite`.
-- `det3d/transforms/intensity.py` — share fitted CT clipping across training and inference. `intensity_norm` defaults to `scale01` and also supports `zscore_fg`. Pre-intensity plans require a refit.
+- `det3d/transforms/intensity.py` — share CT clipping across training and inference. `intensity_norm` defaults to `scale01` and also supports `zscore_fg`. Set `intensity_properties` in the workbook or fit them during detection preprocessing.
 
 ## det/detection
 

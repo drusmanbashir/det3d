@@ -10,7 +10,7 @@ from fran.configs.parser import (
 )
 from fran.configs.plan_parse import parse_plan_row
 from fran.preprocessing import Mnemonics
-from fran.preprocessing.plan_registry import StalePlanError
+from fran.utils.folder_names import FolderNames
 from utilz.stringz import ast_literal_eval
 from det3d.configs.nndet_planning import (
     apply_nndet_plan,
@@ -189,6 +189,8 @@ class ConfigMakerDet(ConfigMaker):
             else:
                 self.configs[key] = val
         self.configs = parse_excel_dict(self.configs, KEYS_STR_TO_LIST)
+        dataset = self.configs["dataset_params"]
+        self._workbook_batch = {key: dataset[key] for key in ("batch_size",) if key in dataset}
         self.configs["mnemonic"] = configuration_mnemonic_standardized
         self.configs["configurations_dir"] = str(self.resolve_configuration_filename().parent)
 
@@ -237,38 +239,23 @@ class ConfigMakerDet(ConfigMaker):
         return self._parse_det_plan(plan_selected)
 
     def setup(self, plan_train: int, verbose=True, load_computed=True):
+        """Load the workbook, optionally completing unresolved values from the saved fit."""
+        dataset = self.configs["dataset_params"]
+        dataset.pop("batch_size", None)
+        dataset.update(self._workbook_batch)
         plan_valid = plan_train
         plan_test = plan_train
         self._set_active_plans(plan_train, plan_valid, plan_test)
         if load_computed:
-            self._load_computed_plan(plan_train)
+            self._load_computed_plan()
 
-    def _load_computed_plan(self, plan_id):
-        plan = self.configs["plan_train"]
-        path = nndet_plan_path(self.project, plan)
-        if not path.is_file():
-            raise FileNotFoundError(f"Plan {plan_id} requires detection preprocessing and planning: {path}")
-        computed = load_nndet_plan(path)
-        stored = computed.get("plan", {})
-        current = normalize_tree(plan, tuple_mode="list")
-        if stored != current:
-            missing = object()
-            differences = []
-            for key in sorted(stored.keys() | current.keys()):
-                old = stored.get(key, missing)
-                new = current.get(key, missing)
-                if old != new:
-                    old_display = "<missing>" if old is missing else repr(old)
-                    new_display = "<missing>" if new is missing else repr(new)
-                    differences.append(f"{key}: {old_display} -> {new_display}")
-            raise StalePlanError(
-                f"Plan {plan_id} differs from the stored plan. Rerun preprocessing.\n"
-                + "\n".join(differences)
-            )
-        if "intensity_properties" not in computed:
-            raise ValueError(f"Plan {plan_id} has no intensity_properties. Rerun detection preprocessing to refit it.")
-        if plan["mode"] == "lbd" and "input_key" not in computed:
-            raise FileNotFoundError(f"Plan {plan_id} needs a BoxC002 fit. Rerun detection preprocessing.")
+    def _load_computed_plan(self):
+        """Treat the saved fit as optional and allow it to contain only some fields."""
+        path = nndet_plan_path(self.project, self.configs["plan_train"])
+        try:
+            computed = load_nndet_plan(path)
+        except FileNotFoundError:
+            computed = {}
         apply_nndet_plan(self.configs, computed)
 
     def _set_active_plans(self, plan_train, plan_valid, plan_test):
@@ -280,8 +267,9 @@ class ConfigMakerDet(ConfigMaker):
             self.configs[f"plan_{suffix}"] = self._build_active_plan(plan_id)
             self.configs[f"plan_{suffix}"]["plan_name"] = plan_id
 
-        self.configs["plan_valid"]["patch_size"] = self.configs["plan_train"]["patch_size"]
-        self.configs["plan_test"]["patch_size"] = self.configs["plan_train"]["patch_size"]
+        train_patch = self.configs["plan_train"].get("patch_size")
+        for split in ("train", "valid", "test"):
+            self.configs[f"plan_{split}"]["patch_size"] = train_patch
         val_extras = self._plan_row_extras(plan_valid)
         if "val_patch_size" in val_extras:
             self.configs["plan_valid"]["val_patch_size"] = val_extras["val_patch_size"]
@@ -313,3 +301,16 @@ class ConfigMakerDet(ConfigMaker):
                     f"patch_size[{i}]={ps} exceeds src_dims[{i}]={sd}; "
                     "RandCrop roi must fit inside shard volume"
                 )
+# %%
+if __name__ == '__main__':
+#SECTION:-------------------- setup --------------------------------------------------------------------------------------
+    from fran.configs.parser import ConfigMaker
+    from fran.managers import Project
+
+    P = Project("lidc")
+    C = ConfigMakerDet(P)
+    C.setup(3)
+    plan = C.configs["plan_train"]
+    F = FolderNames(P, plan)
+
+# %%

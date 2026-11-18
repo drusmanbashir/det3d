@@ -9,12 +9,12 @@ def det_intensity_transform(dataset_params, plan, keys=("image",), *, legacy_che
     """Build the configured transform from fitted statistics or a historical checkpoint's clip range."""
     mode = dataset_params.get("intensity_norm", "scale01")
     stats = plan.get("intensity_properties")
-    if stats is not None:
+    if stats is not None and stats != "auto":
         clip = [stats["percentile_00_5"], stats["percentile_99_5"]]
     elif legacy_checkpoint and "intensity_norm" not in dataset_params and dataset_params.get("intensity_clip_range") is not None:
         clip = dataset_params["intensity_clip_range"]
     else:
-        raise ValueError("Detection plan has no intensity_properties. Rerun detection preprocessing to refit it.")
+        raise ValueError("Set intensity_properties in the workbook or run detection preprocessing to fit them.")
     if mode == "scale01":
         transform = ScaleIntensityRanged(
             keys=keys, a_min=float(clip[0]), a_max=float(clip[1]),

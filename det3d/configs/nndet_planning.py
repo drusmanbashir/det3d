@@ -8,6 +8,7 @@ import sys
 from ast import literal_eval
 from collections import Counter
 from contextlib import contextmanager
+from copy import deepcopy
 from fcntl import LOCK_EX, flock
 from pathlib import Path
 from subprocess import check_output
@@ -19,7 +20,7 @@ import torch
 from utilz.cprint import cprint
 
 from fran.configs.defaults import lbd_crop_minimum, patch_minimum, plan_gpu_max_process_mb
-from fran.configs.helpers import normalize_tree
+from fran.configs.helpers import is_excel_None, make_src_dims_from_patch_size, normalize_tree
 from fran.preprocessing.plan_registry import StalePlanError
 from fran.transforms.detection import GenerateExtendedBoxMask, patch_size_manifest_key
 from fran.utils.bbox_sidecar import (
@@ -45,6 +46,22 @@ TARGET_MEMORY = "RTX2080TI"
 BOX_COLUMNS = ["label_org", "bbox_xyzxyz"]
 BYTES_PER_MB = 1024**2
 
+PLAN_PICKLE_FIELDS = {
+    "spacing": "target_spacing",
+    "patch_size": "patch_size",
+    "encoder_conv_kernels": "conv_kernels",
+    "encoder_strides": "strides",
+    "decoder_levels": "decoder_levels",
+    "nndet_anchors": "anchors",
+    "fg_labels": "fg_labels",
+    "intensity_properties": "intensity_properties",
+}
+
+
+def _unspecified(value):  #AI
+    """Return whether the workbook leaves a field blank or automatic."""
+    return is_excel_None(value) or (isinstance(value, str) and value == "auto")
+
 
 def _model_cfg(plan):  #AI
     model_cfg, _ = load_nndet_train_cfgs()
@@ -59,7 +76,6 @@ def _model_cfg(plan):  #AI
         head_channels=start_channels * 4,
     )
     return model_cfg
-
 
 def nndet_plan_path(project, plan):  #AI
     return Path(project.project_folder) / "plans" / f"{int(plan['plan_name'])}.pkl"
@@ -316,26 +332,32 @@ def _fit_or_refresh_lbd(project, plan, lbd_folder, stored, foreground):  #AI
             cases, stored["target_spacing"], _model_cfg(plan), estimator, plan["n_input_channels"]
         )
         stored.update(planner.fit_lbd(), input_key=input_key, PATCH_MIN=patch_minimum())
-    append_lbd_center_ranges(lbd_folder, stored["patch_size"], plan["prezoom_scale"])
+    patch = plan.get("patch_size")
+    if _unspecified(patch):
+        patch = stored["patch_size"]
+    append_lbd_center_ranges(lbd_folder, patch, plan["prezoom_scale"])
 
 
 def apply_nndet_plan(configs, computed):  #AI
-    """Overlay fitted values while retaining the preprocessing crop identity."""
+    """Fill only allowlisted gaps and preserve workbook preprocessing geometry."""
     for key in ("plan_train", "plan_valid", "plan_test"):
         plan = configs[key]
-        plan["intensity_properties"] = dict(computed["intensity_properties"])
-        plan["spacing_auto"] = plan["spacing"] == "auto"
-        plan["spacing"] = list(computed["target_spacing"])
-        if plan["mode"] != "lbd":
-            continue
-        plan["preprocessing_patch_size"] = plan["patch_size"]
-        plan["patch_size"] = list(computed["patch_size"])
-        plan["encoder_conv_kernels"] = computed["conv_kernels"]
-        plan["encoder_strides"] = computed["strides"]
-        plan["decoder_levels"] = tuple(computed["decoder_levels"])
-        plan["nndet_anchors"] = computed["anchors"]
-        plan["fg_labels"] = list(computed["fg_labels"])
-        plan["src_dims"] = list(lbd_crop_minimum(plan))
-    if configs["plan_train"]["mode"] == "lbd":
-        configs["dataset_params"]["batch_size"] = int(computed["batch_size"])
+        patch = plan.get("patch_size")
+        fills = {
+            field: deepcopy(computed[source])
+            for field, source in PLAN_PICKLE_FIELDS.items()
+            if _unspecified(plan.get(field)) and not _unspecified(computed.get(source))
+        }
+        plan.update(fills)
+        if "spacing" in fills:
+            plan["spacing_auto"] = True
+        if plan["mode"] == "lbd":
+            if "patch_size" in fills:
+                plan["preprocessing_patch_size"] = patch
+            plan["src_dims"] = list(lbd_crop_minimum(plan))
+        elif "patch_size" in fills:
+            plan["src_dims"] = make_src_dims_from_patch_size(plan["patch_size"])
+    dataset = configs["dataset_params"]
+    if _unspecified(dataset.get("batch_size")) and not _unspecified(computed.get("batch_size")):
+        dataset["batch_size"] = int(computed["batch_size"])
     return configs
