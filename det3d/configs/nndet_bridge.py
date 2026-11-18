@@ -1,11 +1,12 @@
 """Load nnDetection's RetinaUNet V001 configuration."""
 
+import importlib.util
 from copy import deepcopy
 from pathlib import Path
 
 import yaml
 
-NNDET_ROOT = Path("/home/ub/code/nnDetection")
+NNDET_ROOT = Path(importlib.util.find_spec("nndet").origin).parents[1]
 NNDET_TRAIN_CFG = NNDET_ROOT / "nndet/conf/train/v001.yaml"
 
 
