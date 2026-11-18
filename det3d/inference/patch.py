@@ -4,12 +4,13 @@ from det3d.managers.helpers.nndet_retinaunet import (
     from_nndet,
     offset_nndet_xyxyzz_boxes,
 )
+from det3d.transforms.intensity import det_intensity_transform
 from det3d.utils.tensor import plain_tensor
 from fran.inference.base import BaseInferer
 from fran.inference.cascade import img_bbox_collated
 from fran.transforms.inferencetransforms import SqueezeListofListsd
 from monai.data.meta_tensor import MetaTensor
-from monai.transforms import Compose, EnsureChannelFirstd, EnsureTyped, ScaleIntensityRanged
+from monai.transforms import Compose, EnsureChannelFirstd, EnsureTyped
 from monai.transforms.post.dictionary import Invertd
 from utilz.cprint import cprint
 
@@ -22,14 +23,8 @@ class DetPatchInfererBase(BaseInferer):
             setattr(self, key, value)
 
     def norm_dtype_transforms(self):
-        clip = self.dataset_params["intensity_clip_range"]
-        norm = ScaleIntensityRanged(
-            keys=["image"],
-            a_min=float(clip[0]),
-            a_max=float(clip[1]),
-            b_min=0.0,
-            b_max=1.0,
-            clip=True,
+        norm = det_intensity_transform(
+            self.dataset_params, self.params["configs"]["plan_train"], legacy_checkpoint=True,
         )
         dtype = EnsureTyped(keys=["image"], dtype=torch.float16)
         return {"Norm": norm, "Dtype": dtype}

@@ -10,7 +10,6 @@ from monai.transforms import (
     EnsureChannelFirstd,
     EnsureTyped,
     Orientationd,
-    ScaleIntensityRanged,
     Spacingd,
 )
 from monai.transforms.post.dictionary import Invertd
@@ -18,6 +17,7 @@ from monai.transforms.post.dictionary import Invertd
 from det3d.extra.infer_debug.fixtures._case import InferFixtureCase
 from det3d.geometry.lmg import voxel_start_size_to_xyzxyz
 from det3d.inference.post import BoxRd, InvPreprocessBoxd, Offd, PackRetinaUNetPredsd
+from det3d.transforms.intensity import det_intensity_transform
 from fran.data.dataset import FillBBoxPatchesd
 from fran.inference.helpers import load_params
 from fran.transforms.inferencetransforms import MakeWritabled, RenameDictKeys, SqueezeListofListsd
@@ -30,21 +30,15 @@ CASCADE_POST_KEYS_SAFE = "SqL,MR,W,F,R,Off,BoxR"
 
 
 def build_patch_preprocess(params):
-    clip = params["configs"]["dataset_params"]["intensity_clip_range"]
-    spacing = ast_literal_eval(params["configs"]["plan_train"]["spacing"])
+    configs = params["configs"]
+    plan = configs["plan_train"]
+    spacing = ast_literal_eval(plan["spacing"])
     return Compose(
         [
             EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
             Spacingd(keys=["image"], pixdim=spacing),
             Orientationd(keys=["image"], axcodes="RAS"),
-            ScaleIntensityRanged(
-                keys=["image"],
-                a_min=float(clip[0]),
-                a_max=float(clip[1]),
-                b_min=0.0,
-                b_max=1.0,
-                clip=True,
-            ),
+            det_intensity_transform(configs["dataset_params"], plan, legacy_checkpoint=True),
             EnsureTyped(keys=["image"], dtype=torch.float16),
         ]
     )

@@ -7,7 +7,8 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 import torch
-from det3d.inference.lbd_pt import intensity_clip_range, load_lbd_pt, normalize_lbd_image
+from det3d.inference.lbd_pt import load_lbd_pt
+from det3d.transforms.intensity import det_intensity_transform
 from det3d.managers.helpers.nndet_retinaunet import ensure_nndet_importable, from_nndet
 from det3d.utils.tensor import plain_tensor, to_numpy
 from fran.data.dataregistry import DS
@@ -160,9 +161,9 @@ def nndet_predict_case(
     return out
 
 
-def infer_case_seg(manager, pt_path, device, clip_range, overlap=0.25, num_tta=0):
+def infer_case_seg(manager, pt_path, device, normalize, overlap=0.25, num_tta=0):
   #AI
-    img = normalize_lbd_image(load_lbd_pt(pt_path), clip_range)
+    img = normalize({"image": load_lbd_pt(pt_path)})["image"]
     pred = nndet_predict_case(
         manager.net,
         manager.nndet_plan,
@@ -198,7 +199,7 @@ def run_lidc2_seg_infer(
     project = Project(project_title)
     manager = load_retinaunet_manager(ckpt_path, device)
     plan = manager.plan
-    clip_range = intensity_clip_range(project=project, plan=plan)
+    normalize = det_intensity_transform(manager.configs["dataset_params"], plan, legacy_checkpoint=True)
     spacing = spacing_from_plan(plan)
 
     manifest = []
@@ -210,7 +211,7 @@ def run_lidc2_seg_infer(
             manager,
             pt_path,
             device,
-            clip_range,
+            normalize,
             overlap=overlap,
             num_tta=num_tta,
         )

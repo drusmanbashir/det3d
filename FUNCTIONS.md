@@ -1,5 +1,5 @@
 # FUNCTIONS.md
-Scope: `det3d/configs/nndet_planning.py` `det3d/transforms/box_tracker.py` `det3d/run/e2e.sh`
+Scope: `det3d/configs/nndet_planning.py` `det3d/configs/nndet_intensity.py` `det3d/transforms/box_tracker.py` `det3d/transforms/intensity.py` `det3d/run/e2e.sh`
 
 ## run
 
@@ -14,7 +14,7 @@ Scope: `det3d/configs/nndet_planning.py` `det3d/transforms/box_tracker.py` `det3
 
 - `object_bounded.py` — object-bounded detection preprocessing CLI (`--project`, `--plan`, `--overwrite`, `--num-processes`, `--case-ids`, optional `--input-folder`)
 
-Detection LBD preprocessing uses `fran/run/preproc/analyze_resample.py --pipeline det`. It saves target spacing before resampling and fills centre ranges after patch planning.
+Detection LBD preprocessing uses `fran/run/preproc/analyze_resample.py --pipeline det`. It saves target spacing before resampling, then fits the CT intensity statistics and BoxC002 and fills the centre ranges.
 
 ## det/preprocessing
 
@@ -50,8 +50,10 @@ Detection LBD preprocessing uses `fran/run/preproc/analyze_resample.py --pipelin
 
 ## Libraries (import, not run)
 
-- `det3d/configs/nndet_planning.py` — save spacing and BoxC002 fits in `plans/<plan_id>.pkl`, check GPU process usage before fitting, and add missing LBD centre ranges
+- `det3d/configs/nndet_planning.py` — save target spacing, intensity statistics and the BoxC002 fit in `plans/<plan_id>.pkl`. Check GPU usage and add missing LBD centre ranges.
+- `det3d/configs/nndet_intensity.py` — pool the native per-label HU histograms for the detection foreground after plan remaps and connected-component exclusions
 - `det3d/transforms/box_tracker.py` — track LBD boxes through crops and spatial augmentation. The detection workbook defaults to `hull`, which uses `hull_xyz` and checks mask occupancy. `corner` warps box corners. `remeasure` rebuilds boxes from the warped `inst` map. For missing tracker data, rerun detection LBD with `--overwrite`.
+- `det3d/transforms/intensity.py` — share fitted CT clipping across training and inference. `intensity_norm` defaults to `scale01` and also supports `zscore_fg`. Pre-intensity plans require a refit.
 
 ## det/detection
 
@@ -93,7 +95,7 @@ Retired nnDet migration / benchmark CLIs (superseded by `run/training/train.py` 
 - `patch.py` — `DetPatchRetinaNet`, `DetPatchRetinaUNet`, `DetPatchLBD`
 - `cascade.py` — `DetBBoxCascadeInferer`, `DetSegBBoxCascadeInferer`
 - `lbd.py` — `DetLBDRunner` (LBD `.pt` patch-only infer)
-- `lbd_pt.py` — `load_lbd_pt`, `load_lbd_pt_patch_data`, `normalize_lbd_image`
+- `lbd_pt.py` — load LBD tensors and prepare full-volume patch data
 - `patch.py` / `cascade.py` — re-exports of Det inferers
 - `transforms.py` — legacy keyed transforms (superseded by post for cascade)
 - `markups.py` — Slicer ROI Box `.mrk.json` from sidecar

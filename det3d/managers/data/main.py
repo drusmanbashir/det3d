@@ -20,6 +20,7 @@ from det3d.transforms.crop_indices import monai_crop_center_to_slices
 from det3d.transforms.box_tracker import BOX_TRACKERS, CornerTracker
 from fran.transforms.detection import patch_size_manifest_key
 from det3d.transforms.gpu_det import RandAffineBoxSyncd, RandFlipBoxSyncd, ResizeWithPadOrCropBoxSyncd
+from det3d.transforms.intensity import det_intensity_transform
 from fran.managers.data.valid_patch_stream import _pad_tensor_to_patch_size
 from det3d.utils.bbox_sidecar import (
     bbox_sidecar_path,
@@ -59,12 +60,11 @@ from monai.transforms import (
     RandGaussianSmoothd,
     RandScaleIntensityd,
     RandShiftIntensityd,
-    ScaleIntensityRanged,
 )
 from monai.transforms.croppad.dictionary import ResizeWithPadOrCropd
 from fran.utils.folder_names import FolderNames
 from utilz.stringz import info_from_filename
-from utilz.fileio import load_json, load_dict
+from utilz.fileio import load_json
 
 
 
@@ -512,13 +512,7 @@ class DataManagerDet(DataManager):
 
     def set_preprocessing_params(self):
 
-        global_properties = load_dict(self.project.global_properties_filename)
         self.dataset_params = self.configs["dataset_params"]
-        self.dataset_params["intensity_clip_range"] = global_properties[
-            "intensity_clip_range"
-        ]
-        self.dataset_params["mean_fg"] = global_properties["mean_fg"]
-        self.dataset_params["std_fg"] = global_properties["std_fg"]
         transform_factors = self.configs.get("transform_factors")
         if transform_factors:
             self._assimilate_tfm_factors(transform_factors)
@@ -533,6 +527,11 @@ class DataManagerDet(DataManager):
     def uses_tracker_lm(self):  #AI
         """Load the semantic map for RetinaUNet or hull filtering."""
         return self.uses_lm_seg() or self.box_tracker_name == "hull"
+
+    def _intensity_transform(self, keys):  #AI
+        """Build detection normalization from the intensity properties for this split."""
+        transform = det_intensity_transform(self.dataset_params, self.plan, keys=keys)
+        return transform
 
     def _valid_impl(self):
         return self.dataset_params["valid_impl"]
@@ -871,7 +870,6 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
                 f"patch_size_prezoom {patch_size_prezoom} not in manifest "
                 f"extended_bboxes_patch_sizes {manifest_patch_sizes}"
             )
-        clip = self.dataset_params["intensity_clip_range"]
         affine3d = self.configs["affine3d"]
 
         flip_prob = float(self.flip["prob"])
@@ -916,14 +914,7 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
             lazy=False,
             tracker=self.box_tracker,
         )
-        self.Norm = ScaleIntensityRanged(
-            keys=[ik],
-            a_min=float(clip[0]),
-            a_max=float(clip[1]),
-            b_min=0.0,
-            b_max=1.0,
-            clip=True,
-        )
+        self.Norm = self.transforms_dict["N"]
         self.BoxClip = self.box_tracker
         self.transforms_dict["Ld"] = self.Ld
         self.transforms_dict["Rtr"] = self.Rtr
@@ -1138,7 +1129,6 @@ class DataManagerDetLBD(DataManagerDetSource, DataManagerLBD):
             load_keys.append(lmk)
         remeasure = self.box_tracker_name == "remeasure"
         compute_dtype = self._compute_dtype()
-        clip = self.dataset_params["intensity_clip_range"]
 
         L = LoadImaged(
             keys=load_keys,
@@ -1161,14 +1151,7 @@ class DataManagerDetLBD(DataManagerDetSource, DataManagerLBD):
         self.transforms_dict = {
             "L": L,
             "E": EnsureChannelFirstd(keys=load_keys),
-            "Norm": ScaleIntensityRanged(
-                keys=[ik],
-                a_min=float(clip[0]),
-                a_max=float(clip[1]),
-                b_min=0.0,
-                b_max=1.0,
-                clip=True,
-            ),
+            "Norm": self._intensity_transform(keys=[ik]),
             "DtypeVal": Compose(dtype_val),
         }
         box_clip = self.box_tracker

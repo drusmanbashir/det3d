@@ -195,7 +195,7 @@ class ObjectBoundedDataGenerator(Preprocessor):
             self.output_folder = Path(output_folder)
         else:
             self.output_folder = Path(
-                FolderNames(self.project, self.plan, write_stage=self.subfolder_key).obd_folder
+                FolderNames(self.project, self.plan).obd_folder
             )
 
     def create_output_folders(self):

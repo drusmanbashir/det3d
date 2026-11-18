@@ -45,6 +45,7 @@ DET_RUNTIME_KEYS = frozenset(
         "num_workers_train",
         "num_workers_val",
         "box_tracker",
+        "intensity_norm",
     }
 )
 
@@ -231,7 +232,6 @@ class ConfigMakerDet(ConfigMaker):
         plan_selected.update(self._plan_row_extras(plan_id))
         for key in DET_PLAN_EXCLUDED_KEYS:
             plan_selected.pop(key, None)
-        plan_selected["identified_preprocessing"] = True
         plan_selected["det_lbd"] = True
         plan_selected["prezoom_scale"] = float(self.configs["dataset_params"].get("prezoom_scale", 1.0))
         return self._parse_det_plan(plan_selected)
@@ -242,18 +242,13 @@ class ConfigMakerDet(ConfigMaker):
         self._set_active_plans(plan_train, plan_valid, plan_test)
         if load_computed:
             self._load_computed_plan(plan_train)
-        self.add_dataset_props()
 
     def _load_computed_plan(self, plan_id):
         plan = self.configs["plan_train"]
-        if plan["mode"] != "lbd":
-            return
         path = nndet_plan_path(self.project, plan)
         if not path.is_file():
-            raise FileNotFoundError(f"Plan {plan_id} requires preprocessing and BoxC002 planning: {path}")
+            raise FileNotFoundError(f"Plan {plan_id} requires detection preprocessing and planning: {path}")
         computed = load_nndet_plan(path)
-        if "input_key" not in computed:
-            raise FileNotFoundError(f"Plan {plan_id} has spacing only. Run the LBD and patch stages.")
         stored = computed.get("plan", {})
         current = normalize_tree(plan, tuple_mode="list")
         if stored != current:
@@ -270,6 +265,10 @@ class ConfigMakerDet(ConfigMaker):
                 f"Plan {plan_id} differs from the stored plan. Rerun preprocessing.\n"
                 + "\n".join(differences)
             )
+        if "intensity_properties" not in computed:
+            raise ValueError(f"Plan {plan_id} has no intensity_properties. Rerun detection preprocessing to refit it.")
+        if plan["mode"] == "lbd" and "input_key" not in computed:
+            raise FileNotFoundError(f"Plan {plan_id} needs a BoxC002 fit. Rerun detection preprocessing.")
         apply_nndet_plan(self.configs, computed)
 
     def _set_active_plans(self, plan_train, plan_valid, plan_test):

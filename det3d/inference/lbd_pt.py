@@ -16,23 +16,6 @@ def load_lbd_pt(path):
     return img.float()
 
 
-def intensity_clip_range(project=None, plan=None):
-    if project is not None:
-        return project.global_properties["intensity_clip_range"]
-    if plan is not None and "intensity_clip_range" in plan:
-        return plan["intensity_clip_range"]
-    return [-1024.0, 300.0]
-
-
-def normalize_lbd_image(img, clip_range):
-    a_min = float(clip_range[0])
-    a_max = float(clip_range[1])
-    img = img.clone()
-    img = img.clamp(a_min, a_max)
-    img = (img - a_min) / (a_max - a_min)
-    return img
-
-
 def full_volume_bounding_box(img):
     sh = tuple(int(v) for v in img.shape)
     if len(sh) == 4:

@@ -9,9 +9,9 @@ F = fran/fran, D = det3d/det3d, N = nnDetection/nndet.
 - Planned patch × prezoom must match the LBD crop manifest or the loader raises (D/managers/data/main.py:815).
 
 ## Legacy to retire (`Project.maybe_store_projectwide_properties`, `global_properties.json`)
-- Intensity keys injected by config makers: D/configs/parser.py:372, F/configs/parser.py:187.
-- Stage A reads mean/std/clip even with normalisation off: F/preprocessing/fixed_spacing.py:73,165,208.
-- OBD scaling and loader reads: D/preprocessing/object_bounded.py:78; D/managers/data/main.py:489,871,1102.
+- The FRAN config maker still injects legacy intensity keys (F/configs/parser.py).
+- Stage A uses legacy mean, SD and clip bounds when `clip_center=True` (F/preprocessing/fixed_spacing.py).
+- Standalone OBD preprocessing still uses legacy intensity scaling (D/preprocessing/object_bounded.py).
 - Fold creation lives there: F/managers/project.py:1090. Project JSON metadata: F/managers/project.py:154,800,1165.
 
 ## Case selection and keying

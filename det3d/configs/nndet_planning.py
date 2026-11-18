@@ -1,6 +1,7 @@
 """Plan RetinaUNet architecture from FRAN's label-bounded outputs."""
 
 import csv
+import hashlib
 import json
 import pickle
 import sys
@@ -19,15 +20,15 @@ from utilz.cprint import cprint
 
 from fran.configs.defaults import lbd_crop_minimum, patch_minimum, plan_gpu_max_process_mb
 from fran.configs.helpers import normalize_tree
-from fran.data.dataregistry import DS
+from fran.preprocessing.plan_registry import StalePlanError
 from fran.transforms.detection import GenerateExtendedBoxMask, patch_size_manifest_key
 from fran.utils.bbox_sidecar import (
     extended_bbox_df_column,
     nbrhood_df_to_detection_records,
 )
-from fran.utils.preprocessing_identity import identity_hash
 
 from det3d.configs.nndet_bridge import load_nndet_train_cfgs
+from det3d.configs.nndet_intensity import plan_intensity_properties, selected_detection_cases
 from det3d.managers.helpers.nndet_retinaunet import (
     apply_det3d_plan_to_nndet_model_cfg,
     ensure_nndet_importable,
@@ -108,9 +109,7 @@ def resolve_nndet_spacing(project, plan, path):  #AI
 
 def _selected_lbd_details(project, plan, lbd_folder):  #AI
     details = pd.read_csv(lbd_folder / "dataset_details.csv")
-    datasets = {DS[name.strip()].ds for name in plan["datasources"].split(",")}
-    rows = project.sql_query("SELECT ds, case_id FROM datasources WHERE test=0 ORDER BY ds, case_id")
-    selected = [str(case_id) for ds, case_id in rows if ds in datasets]
+    selected = [case_id for _, case_id in selected_detection_cases(project, plan)]
     if len(set(selected)) != len(selected):
         raise ValueError("Selected datasources must have unique LBD case IDs")
     details = details[details["case_id"].astype(str).isin(selected)]
@@ -135,7 +134,9 @@ def nndet_plan_input_key(project, plan, lbd_folder):  #AI
         pd.read_csv(_sidecar(lbd_folder, row), usecols=BOX_COLUMNS)[BOX_COLUMNS].to_csv(index=False)
         for row in details.itertuples(index=False)
     ]
-    return identity_hash({"details": details.to_csv(index=False), "boxes": boxes})
+    content = json.dumps({"details": details.to_csv(index=False), "boxes": boxes}, sort_keys=True, separators=(",", ":"))
+    key = hashlib.sha256(content.encode()).hexdigest()
+    return key
 
 
 class LBDBoxC002(BoxC002):
@@ -271,41 +272,62 @@ def append_lbd_center_ranges(lbd_folder, patch_size, prezoom_scale):  #AI
 
 
 def build_nndet_plan_from_lbd(project, plan, lbd_folder, path, *, plan_snapshot):  #AI
-    """Reuse a current fit and restore missing sampling columns after LBD rewrites."""
+    """Publish fitted intensity statistics and reuse or fit the LBD architecture."""
     with _write_lock(path.with_suffix(".lock")):
-        stored = load_nndet_plan(path)
+        old_bytes = path.read_bytes()
+        stored = pickle.loads(old_bytes)
         if stored["plan"] != plan_snapshot:
-            raise RuntimeError(
-                f"Plan {plan['plan_name']} changed during preprocessing. "
-                "Rerun preprocessing for the current spreadsheet plan."
+            raise StalePlanError(
+                f"Plan {plan['plan_name']} changed during preprocessing. Rerun detection preprocessing."
             )
-        input_key = nndet_plan_input_key(project, plan, lbd_folder)
-        if stored.get("input_key") != input_key:
-            details = _selected_lbd_details(project, plan, lbd_folder)
-            cases = []
-            for row in details.itertuples(index=False):
-                frame = pd.read_csv(_sidecar(lbd_folder, row), usecols=BOX_COLUMNS)
-                boxes, labels, _ = nbrhood_df_to_detection_records(frame)
-                tensor = torch.stack(boxes) if boxes else torch.empty((0, 6))
-                cases.append((to_nndet(tensor).numpy(), [int(label) for label in labels], _shape(row)))
-            estimator = MemoryEstimatorDetection(target_mem=TARGET_MEMORY, gpu_id=0)
-            planner = LBDBoxC002(
-                cases, stored["target_spacing"], _model_cfg(plan), estimator, plan["n_input_channels"]
-            )
-            stored.update(planner.fit_lbd())
-            stored.update(
-                input_key=input_key,
-                PATCH_MIN=patch_minimum(),
-            )
-            _atomic_write(path, pickle.dumps(stored))
-        append_lbd_center_ranges(lbd_folder, stored["patch_size"], plan["prezoom_scale"])
+        intensity, foreground = plan_intensity_properties(project, plan_snapshot)
+        stored["intensity_properties"] = intensity
+        if lbd_folder is not None:
+            _fit_or_refresh_lbd(project, plan, lbd_folder, stored, foreground)
+        payload = pickle.dumps(stored)
+        if payload != old_bytes:
+            _atomic_write(path, payload)
     return stored
+
+
+def _fit_or_refresh_lbd(project, plan, lbd_folder, stored, foreground):  #AI
+    """Reuse compatible fitted boxes or fit the current cohort before publishing."""
+    input_key = nndet_plan_input_key(project, plan, lbd_folder)
+    needs_fit = stored.get("input_key") != input_key
+    if needs_fit:
+        details = _selected_lbd_details(project, plan, lbd_folder)
+        cases = []
+        for row in details.itertuples(index=False):
+            frame = pd.read_csv(_sidecar(lbd_folder, row), usecols=BOX_COLUMNS)
+            boxes, labels, _ = nbrhood_df_to_detection_records(frame)
+            tensor = torch.stack(boxes) if boxes else torch.empty((0, 6))
+            cases.append((to_nndet(tensor).numpy(), [int(label) for label in labels], _shape(row)))
+        lbd_labels = sorted({label for _, labels, _ in cases for label in labels})
+    else:
+        lbd_labels = stored["fg_labels"]
+    if lbd_labels != foreground:
+        raise ValueError(
+            f"Plan {plan['plan_name']} has ambiguous detection foreground: "
+            f"histogram labels {foreground} differ from LBD box labels {lbd_labels}."
+        )
+    if needs_fit:
+        estimator = MemoryEstimatorDetection(target_mem=TARGET_MEMORY, gpu_id=0)
+        planner = LBDBoxC002(
+            cases, stored["target_spacing"], _model_cfg(plan), estimator, plan["n_input_channels"]
+        )
+        stored.update(planner.fit_lbd(), input_key=input_key, PATCH_MIN=patch_minimum())
+    append_lbd_center_ranges(lbd_folder, stored["patch_size"], plan["prezoom_scale"])
 
 
 def apply_nndet_plan(configs, computed):  #AI
     """Overlay fitted values while retaining the preprocessing crop identity."""
     for key in ("plan_train", "plan_valid", "plan_test"):
         plan = configs[key]
+        plan["intensity_properties"] = dict(computed["intensity_properties"])
+        plan["spacing_auto"] = plan["spacing"] == "auto"
+        plan["spacing"] = list(computed["target_spacing"])
+        if plan["mode"] != "lbd":
+            continue
         plan["preprocessing_patch_size"] = plan["patch_size"]
         plan["patch_size"] = list(computed["patch_size"])
         plan["encoder_conv_kernels"] = computed["conv_kernels"]
@@ -313,7 +335,7 @@ def apply_nndet_plan(configs, computed):  #AI
         plan["decoder_levels"] = tuple(computed["decoder_levels"])
         plan["nndet_anchors"] = computed["anchors"]
         plan["fg_labels"] = list(computed["fg_labels"])
-        plan["spacing"] = list(computed["target_spacing"])
         plan["src_dims"] = list(lbd_crop_minimum(plan))
-    configs["dataset_params"]["batch_size"] = int(computed["batch_size"])
+    if configs["plan_train"]["mode"] == "lbd":
+        configs["dataset_params"]["batch_size"] = int(computed["batch_size"])
     return configs
