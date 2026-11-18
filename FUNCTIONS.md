@@ -1,5 +1,5 @@
 # FUNCTIONS.md
-Scope: `det3d/configs/nndet_planning.py`
+Scope: `det3d/configs/nndet_planning.py` `det3d/transforms/box_tracker.py`
 
 ## run/preprocessing
 
@@ -47,6 +47,7 @@ Detection LBD preprocessing uses `fran/run/preproc/analyze_resample.py --pipelin
 ## Libraries (import, not run)
 
 - `det3d/configs/nndet_planning.py` — save spacing and BoxC002 fits in `plans/<plan_id>.pkl`, check GPU process usage before fitting, and add missing LBD centre ranges
+- `det3d/transforms/box_tracker.py` — track LBD boxes through crops and spatial augmentation. The detection workbook defaults to `hull`, which uses `hull_xyz` and checks mask occupancy. `corner` warps box corners. `remeasure` rebuilds boxes from the warped `inst` map. For missing tracker data, rerun detection LBD with `--overwrite`.
 
 ## det/detection
 
