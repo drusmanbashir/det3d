@@ -1,5 +1,9 @@
 # FUNCTIONS.md
-Scope: `det3d/configs/nndet_planning.py` `det3d/transforms/box_tracker.py`
+Scope: `det3d/configs/nndet_planning.py` `det3d/transforms/box_tracker.py` `det3d/run/e2e.sh`
+
+## run
+
+- `det3d/run/e2e.sh` — end to end: create the project if missing (`DATASOURCES`, `MNEMONIC`), fran `analyze_resample.py --pipeline det` (preprocess + BoxC002 plan), then `training/train.py`. Defaults `PROJECT=lidc PLAN=1 FOLD=0 ARCH=retinaunet`; env `PREPROC=0` skips preprocessing, `OVERWRITE=1` rebuilds; extra args go to train.py
 
 ## run/preprocessing
 
