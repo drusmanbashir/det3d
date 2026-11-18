@@ -887,6 +887,9 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
         self.transforms_dict["L2"] = self.L2
         self.transforms_dict["E"] = self.E
         self.transforms_dict["Norm"] = self.Norm
+        # LBD crops are padded on disk only to PATCH_MIN, which the patch planned after LBD can exceed.
+        # End-pad short patches before collate and pass full-size patches through unchanged.
+        self.transforms_dict["PadPatch"] = PadDetPatchd(keys=load_keys, patch_size=patch_size_prezoom)
         self.transforms_dict["F"] = self.F
         self.transforms_dict["Affine"] = self.Affine
         self.transforms_dict["ResizePC"] = self.ResizePC

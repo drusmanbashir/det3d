@@ -63,7 +63,7 @@ class DataManagerDetBTfms(DataManagerDet):
 
 
 class DataManagerDetSourceBTfms(DataManagerDetSource, DataManagerDetBTfms):
-    keys_tr = "Ld,Rtr,L2,E,Norm"
+    keys_tr = "Ld,Rtr,L2,E,Norm,PadPatch"
     keys_tr_batch = "GpuTail"
     keys_val = "L,E,Norm,DtypeVal"
     keys_val_batch = None
