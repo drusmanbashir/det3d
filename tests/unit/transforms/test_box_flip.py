@@ -3,7 +3,7 @@
 Defect (Fable box audit, operator review 2026-11-18): flipped boxes landed one voxel low in training
 (RandFlipBoxSyncd) and when inference restored LPS/LAS orientation (InvPreprocessBoxd, BoxRd).
 Reference is always the extent of the flipped voxels, never product box maths.
-MUTATION: drop the 0.5 shift in gpu_det._warp_box_corners, or restore `sh[i] - 1.0 - coords[:, i]` in post.py.
+MUTATION: drop the 0.5 shift in box_tracker._warp_edges, or restore `sh[i] - 1.0 - coords[:, i]` in post.py.
 CONTROL: the unflipped RAS cases stay exact under that mutation.
 """
 

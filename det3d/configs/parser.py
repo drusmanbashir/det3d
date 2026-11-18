@@ -44,6 +44,7 @@ DET_RUNTIME_KEYS = frozenset(
         "validation_fraction",
         "num_workers_train",
         "num_workers_val",
+        "box_tracker",
     }
 )
 

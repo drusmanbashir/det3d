@@ -164,7 +164,22 @@ def obd_det_collate(
         out["df"] = dfs
     if "validation_impl" in batch[0]:
         out["validation_impl"] = batch[0]["validation_impl"]
+    out.update(_collate_tracker_inputs(batch, target_shape))
     return attach_targets(out, box_key, "label")
+
+
+def _collate_tracker_inputs(items, pad_shape=None):  #AI
+    """Stack instance maps and retain variable-length row data per item."""
+    out = {}
+    for key in ("hull_xyz", "inst_labels"):
+        if key in items[0]:
+            out[key] = [item[key] for item in items]
+    if "inst" in items[0]:
+        maps = [item["inst"] for item in items]
+        if pad_shape is not None:
+            maps = [pad_image_to_shape(inst, pad_shape) for inst in maps]
+        out["inst"] = torch.stack(maps, 0)
+    return out
 
 
 def _flatten_dict_samples(batch):
@@ -226,6 +241,7 @@ def lbd_det_collate_train(batch):
         dici["points"] = points
     if dfs:
         dici["df"] = dfs
+    dici.update(_collate_tracker_inputs(_flatten_dict_samples(batch)))
     return dici
 
 def lbd_det_collate_val(batch):

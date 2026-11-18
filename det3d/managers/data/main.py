@@ -17,7 +17,7 @@ from det3d.managers.data.valid_patch_stream import (
 from fran.preprocessing.hdf5_shards import ensure_hdf5_shards_for_plan
 from fran.transforms.crop_indices import sample_crop_center_from_extended_boxes
 from det3d.transforms.crop_indices import monai_crop_center_to_slices
-from det3d.transforms.detection import ClipBoxToImagedWithDf
+from det3d.transforms.box_tracker import BOX_TRACKERS, CornerTracker
 from fran.transforms.detection import patch_size_manifest_key
 from det3d.transforms.gpu_det import RandAffineBoxSyncd, RandFlipBoxSyncd, ResizeWithPadOrCropBoxSyncd
 from fran.managers.data.valid_patch_stream import _pad_tensor_to_patch_size
@@ -226,9 +226,11 @@ class CropDetPatchd(MapTransform):
         crop_slices_key="crop_slices",
         crop_start_key="crop_start",
         allow_missing_keys=False,
+        tracker=None,
     ):
         super().__init__(keys, allow_missing_keys)
         self.box_key = box_key
+        self.tracker = tracker if tracker is not None else CornerTracker(box_key)
         self.crop_slices_key = crop_slices_key
         self.crop_start_key = crop_start_key
 
@@ -256,13 +258,7 @@ class CropDetPatchd(MapTransform):
                 d[key] = MetaTensor(cropped.contiguous(), meta=meta)
             else:
                 d[key] = cropped.contiguous()
-        box = torch.as_tensor(d[self.box_key], dtype=torch.float32)
-        if box.numel() > 0:
-            start = torch.tensor(crop_start, dtype=box.dtype)
-            box = box.clone()
-            box[:, :3] -= start
-            box[:, 3:] -= start
-            d[self.box_key] = box
+        d = self.tracker.translate(d, [-v for v in crop_start])
         return d
 
 
@@ -338,9 +334,11 @@ class LoadHDF5DetCropd(MapTransform):
         crop_slices_key="crop_slices",
         crop_start_key="crop_start",
         allow_missing_keys=False,
+        tracker=None,
     ):
         super().__init__(keys, allow_missing_keys)
         self.box_key = box_key
+        self.tracker = tracker if tracker is not None else CornerTracker(box_key)
         self.shard_path_key = shard_path_key
         self.case_path_key = case_path_key
         self.crop_slices_key = crop_slices_key
@@ -361,6 +359,8 @@ class LoadHDF5DetCropd(MapTransform):
                 for key in h5_keys
                 if key in case_grp
             }
+            if "inst" in self.keys:
+                d["inst_labels"] = _read_instance_labels(case_grp)
             bbox = np.asarray(case_grp[self.box_key][:], dtype=np.float32)
         meta = {
             "filename_or_obj": f"{shard_path}:{case_path}",
@@ -372,15 +372,8 @@ class LoadHDF5DetCropd(MapTransform):
             if arr.ndim == 3:
                 arr = arr[np.newaxis, ...]
             d[key] = MetaTensor(torch.as_tensor(arr), meta=dict(meta))
-        box = torch.as_tensor(bbox, dtype=torch.float32)
-        if box.numel() > 0:
-            start = torch.tensor(crop_start, dtype=box.dtype)
-            box = box.clone()
-            box[:, :3] -= start
-            box[:, 3:] -= start
-            d[self.box_key] = box
-        else:
-            d[self.box_key] = box
+        d[self.box_key] = torch.as_tensor(bbox, dtype=torch.float32)
+        d = self.tracker.translate(d, [-v for v in crop_start])
         del (
             d[self.shard_path_key],
             d[self.case_path_key],
@@ -418,6 +411,37 @@ class LoadHDF5DetCaseFulld(MapTransform):
         }
         d["image"] = MetaTensor(torch.as_tensor(image), meta=dict(meta))
         return d
+
+
+class LoadHDF5DetInstancesd(MapTransform):
+    """Read validation instance IDs while retaining the PT image metadata."""
+
+    def __init__(self):  #AI
+        """Use the loaded validation image as the spatial reference."""
+        super().__init__(["image"])
+
+    def __call__(self, data):  #AI
+        """Load the full instance map and its sidecar row labels."""
+        d = dict(data)
+        path = d["hdf5_shard_path"]
+        case = d["hdf5_case_path"]
+        with import_h5py().File(path, "r") as h5f:
+            group = h5f[case]
+            d["inst_labels"] = _read_instance_labels(group)
+            inst = torch.as_tensor(group["inst"][:])[None]
+        meta = dict(d["image"].meta, original_channel_dim=0)
+        d["inst"] = MetaTensor(inst.contiguous(), meta=meta)
+        return d
+
+
+def _read_instance_labels(group):  #AI
+    """Fail at the storage boundary if a legacy shard has no row-ID map."""
+    if "inst" not in group:
+        raise ValueError(
+            f"Missing inst in {group.file.filename}:{group.name}; rerun LBD with --overwrite"
+        )
+    labels = torch.as_tensor(group["label"][:])
+    return labels
 
 
 class DataManagerDet(DataManager):
@@ -499,6 +523,16 @@ class DataManagerDet(DataManager):
         if transform_factors:
             self._assimilate_tfm_factors(transform_factors)
         self.dataset_params.setdefault("valid_impl", "bbox_anchor")
+        name = self.dataset_params.get("box_tracker", "corner")
+        name = "corner" if is_excel_None(name) else name
+        if name not in BOX_TRACKERS:
+            raise ValueError(f"Unknown box_tracker {name!r}. Choose from {tuple(BOX_TRACKERS)}")
+        self.box_tracker_name = name
+        self.box_tracker = BOX_TRACKERS[name](self.box_key, self.label_key, self.image_key)
+
+    def uses_tracker_lm(self):  #AI
+        """Load the semantic map for RetinaUNet or hull filtering."""
+        return self.uses_lm_seg() or self.box_tracker_name == "hull"
 
     def _valid_impl(self):
         return self.dataset_params["valid_impl"]
@@ -660,11 +694,19 @@ class DataManagerDet(DataManager):
         bbox_fn = Path(bbox_fn)
         if bbox_fn.suffix == ".csv":
             ext_col = self._bbox_sidecar_ext_col()
-            usecols = ["label_org", "bbox_xyzxyz", "cent", ext_col]
-            df = pd.read_csv(bbox_fn, usecols=usecols)
-            # df = pd.read_csv(bbox_fn
+            columns = ["label_org", "bbox_xyzxyz", "cent", ext_col]
+            if self.box_tracker_name == "hull":
+                columns.append("hull_xyz")
+                df = pd.read_csv(bbox_fn, usecols=lambda key: key in columns)
+                if "hull_xyz" not in df or df["hull_xyz"].isna().any():
+                    raise ValueError(f"Missing hull_xyz in {bbox_fn}; rerun LBD with --overwrite")
+                df = df[columns]
+            else:
+                df = pd.read_csv(bbox_fn, usecols=columns)
             boxes, labels, _instances = nbrhood_df_to_detection_records(df)
         else:
+            if self.box_tracker_name == "hull":
+                raise ValueError(f"Missing hull_xyz in {bbox_fn}; rerun LBD with --overwrite")
             df = None
             boxes, labels, _instances = load_detection_sidecar(bbox_fn)
         valid_boxes = []
@@ -675,6 +717,8 @@ class DataManagerDet(DataManager):
                 valid_boxes.append(box.reshape(-1))
                 valid_labels.append(label.reshape(-1))
                 keep_idx.append(i)
+        if self.box_tracker_name != "corner" and len(keep_idx) != len(boxes):
+            raise ValueError(f"Invalid detection rows in {bbox_fn}; rerun LBD with --overwrite")
         if df is not None and len(keep_idx) != len(df):
             df = df.iloc[keep_idx].reset_index(drop=True)
         if len(valid_boxes) == 0:
@@ -729,6 +773,8 @@ class DataManagerDet(DataManager):
                     "instances": instances,
                     "df": df,
                 }
+                if self.box_tracker_name == "hull":
+                    row["hull_xyz"] = df["hull_xyz"].map(literal_eval).tolist()
                 data.append(row)
         return data, skipped
 
@@ -805,12 +851,11 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
             self.lm_key,
         )
         load_keys = [ik]
-        use_lm = self.uses_lm_seg()
-        if use_lm:
+        if self.uses_tracker_lm():
             load_keys.append(lmk)
-        spatial_aug_keys = [ik]
-        if use_lm:
-            spatial_aug_keys.append(lmk)
+        if self.box_tracker_name == "remeasure":
+            load_keys.append("inst")
+        spatial_aug_keys = load_keys
         affine_modes = ["bilinear" if k == ik else "nearest" for k in spatial_aug_keys]
         plan = self.plan
         patch_size = self._patch_size()
@@ -846,12 +891,13 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
             neg=1,
             src_dims_key="src_dims",
         )
-        self.L2 = LoadHDF5DetCropd(keys=load_keys, box_key=bk)
+        self.L2 = LoadHDF5DetCropd(keys=load_keys, box_key=bk, tracker=self.box_tracker)
         self.E = EnsureChannelFirstd(keys=load_keys)
         self.F = RandFlipBoxSyncd(
             spatial_keys=spatial_aug_keys,
             box_key=bk,
             prob=flip_prob,
+            tracker=self.box_tracker,
         )
         self.Affine = RandAffineBoxSyncd(
             spatial_keys=spatial_aug_keys,
@@ -860,6 +906,7 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
             prob=affine3d["p"],
             rotate_range=affine3d["rotate_range"],
             scale_range=affine3d["scale_range"],
+            tracker=self.box_tracker,
         )
         self.ResizePC = ResizeWithPadOrCropBoxSyncd(
             keys=spatial_aug_keys,
@@ -867,6 +914,7 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
             label_key=lk,
             spatial_size=patch_size,
             lazy=False,
+            tracker=self.box_tracker,
         )
         self.Norm = ScaleIntensityRanged(
             keys=[ik],
@@ -876,12 +924,7 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
             b_max=1.0,
             clip=True,
         )
-        self.BoxClip = ClipBoxToImagedWithDf(
-            box_keys=bk,
-            label_keys=[lk],
-            box_ref_image_keys=ik,
-            remove_empty=True,
-        )
+        self.BoxClip = self.box_tracker
         self.transforms_dict["Ld"] = self.Ld
         self.transforms_dict["Rtr"] = self.Rtr
         self.transforms_dict["L2"] = self.L2
@@ -947,7 +990,7 @@ class DataManagerDetLBD(DataManagerDetSource, DataManagerLBD):
         super().__init__(project, configs, batch_size, cache_rate, **kwargs)
         if provided_keys is None and self.is_eval_split():
             if self._valid_impl() == "patch_stream":
-                self.keys = self.keys_val_seg if self.uses_lm_seg() else self.keys_val
+                self.keys = self.keys_val_seg if self.uses_lm_seg() and self.box_tracker_name == "corner" else self.keys_val
             else:
                 self.keys = self.keys_val_bbox
         self.override_batch_size_valid_split(split=self.split)
@@ -973,11 +1016,13 @@ class DataManagerDetLBD(DataManagerDetSource, DataManagerLBD):
             if self._valid_impl() == "patch_stream":
                 case_ds = self._create_modal_ds()
                 patch_size = self._rand_crop_patch_size()
-                lm_key = self.lm_key if self.uses_lm_seg() else None
+                lm_key = self.lm_key if self.uses_tracker_lm() else None
                 self.ds = PatchStreamDatasetDet(
                     case_dataset=case_ds,
                     patch_size=patch_size,
                     lm_key=lm_key,
+                    tracker=self.box_tracker if self.box_tracker_name != "corner" else None,
+                    instance_key="inst" if self.box_tracker_name == "remeasure" else None,
                 )
                 return
             self.ds = self._create_modal_ds()
@@ -1030,6 +1075,10 @@ class DataManagerDetLBD(DataManagerDetSource, DataManagerLBD):
         if self.is_train_all_split():
             return DataManagerDetSource.create_data_dicts(self, case_ids)
         case_ids = set(str(case_id) for case_id in case_ids)
+        remeasure = self.box_tracker_name == "remeasure"
+        if remeasure:
+            shard_rows, _ = self._load_case_dicts_from_shards(case_ids)
+            shard_rows = {row["case_id"]: row for row in shard_rows}
         skipped = 0
         bboxes_dir = self.data_folder / "bboxes"
         data = []
@@ -1042,17 +1091,24 @@ class DataManagerDetLBD(DataManagerDetSource, DataManagerLBD):
             if not bbox_fn.is_file():
                 skipped += 1
                 continue
-            box_t, label_t, instances, df = self._load_bbox_sidecar(bbox_fn)
-            row = {
-                "case_id": case_id,
-                "data_folder": str(self.data_folder),
-                "image": str(img_fn),
-                self.box_key: box_t,
-                self.label_key: label_t,
-                "instances": instances,
-                "df": df,
-            }
-            if self.uses_lm_seg():
+            if remeasure:
+                if case_id not in shard_rows:
+                    raise ValueError(f"Missing instance shard for {case_id}; rerun LBD with --overwrite")
+                row = shard_rows[case_id]
+            else:
+                box_t, label_t, instances, df = self._load_bbox_sidecar(bbox_fn)
+                row = {
+                    "case_id": case_id,
+                    "data_folder": str(self.data_folder),
+                    self.box_key: box_t,
+                    self.label_key: label_t,
+                    "instances": instances,
+                    "df": df,
+                }
+            row[self.image_key] = str(img_fn)
+            if self.box_tracker_name == "hull":
+                row["hull_xyz"] = df["hull_xyz"].map(literal_eval).tolist()
+            if self.uses_tracker_lm():
                 lm_fn = self.data_folder / "lms" / img_fn.name
                 if not lm_fn.is_file():
                     skipped += 1
@@ -1076,10 +1132,11 @@ class DataManagerDetLBD(DataManagerDetSource, DataManagerLBD):
             self.mask_key,
             self.lm_key,
         )
-        use_lm = self.uses_lm_seg()
+        use_lm = self.uses_tracker_lm()
         load_keys = [ik]
         if use_lm:
             load_keys.append(lmk)
+        remeasure = self.box_tracker_name == "remeasure"
         compute_dtype = self._compute_dtype()
         clip = self.dataset_params["intensity_clip_range"]
 
@@ -1090,6 +1147,8 @@ class DataManagerDetLBD(DataManagerDetSource, DataManagerLBD):
             simple_keys=True,
         )
         L.register(TorchReader())
+        if remeasure:
+            L = Compose([L, LoadHDF5DetInstancesd()])
 
         dtype_val = [
             EnsureTyped(keys=[ik], dtype=compute_dtype),
@@ -1112,29 +1171,24 @@ class DataManagerDetLBD(DataManagerDetSource, DataManagerLBD):
             ),
             "DtypeVal": Compose(dtype_val),
         }
-        box_clip = ClipBoxToImagedWithDf(
-            box_keys=bk,
-            label_keys=[lk],
-            box_ref_image_keys=ik,
-            remove_empty=True,
-        )
+        box_clip = self.box_tracker
         if self.is_eval_split() and self._valid_impl() == "bbox_anchor":
             patch_size = self._rand_crop_patch_size()
-            crop_keys = [ik]
-            if use_lm:
-                crop_keys.append(lmk)
+            crop_keys = [*load_keys, "inst"] if remeasure else load_keys
             self.transforms_dict["BboxCrop"] = BboxCenterCropSlicesd(
                 box_key=bk,
                 image_key=ik,
                 roi_size=patch_size,
             )
-            self.transforms_dict["CropPatch"] = CropDetPatchd(keys=crop_keys, box_key=bk)
+            self.transforms_dict["CropPatch"] = CropDetPatchd(
+                keys=crop_keys, box_key=bk, tracker=self.box_tracker
+            )
             self.transforms_dict["PadPatch"] = PadDetPatchd(
                 keys=crop_keys,
                 patch_size=patch_size,
             )
             self.transforms_dict["BoxClip"] = box_clip
-        elif use_lm:
+        elif use_lm or remeasure:
             self.transforms_dict["BoxClip"] = box_clip
 
 

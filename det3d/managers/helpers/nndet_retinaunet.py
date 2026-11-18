@@ -175,7 +175,10 @@ def det3d_batch_to_nndet(
         label = torch.as_tensor(batch["label"][i], dtype=torch.long).reshape(-1)
         target_classes_raw.append(label)
     target_classes = nndet_target_classes(target_boxes, target_classes_raw, fg_labels)
-    lm = batch[seg_key].squeeze(1).long()
+    lm = batch[seg_key]
+    if isinstance(lm, list):
+        lm = torch.stack(lm, dim=0)
+    lm = lm.squeeze(1).long()
     label_to_seg = {int(label): index + 1 for index, label in enumerate(fg_labels)}
     target_seg = torch.zeros_like(lm)
     for label, mapped in label_to_seg.items():

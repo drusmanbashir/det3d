@@ -30,7 +30,7 @@ class DataManagerDetBTfms(DataManagerDet):
             self.label_key,
             self.point_key,
         )
-        lm_key = self.lm_key if self.uses_lm_seg() else None
+        lm_key = self.lm_key if self.uses_tracker_lm() else None
         self.GpuTail = BatchItemCompose(
             build_train_gpu_tail_compose(
                 device=self.device,
@@ -45,6 +45,8 @@ class DataManagerDetBTfms(DataManagerDet):
                 affine3d=self.configs["affine3d"],
                 patch_size=self.plan["patch_size"],
                 flip_prob=self.flip["prob"],
+                tracker=self.box_tracker,
+                inst_key="inst" if self.box_tracker_name == "remeasure" else None,
             ),
             image_key=ik,
             box_key=bk,
@@ -94,7 +96,7 @@ class DataManagerDetLBDBTfms(DataManagerDetLBD, DataManagerDetSourceBTfms):
         super().__init__(project, configs, batch_size, cache_rate, **kwargs)
         if provided_keys is None and self.is_eval_split():
             if self._valid_impl() == "patch_stream":
-                if self.uses_lm_seg():
+                if self.uses_lm_seg() and self.box_tracker_name == "corner":
                     self.keys = self.keys_val_seg
                 else:
                     self.keys = self.keys_val

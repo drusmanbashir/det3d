@@ -265,7 +265,7 @@ class ClipBoxToImagedWithDf(MapTransform):
                 d[label_key] = clipped_labels_i
         else:
             d[self.label_keys[0]] = clipped_labels
-        if self.df_key in d:
+        if d.get(self.df_key) is not None:
             df = d[self.df_key]
             d[self.df_key] = df.iloc[keep.cpu().numpy()].reset_index(drop=True)
         return d

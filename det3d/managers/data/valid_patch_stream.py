@@ -84,6 +84,8 @@ class PatchStreamDatasetDet(PatchStreamDataset):
         lm_key="lm",
         box_key="bbox",
         label_key="label",
+        tracker=None,
+        instance_key=None,
     ):
         self.case_dataset = case_dataset
         self.patch_size = tuple(int(v) for v in patch_size)
@@ -91,9 +93,13 @@ class PatchStreamDatasetDet(PatchStreamDataset):
         self.lm_key = lm_key
         self.box_key = box_key
         self.label_key = label_key
+        self.tracker = tracker
+        self.instance_key = instance_key
         patch_keys = [image_key]
         if lm_key is not None:
             patch_keys.append(lm_key)
+        if instance_key is not None:
+            patch_keys.append(instance_key)
         self.patch_iter = PatchIterd(
             keys=patch_keys,
             patch_size=self.patch_size,
@@ -162,7 +168,14 @@ class PatchStreamDatasetDet(PatchStreamDataset):
 
                 spatial = tuple(int(v) for v in patch_out[self.image_key].shape[-3:])
                 start = _patch_start_pos(patch_out)
-                if case_box.numel() == 0:
+                if self.tracker is not None:
+                    if self.instance_key is not None:
+                        patch_out[self.instance_key], _ = _pad_tensor_to_patch_size(
+                            patch_out[self.instance_key], self.patch_size, pad_value=0
+                        )
+                    patch_out = self.tracker.translate(patch_out, [-v for v in start])
+                    patch_out = self.tracker.finalize(patch_out)
+                elif case_box.numel() == 0:
                     patch_out[self.box_key] = case_box
                     patch_out[self.label_key] = case_label
                 else:
