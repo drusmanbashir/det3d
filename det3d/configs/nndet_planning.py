@@ -1,246 +1,319 @@
-"""Build and load native nnDetection BoxC002 plans from FRAN LBD outputs."""
+"""Plan RetinaUNet architecture from FRAN's label-bounded outputs."""
 
-import hashlib
+import csv
 import json
-from ast import literal_eval
 import pickle
-import tempfile
+import sys
+from ast import literal_eval
 from collections import Counter
+from contextlib import contextmanager
+from fcntl import LOCK_EX, flock
 from pathlib import Path
+from subprocess import check_output
+from tempfile import NamedTemporaryFile
 
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
-from fran.configs.helpers import make_src_dims_from_patch_size, normalize_tree
+import torch
+from utilz.cprint import cprint
+
+from fran.configs.defaults import lbd_crop_minimum, patch_minimum, plan_gpu_max_process_mb
+from fran.configs.helpers import normalize_tree
+from fran.data.dataregistry import DS
+from fran.transforms.detection import GenerateExtendedBoxMask, patch_size_manifest_key
+from fran.utils.bbox_sidecar import (
+    extended_bbox_df_column,
+    nbrhood_df_to_detection_records,
+)
+from fran.utils.preprocessing_identity import identity_hash
 
 from det3d.configs.nndet_bridge import load_nndet_train_cfgs
 from det3d.managers.helpers.nndet_retinaunet import (
     apply_det3d_plan_to_nndet_model_cfg,
     ensure_nndet_importable,
-    xyzxyz_exclusive_batch_to_nndet,
+    to_nndet,
 )
-from fran.utils.bbox_sidecar import load_nbrhood_sidecar, nbrhood_df_to_detection_records
-from fran.data.dataregistry import DS
+
+ensure_nndet_importable()
+from nndet.planning.architecture.boxes.c002 import BoxC002
+from nndet.planning.estimator import MemoryEstimatorDetection
+from nndet.ptmodule.retinaunet.v001 import RetinaUNetV001
 
 
-def nndet_plan_path(project, plan_id):  #AI
-    """Return the flat BoxC002 result path for a spreadsheet plan ID."""
-    return Path(project.project_folder) / "plans" / f"{int(plan_id)}.pkl"
+TARGET_MEMORY = "RTX2080TI"
+BOX_COLUMNS = ["label_org", "bbox_xyzxyz"]
+BYTES_PER_MB = 1024**2
 
 
-def nndet_plan_input_key(project, plan_train, lbd_folder):  #AI
-    """Fingerprint selected source files and the final shapes and boxes for BoxC002."""
-    lbd_folder = Path(lbd_folder)
-    details_path = lbd_folder / "dataset_details.csv"
-    digest = hashlib.sha256()
-    recipe_keys = (
-        "datasources",
-        "spacing",
-        "expand_by",
-        "fg_indices_exclude",
-        "ignore_labels",
-        "ignore_labels_cc",
-        "lm_group",
-        "mode",
-        "prezoom_scale",
-        "spatial_dims",
-        "n_input_channels",
-        "encoder_start_channels",
-        "encoder_max_channels",
-        "matcher_num_candidates",
-        "matcher_center_in_gt",
-        "sampler_batch_size_per_image",
-        "balanced_sampler_pos_fraction",
-        "sampler_pool_size",
-        "sampler_min_neg",
-    )
-    recipe = {key: plan_train[key] for key in recipe_keys if key in plan_train}
-    recipe.update(
-        {
-            key: value
-            for key, value in plan_train.items()
-            if key.startswith(("remapping", "dusting"))
-        }
-    )
-    recipe["preprocessing_patch_size"] = (
-        plan_train["preprocessing_patch_size"]
-        if "preprocessing_patch_size" in plan_train
-        else plan_train["patch_size"]
-    )
-    normalized_recipe = normalize_tree(recipe, tuple_mode="list")
-    encoded_recipe = json.dumps(
-        normalized_recipe, sort_keys=True, separators=(",", ":"), allow_nan=False
-    )
-    digest.update(encoded_recipe.encode())
-    details = pd.read_csv(details_path)
-    source_datasets = [DS[name.strip()].ds for name in plan_train["datasources"].split(",")]
-    ds_sql = ", ".join(f"'{name}'" for name in source_datasets)
-    source_rows = project.sql_query(
-        "SELECT ds, case_id, image, lm FROM datasources "
-        f"WHERE test=0 AND ds IN ({ds_sql}) ORDER BY ds, case_id"
-    )
-    source_case_ids = {str(row[1]) for row in source_rows}
-    details = details.loc[details["case_id"].astype(str).isin(source_case_ids)]
-    missing = source_case_ids - set(details["case_id"].astype(str))
-    if missing:
-        raise ValueError(f"LBD outputs are missing {len(missing)} selected cases: {sorted(missing)}")
-    digest.update(details.to_csv(index=False).encode())
-    source_paths = sorted({Path(path) for row in source_rows for path in row[2:4]})
-    lbd_paths = []
-    for row in details.itertuples(index=False):
-        stem = Path(str(row.fn_name)).stem
-        lbd_paths.extend(
-            [
-                lbd_folder / "images" / f"{stem}.pt",
-                lbd_folder / "lms" / f"{stem}.pt",
-                lbd_folder / "bboxes" / f"{stem}.csv",
-            ]
-        )
-    for path in tqdm(source_paths + lbd_paths, desc="Hash selected source and LBD files"):
-        digest.update(str(path).encode())
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-    return digest.hexdigest()
-
-
-def build_nndet_plan_from_lbd(project, plan_train, lbd_folder, *, spreadsheet_row=None, target_mem="RTX2080TI", gpu_id=0):  #AI
-    """Run native D3V001/BoxC002 on final combined LBD shapes and boxes."""
-    ensure_nndet_importable()
-    from nndet.io.load import save_pickle
-    from nndet.planning.architecture.boxes.c002 import BoxC002
-    from nndet.planning.estimator import MemoryEstimatorDetection
-    from nndet.ptmodule.retinaunet.v001 import RetinaUNetV001
-    lbd_folder = Path(lbd_folder)
-    details = pd.read_csv(lbd_folder / "dataset_details.csv")
-    spacing = np.asarray(plan_train["spacing"], dtype=float)
-    source_datasets = [DS[name.strip()].ds for name in plan_train["datasources"].split(",")]
-    ds_sql = ", ".join(f"'{name}'" for name in source_datasets)
-    source_rows = project.sql_query(
-        "SELECT ds, case_id FROM datasources "
-        f"WHERE test=0 AND ds IN ({ds_sql}) ORDER BY ds, case_id"
-    )
-    source_case_ids = {str(row[1]) for row in source_rows}
-    details = details.loc[details["case_id"].astype(str).isin(source_case_ids)]
-    missing = source_case_ids - set(details["case_id"].astype(str))
-    if missing:
-        raise ValueError(f"LBD outputs are missing {len(missing)} selected cases: {sorted(missing)}")
-    all_sizes = []
-    cases = {}
-    all_labels = set()
-    for row in details.itertuples(index=False):
-        case_id = str(row.case_id)
-        if case_id in cases:
-            raise ValueError(f"Duplicate LBD case ID: {case_id}")
-        image_shape = np.asarray(literal_eval(row.shape) if isinstance(row.shape, str) else row.shape, dtype=int)
-        if image_shape.size == 4 and image_shape[0] == 1:
-            image_shape = image_shape[1:]
-        sidecar_path = lbd_folder / "bboxes" / f"{Path(str(row.fn_name)).stem}.csv"
-        sidecar = load_nbrhood_sidecar(sidecar_path)
-        boxes, labels, _ = nbrhood_df_to_detection_records(sidecar)
-        boxes = xyzxyz_exclusive_batch_to_nndet(
-            np.stack([box.numpy() for box in boxes]) if boxes else np.empty((0, 6))
-        ).cpu().numpy()
-        labels = [int(label) for label in labels]
-        all_labels.update(labels)
-        all_sizes.append(image_shape)
-        cases[case_id] = {
-            "boxes": boxes,
-            "original_spacing": spacing.copy(),
-            "num_instances": dict(Counter(labels)),
-        }
-    if not cases:
-        raise ValueError(f"No cases found in {lbd_folder / 'dataset_details.csv'}")
-    if not all_labels:
-        raise ValueError("BoxC002 requires foreground boxes in the selected LBD dataset")
-
-    labels = sorted(all_labels)
-    label_index = {label: index for index, label in enumerate(labels)}
-    class_dct = {label_index[label]: str(label) for label in labels}
-    counts = Counter()
-    for case in cases.values():
-        case_counts = {
-            label_index[label]: count
-            for label, count in case["num_instances"].items()
-        }
-        case["num_instances"] = case_counts
-        counts.update(case_counts)
-    properties = {
-        "dim": 3,
-        "modalities": {0: "CT"},
-        "class_dct": class_dct,
-        "num_instances": dict(counts),
-        "all_ious": np.asarray([], dtype=np.float32),
-        "class_ious": {label: np.asarray([], dtype=np.float32) for label in class_dct},
-        "instance_props_per_patient": cases,
-        "all_spacings": [spacing.copy() for _ in cases],
-        "all_sizes": all_sizes,
-    }
+def _model_cfg(plan):  #AI
     model_cfg, _ = load_nndet_train_cfgs()
-    model_cfg = apply_det3d_plan_to_nndet_model_cfg(model_cfg, plan_train)
-    transpose = [0, 1, 2]
-    transposed_spacing = spacing[transpose]
-    resampled_shapes = [shape for shape in all_sizes]
-    median_shape = np.median(np.vstack(resampled_shapes), axis=0)[transpose]
+    model_cfg = apply_det3d_plan_to_nndet_model_cfg(model_cfg, plan)
+    start_channels = int(plan["encoder_start_channels"])
+    model_cfg["plan_arch_overwrites"].update(
+        dim=int(plan["spatial_dims"]),
+        in_channels=int(plan["n_input_channels"]),
+        start_channels=start_channels,
+        max_channels=int(plan["encoder_max_channels"]),
+        fpn_channels=start_channels * 4,
+        head_channels=start_channels * 4,
+    )
+    return model_cfg
 
-    with tempfile.TemporaryDirectory(prefix="boxc002-", dir="/s/agent_rw/tmp") as temp_dir:
-        preprocessed_dir = Path(temp_dir)
-        properties_dir = preprocessed_dir / "properties"
-        properties_dir.mkdir()
-        with (properties_dir / "dataset_properties.pkl").open("wb") as stream:
-            pickle.dump(properties, stream)
-        box = BoxC002(
-            preprocessed_output_dir=preprocessed_dir,
-            save_dir=preprocessed_dir / "analysis",
-            network_cls=RetinaUNetV001,
-            estimator=MemoryEstimatorDetection(target_mem=target_mem, gpu_id=gpu_id),
-            model_cfg=model_cfg,
+
+def nndet_plan_path(project, plan):  #AI
+    return Path(project.project_folder) / "plans" / f"{int(plan['plan_name'])}.pkl"
+
+
+@contextmanager
+def _write_lock(path):  #AI
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as stream:
+        flock(stream, LOCK_EX)
+        yield
+
+
+def _atomic_write(path, content):  #AI
+    with NamedTemporaryFile(dir=path.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            stream.write(content)
+            stream.close()
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def load_nndet_plan(path):  #AI
+    with path.open("rb") as stream:
+        return pickle.load(stream)
+
+
+def resolve_nndet_spacing(project, plan, path):  #AI
+    """Persist the resolved spacing before any stage creates derived data."""
+    snapshot = normalize_tree(plan, tuple_mode="list")
+    with _write_lock(path.with_suffix(".lock")):
+        if path.is_file():
+            stored = load_nndet_plan(path)
+            if stored.get("plan") == snapshot:
+                return stored["target_spacing"]
+        spacing = plan["spacing"]
+        if spacing == "auto":
+            from fran.preprocessing.target_spacing import TargetSpacingPlanner
+
+            spacing = TargetSpacingPlanner(project, plan).run()["target_spacing"]
+        spacing = list(spacing)
+        _atomic_write(path, pickle.dumps({"plan": snapshot, "target_spacing": spacing}))
+    return spacing
+
+
+def _selected_lbd_details(project, plan, lbd_folder):  #AI
+    details = pd.read_csv(lbd_folder / "dataset_details.csv")
+    datasets = {DS[name.strip()].ds for name in plan["datasources"].split(",")}
+    rows = project.sql_query("SELECT ds, case_id FROM datasources WHERE test=0 ORDER BY ds, case_id")
+    selected = [str(case_id) for ds, case_id in rows if ds in datasets]
+    if len(set(selected)) != len(selected):
+        raise ValueError("Selected datasources must have unique LBD case IDs")
+    details = details[details["case_id"].astype(str).isin(selected)]
+    if details["case_id"].duplicated().any() or set(details["case_id"].astype(str)) != set(selected):
+        raise ValueError(f"Expected one LBD dataset_details row for each selected case in {lbd_folder}")
+    return details
+
+
+def _sidecar(lbd_folder, row):  #AI
+    return lbd_folder / "bboxes" / f"{Path(str(row.fn_name)).stem}.csv"
+
+
+def _shape(row):  #AI
+    shape = literal_eval(row.shape) if isinstance(row.shape, str) else row.shape
+    return tuple(int(axis) for axis in shape[-3:])
+
+
+def nndet_plan_input_key(project, plan, lbd_folder):  #AI
+    """Hash measured shapes and base boxes without derived sampling columns."""
+    details = _selected_lbd_details(project, plan, lbd_folder)
+    boxes = [
+        pd.read_csv(_sidecar(lbd_folder, row), usecols=BOX_COLUMNS)[BOX_COLUMNS].to_csv(index=False)
+        for row in details.itertuples(index=False)
+    ]
+    return identity_hash({"details": details.to_csv(index=False), "boxes": boxes})
+
+
+class LBDBoxC002(BoxC002):
+    """Run nnDetection's architecture and anchor algorithms on FRAN objects."""
+
+    def __init__(self, cases, spacing, model_cfg, estimator, in_channels):
+        self.cases = cases
+        self.spacing = np.asarray(spacing)
+        self.model_cfg = model_cfg
+        self.estimator = estimator
+        self.in_channels = in_channels
+        self.network_cls = RetinaUNetV001
+        self.dim = 3
+        self.transpose_forward = [0, 1, 2]
+        self.architecture_kwargs = {}
+
+    def process_properties(self):
+        counts = Counter(label for _, labels, _ in self.cases for label in labels)
+        self.labels = sorted(counts)
+        if not self.labels:
+            raise ValueError("BoxC002 requires foreground boxes in the selected LBD cases")
+        self.all_boxes = [boxes if len(boxes) else [] for boxes, _, _ in self.cases]
+        self.all_spacings = [self.spacing] * len(self.cases)
+        self.dataset_properties = {
+            "num_instances": {index: counts[label] for index, label in enumerate(self.labels)}
+        }
+        self.architecture_kwargs.update(
+            dim=self.dim, in_channels=self.in_channels,
+            classifier_classes=len(self.labels), seg_classes=len(self.labels),
         )
-        box.transpose_forward = transpose
-        box.create_default_settings()
-        box.process_properties()
-        planned = box.plan(
-            transpose_forward=transpose,
-            target_spacing_transposed=transposed_spacing,
-            median_shape_transposed=median_shape,
+
+    def _check_planning_gpu(self):  #AI
+        index = self.estimator.gpu_id
+        device = torch.cuda.get_device_properties(index)
+        gpu_uuid = f"GPU-{device.uuid}"
+        max_process_mb = plan_gpu_max_process_mb()
+        processes = check_output(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=gpu_uuid,pid,process_name,used_memory",
+                "--format=csv,noheader,nounits",
+            ],
+            text=True,
         )
-    result = {
-        "patch_size": [int(v) for v in planned["patch_size"]],
-        "batch_size": int(planned["batch_size"]),
-        "conv_kernels": planned["architecture"]["conv_kernels"],
-        "strides": planned["architecture"]["strides"],
-        "decoder_levels": planned["architecture"]["decoder_levels"],
-        "anchors": planned["anchors"],
-        "fg_labels": labels,
-    }
-    if spreadsheet_row is not None and str(spreadsheet_row["spacing"]).strip().lower() == "auto":
-        result["target_spacing"] = spacing.tolist()
-    out = nndet_plan_path(project, plan_train["plan_name"])
-    out.parent.mkdir(parents=True, exist_ok=True)
-    save_pickle(result, out)
-    return result
+        offenders = [
+            f"PID {pid} ({name}): {memory} MB"
+            for uuid, pid, name, memory in csv.reader(processes.splitlines(), skipinitialspace=True)
+            if uuid == gpu_uuid and int(memory) > max_process_mb
+        ]
+        if offenders:
+            raise RuntimeError(
+                f"BoxC002 on GPU {index} ({device.name}) found compute processes "
+                f"above {max_process_mb} MB: " + ", ".join(offenders)
+            )
+        free, total = torch.cuda.mem_get_info(index)
+        free_mb = free // BYTES_PER_MB
+        target_mem = self.estimator.target_mem
+        cprint(
+            f"BoxC002 planning on GPU {index} ({device.name}) with {free_mb} MB free "
+            f"of {total // BYTES_PER_MB} MB and an nnDetection budget of "
+            f"{target_mem / BYTES_PER_MB:g} MB",
+            bold=True,
+        )
+        sys.stdout.flush()
+        return {
+            "target_memory": TARGET_MEMORY,
+            "target_memory_bytes": target_mem,
+            "gpu_name": device.name,
+            "gpu_free_memory_mb": free_mb,
+            "torch_version": str(torch.__version__),
+        }
+
+    def fit_lbd(self):  #AI
+        self.create_default_settings()
+        self.process_properties()
+        class_weight = self.compute_class_weights()
+        self.architecture_kwargs["class_weight"] = class_weight
+        median_shape = np.median([shape for _, _, shape in self.cases], axis=0)
+        gpu_metadata = self._check_planning_gpu()
+        patch = self._plan_architecture(
+            self.spacing, median_shape, self.transpose_forward
+        )
+        anchors = self._plan_anchors(
+            target_spacing_transposed=self.spacing, transpose_forward=self.transpose_forward
+        )
+        return {
+            "patch_size": [int(value) for value in patch],
+            "batch_size": int(self.batch_size),
+            "conv_kernels": self.architecture_kwargs["conv_kernels"],
+            "strides": self.architecture_kwargs["strides"],
+            "decoder_levels": self.architecture_kwargs["decoder_levels"],
+            "anchors": anchors,
+            "fg_labels": self.labels,
+            "class_weight": class_weight,
+            "estimator": gpu_metadata,
+        }
 
 
-def load_nndet_plan(project, plan_id):  #AI
-    """Load the computed BoxC002 fields for a plan, raising when it has not been generated."""
-    with nndet_plan_path(project, plan_id).open("rb") as stream:
-        result = pickle.load(stream)
-    return result
+def append_lbd_center_ranges(lbd_folder, patch_size, prezoom_scale):  #AI
+    """Populate missing centre columns, then publish their available sizes."""
+    scales = (1.0, prezoom_scale, 1.1, 1.2, 1.4)
+    sizes = sorted({tuple(int(axis * scale) for axis in patch_size) for scale in scales})
+    manifest_path = lbd_folder / "manifest.json"
+    with _write_lock(lbd_folder / ".center_ranges.lock"):
+        manifest = json.loads(manifest_path.read_text())
+        current = {tuple(size) for size in manifest.get("extended_bboxes_patch_sizes", [])}
+        details = pd.read_csv(lbd_folder / "dataset_details.csv")
+        for row in details.itertuples(index=False):
+            path = _sidecar(lbd_folder, row)
+            frame = pd.read_csv(path)
+            missing = {
+                size: extended_bbox_df_column(patch_size_manifest_key(size))
+                for size in sizes
+                if extended_bbox_df_column(patch_size_manifest_key(size)) not in frame
+            }
+            if not missing:
+                continue
+            boxes, _, _ = nbrhood_df_to_detection_records(frame)
+            box_array = torch.stack(boxes).numpy() if boxes else np.empty((0, 6))
+            for size, column in missing.items():
+                generator = GenerateExtendedBoxMask(
+                    keys="bbox", image_key="image", spatial_size=size, whole_box=False
+                )
+                ranges = generator.generate_fg_center_boxes_np(
+                    box_array, _shape(row), whole_box=False
+                )
+                frame[column] = ranges.tolist()
+            _atomic_write(path, frame.to_csv(index=False).encode())
+        updated = current.union(sizes)
+        if updated != current:
+            manifest["extended_bboxes_patch_sizes"] = sorted(updated)
+            _atomic_write(manifest_path, (json.dumps(manifest, indent=2) + "\n").encode())
+
+
+def build_nndet_plan_from_lbd(project, plan, lbd_folder, path, *, plan_snapshot):  #AI
+    """Reuse a current fit and restore missing sampling columns after LBD rewrites."""
+    with _write_lock(path.with_suffix(".lock")):
+        stored = load_nndet_plan(path)
+        if stored["plan"] != plan_snapshot:
+            raise RuntimeError(
+                f"Plan {plan['plan_name']} changed during preprocessing. "
+                "Rerun preprocessing for the current spreadsheet plan."
+            )
+        input_key = nndet_plan_input_key(project, plan, lbd_folder)
+        if stored.get("input_key") != input_key:
+            details = _selected_lbd_details(project, plan, lbd_folder)
+            cases = []
+            for row in details.itertuples(index=False):
+                frame = pd.read_csv(_sidecar(lbd_folder, row), usecols=BOX_COLUMNS)
+                boxes, labels, _ = nbrhood_df_to_detection_records(frame)
+                tensor = torch.stack(boxes) if boxes else torch.empty((0, 6))
+                cases.append((to_nndet(tensor).numpy(), [int(label) for label in labels], _shape(row)))
+            estimator = MemoryEstimatorDetection(target_mem=TARGET_MEMORY, gpu_id=0)
+            planner = LBDBoxC002(
+                cases, stored["target_spacing"], _model_cfg(plan), estimator, plan["n_input_channels"]
+            )
+            stored.update(planner.fit_lbd())
+            stored.update(
+                input_key=input_key,
+                PATCH_MIN=patch_minimum(),
+            )
+            _atomic_write(path, pickle.dumps(stored))
+        append_lbd_center_ranges(lbd_folder, stored["patch_size"], plan["prezoom_scale"])
+    return stored
 
 
 def apply_nndet_plan(configs, computed):  #AI
-    """Apply only planner-derived values to the spreadsheet-based runtime config."""
-    for plan_key in ("plan_train", "plan_valid", "plan_test"):
-        plan = configs[plan_key]
-        plan["preprocessing_patch_size"] = list(plan["patch_size"])
+    """Overlay fitted values while retaining the preprocessing crop identity."""
+    for key in ("plan_train", "plan_valid", "plan_test"):
+        plan = configs[key]
+        plan["preprocessing_patch_size"] = plan["patch_size"]
         plan["patch_size"] = list(computed["patch_size"])
         plan["encoder_conv_kernels"] = computed["conv_kernels"]
         plan["encoder_strides"] = computed["strides"]
         plan["decoder_levels"] = tuple(computed["decoder_levels"])
         plan["nndet_anchors"] = computed["anchors"]
         plan["fg_labels"] = list(computed["fg_labels"])
-        if "target_spacing" in computed:
-            plan["spacing"] = list(computed["target_spacing"])
-        plan["src_dims"] = make_src_dims_from_patch_size(plan["patch_size"])
+        plan["spacing"] = list(computed["target_spacing"])
+        plan["src_dims"] = list(lbd_crop_minimum(plan))
     configs["dataset_params"]["batch_size"] = int(computed["batch_size"])
     return configs

@@ -10,7 +10,7 @@ Scope: `det3d/configs/nndet_planning.py`
 
 - `object_bounded.py` — object-bounded detection preprocessing CLI (`--project`, `--plan`, `--overwrite`, `--num-processes`, `--case-ids`, optional `--input-folder`)
 
-Detection LBD preproc: `fran/run/preproc/analyze_resample.py --pipeline det` (ConfigMakerDet; `LabelBoundedDetDataGenerator` is a thin alias of fran `LabelBoundedDataGenerator` with `hdf5_shard_mode=det`).
+Detection LBD preprocessing uses `fran/run/preproc/analyze_resample.py --pipeline det`. It saves target spacing before resampling and fills centre ranges after patch planning.
 
 ## det/preprocessing
 
@@ -50,7 +50,7 @@ Detection LBD preproc: `fran/run/preproc/analyze_resample.py --pipeline det` (Co
 
 ## Libraries (import, not run)
 
-- `det3d/configs/nndet_planning.py` — build/load BoxC002 plans from selected FRAN LBD cases, fingerprint inputs, and merge computed runtime fields
+- `det3d/configs/nndet_planning.py` — save spacing and BoxC002 fits in `plans/<plan_id>.pkl`, check GPU process usage before fitting, and add missing LBD centre ranges
 
 ## det/detection
 
