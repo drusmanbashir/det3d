@@ -32,10 +32,6 @@ Detection LBD preprocessing uses `fran/run/preproc/analyze_resample.py --pipelin
 - `bbox_stats.py` — `DetectionBBoxStatsd`: LMG GT on `data['bbox']`/`data['label']`; `AttachDetectionGTd`: post-crop LMG GT on `data['box']`/`data['label']` (OBD)
 - `patch_size.py` — `NbrhoodsToPatchesOBDD`: strict lesion bbox N2P + 4D channel
 
-## run/planning
-
-- `advise_det_plan.py` — offline PlanAdvisorDet compare table vs manual plan (`--project`, `--plan-id`)
-
 ## run/nndet
 
 - `local_plan_sources.yaml` — local-only image/lm roots → nnDet task mapping (`liver|kidneys|pancreas|colon`; no downloads)

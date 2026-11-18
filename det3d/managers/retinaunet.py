@@ -26,10 +26,6 @@ class RetinaUNetManager(LightningModule):
         configs = deepcopy(configs)
         if configs.get("mnemonic") is None:
             configs["mnemonic"] = self.project.global_properties["mnemonic"]
-        model_params = dict(configs["model_params"])
-        if "max_epochs" not in model_params:
-            model_params["max_epochs"] = 500
-        configs["model_params"] = model_params
         self.save_hyperparameters("project_title", "configs", "lr")
         self.configs = configs
         self.plan = configs["plan_train"]

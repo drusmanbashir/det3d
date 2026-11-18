@@ -8,9 +8,8 @@ from copy import deepcopy
 import numpy as np
 import torch
 
-from det3d.configs.nndet_bridge import NNDET_ROOT, build_nndet_trainer_cfg, load_nndet_train_cfgs
+from det3d.configs.nndet_bridge import NNDET_ROOT, load_nndet_train_cfgs
 from det3d.utils.tensor import to_numpy
-from utilz.helpers import pp
 
 
 def ensure_nndet_importable():
@@ -57,12 +56,8 @@ def plan_architecture_from_det3d(plan_train):
     return arch
 
 
-def plan_from_det3d(plan_train, plan_path=None):
+def plan_from_det3d(plan_train):
     # AI
-    if plan_path is not None:
-        raise ValueError(
-            "nnDet plan pickle is not read at RetinaUNet build; use plan_path=None"
-        )
     architecture = plan_architecture_from_det3d(plan_train)
     if "nndet_anchors" in plan_train:
         architecture["seg_classes"] = len(plan_train["fg_labels"])
@@ -77,18 +72,6 @@ def plan_from_det3d(plan_train, plan_path=None):
 def apply_det3d_plan_to_nndet_model_cfg(model_cfg, plan_train):
     # AI
     model_cfg = deepcopy(model_cfg)
-    start_channels = int(plan_train["encoder_start_channels"])
-    fpn_channels = start_channels * 4
-    model_cfg["plan_arch_overwrites"].update(
-        {
-            "dim": int(plan_train["spatial_dims"]),
-            "in_channels": int(plan_train["n_input_channels"]),
-            "start_channels": start_channels,
-            "max_channels": int(plan_train["encoder_max_channels"]),
-            "fpn_channels": fpn_channels,
-            "head_channels": fpn_channels,
-        }
-    )
     model_cfg["matcher_kwargs"]["num_candidates"] = int(
         plan_train["matcher_num_candidates"]
     )
@@ -114,11 +97,9 @@ def build_nndet_retinaunet_module(configs):
     from nndet.ptmodule.retinaunet.v001 import RetinaUNetV001
 
     plan_train = configs["plan_train"]
-    model_cfg, _ = load_nndet_train_cfgs()
+    model_cfg, trainer_cfg = load_nndet_train_cfgs()
     model_cfg = apply_det3d_plan_to_nndet_model_cfg(model_cfg, plan_train)
-    trainer_cfg = build_nndet_trainer_cfg(configs)
-    trainer_cfg["max_num_epochs"] = int(configs["model_params"]["max_epochs"])
-    plan = plan_from_det3d(plan_train, plan_path=None)
+    plan = plan_from_det3d(plan_train)
     module = RetinaUNetV001(
         model_cfg=model_cfg,
         trainer_cfg=trainer_cfg,
@@ -264,88 +245,3 @@ def nndet_pred_to_vis(
         seg = pred["pred_seg"]
         out["pred_seg"] = seg[0] if seg.dim() > 3 else seg
     return out
-
-
-# %%
-if __name__ == "__main__":
-    RUN_NAME = "LIDCA-GYRO"
-    CKPT = "/s/fran_storage/checkpoints/lidca/lidc/LIDCA-GYRO/checkpoints/last.ckpt"
-
-# %%
-# SECTION:--- load plan_train + pickle (checkpoint hyperparams) ---
-    import torch
-    from fran.inference.helpers import load_params
-    from nndet.io.load import load_pickle
-
-    params = load_params(RUN_NAME)
-    plan_train = params["configs"]["plan_train"]
-    plan_path = params["configs"]["nndet_plan_path"]
-    pkl_plan = load_pickle(plan_path)
-    print("plan_train decoder_levels", plan_train["decoder_levels"])
-    print("pickle  decoder_levels", pkl_plan["architecture"]["decoder_levels"])
-    print("pickle path", plan_path)
-
-    pp(pkl_plan.keys())
-# %%
-# SECTION:--- BEFORE override (current production behaviour) ---
-    def _apply_before(plan, plan_train):
-        plan = deepcopy(plan)
-        plan["patch_size"] = [int(v) for v in plan_train["patch_size"]]
-        arch = plan["architecture"]
-        arch["classifier_classes"] = len(plan_train["fg_labels"])
-        arch["seg_classes"] = 1
-        return plan
-
-    plan_before = _apply_before(pkl_plan, plan_train)
-    print("BEFORE merged decoder_levels", plan_before["architecture"]["decoder_levels"])
-
-# %%
-# SECTION:--- AFTER override (proposed apply_det3d_overrides_to_nndet_plan) ---
-    from det3d.detection.retinaunet_network import _plan_arch
-
-    def _plan_arch_scratch(plan_train):
-        arch = _plan_arch(plan_train)
-        arch["classifier_classes"] = len(plan_train["fg_labels"])
-        arch["seg_classes"] = 1
-        arch["score_thresh"] = float(plan_train["score_thresh"])
-        arch["nms_thresh"] = float(plan_train["nms_thresh"])
-        arch["detections_per_img"] = int(plan_train["detections_per_img"])
-        arch["topk_candidates"] = int(plan_train["topk_candidates_per_level"])
-        arch["remove_small_boxes"] = float(plan_train["remove_small_boxes"])
-        return arch
-
-    def _apply_after(plan, plan_train):
-        plan = deepcopy(plan)
-        plan["patch_size"] = [int(v) for v in plan_train["patch_size"]]
-        plan["architecture"] = _plan_arch_scratch(plan_train)
-        plan["anchors"] = plan_anchors_from_det3d(plan_train)
-        return plan
-
-    plan_after = _apply_after(pkl_plan, plan_train)
-    print("AFTER  merged decoder_levels", plan_after["architecture"]["decoder_levels"])
-    print("AFTER  cls_out channels (estimate)", len(plan_train["fg_labels"]), "fg labels")
-
-# %%
-# SECTION:--- strict checkpoint load: BEFORE should fail, AFTER should pass ---
-    from det3d.configs.nndet_bridge import load_nndet_train_cfgs
-    from nndet.ptmodule.retinaunet.v001 import RetinaUNetV001
-
-    model_cfg, trainer_cfg = load_nndet_train_cfgs()
-
-    def _try_strict(plan, label):
-        mod = RetinaUNetV001(model_cfg=model_cfg, trainer_cfg=trainer_cfg, plan=plan)
-        sd = torch.load(CKPT, map_location="cpu", weights_only=False)["state_dict"]
-        net_sd = {
-            k.replace("nndet_module.model.", ""): v
-            for k, v in sd.items()
-            if k.startswith("nndet_module.model.")
-        }
-        try:
-            mod.model.load_state_dict(net_sd, strict=True)
-            print(label, "strict load OK")
-        except RuntimeError as exc:
-            print(label, "strict load FAIL:", str(exc).split("\n")[0])
-
-    _try_strict(plan_before, "BEFORE")
-    _try_strict(plan_after, "AFTER")
-# end PythonMethodScratch
