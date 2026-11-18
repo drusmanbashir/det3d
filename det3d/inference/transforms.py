@@ -183,25 +183,15 @@ class RetinaUNetBoxInversed(MapTransform):
         self.point_key = point_key
 
     def __call__(self, data):
-        from det3d.managers.helpers.nndet_retinaunet import nndet_batch_to_xyzxyz
+        from det3d.managers.helpers.nndet_retinaunet import from_nndet
 
         d = dict(data)
         d[self.image_key] = d[self.image_key].detach().cpu()
         boxes = torch.as_tensor(d[self.box_key], dtype=torch.float32).detach().cpu()
-        box = nndet_batch_to_xyzxyz(boxes)
+        box = from_nndet(boxes)
+        d[self.box_key] = box
         if box.numel() == 0:
-            d[self.box_key] = box.reshape(0, 6)
             return d
-        if box.ndim == 1:
-            box = box.unsqueeze(0)
-        monai = torch.empty_like(box)
-        monai[:, 0] = box[:, 0]
-        monai[:, 1] = box[:, 3]
-        monai[:, 2] = box[:, 2]
-        monai[:, 3] = box[:, 1]
-        monai[:, 4] = box[:, 4]
-        monai[:, 5] = box[:, 5]
-        d[self.box_key] = monai
         d = ConvertBoxToPointsd(keys=[self.box_key], point_key=self.point_key)(d)
         d = ApplyTransformToPointsd(keys=[self.point_key], refer_keys=self.image_key)(d)
         d = ConvertPointsToBoxesd(keys=[self.point_key], box_key=self.box_key)(d)
@@ -574,25 +564,22 @@ def crop_around_boxes(image, sidecar, margin_mm=10.0):
 
 
 class NndetBoxToXyzxyzd(MapTransform):
-    """Reorder nnDet xyxyzz pred_box to xyzxyz for MONAI world export (no +/-1)."""
+    """Convert nnDetection predictions to exclusive xyzxyz for MONAI export."""
 
     def __init__(self, box_key: str = "pred_box"):
         super().__init__(keys=[box_key])
 
     def __call__(self, data):
-        from det3d.managers.helpers.nndet_retinaunet import nndet_batch_to_xyzxyz
+        from det3d.managers.helpers.nndet_retinaunet import from_nndet
 
         d = dict(data)
         for key in self.key_iterator(d):
-            d[key] = nndet_batch_to_xyzxyz(d[key])
+            d[key] = from_nndet(d[key])
         return d
 
 
 class PackRetinaUNetPredsd(MapTransform):
-    """Map predict_inner outputs to pred_box/label/score/seg.
-
-    pred_box stays nnDet xyxyzz (same values as inference_step pred_boxes).
-    """
+    """Pack single-tile or merged predictions with exclusive xyzxyz boxes."""
 
     def __init__(self, keys=("image",)):
         super().__init__(keys=keys)
@@ -608,12 +595,12 @@ class PackRetinaUNetPredsd(MapTransform):
         return (seg > 0).to(torch.uint8)
 
     def __call__(self, data):
-        from det3d.managers.helpers.nndet_retinaunet import nndet_pred_to_vis
+        from det3d.managers.helpers.nndet_retinaunet import from_nndet, nndet_pred_to_vis
 
         d = dict(data)
         if "raw_pred" in d:
             vis = nndet_pred_to_vis(d.pop("raw_pred"))
-            d["pred_box"] = vis["bbox"].detach()
+            d["pred_box"] = from_nndet(vis["bbox"].detach())
             d["pred_label"] = vis["label"].detach()
             d["pred_score"] = vis["label_scores"].detach()
             seg = vis["pred_seg"].detach()

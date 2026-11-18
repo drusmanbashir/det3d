@@ -127,61 +127,22 @@ def build_nndet_retinaunet_module(configs):
     return module, plan
 
 
-def xyzxyz_exclusive_to_nndet(box):
-    # AI
-    b = torch.as_tensor(box, dtype=torch.float32).reshape(-1)
-    out = torch.empty(6, dtype=b.dtype, device=b.device)
-    out[0] = b[0]
-    out[1] = b[1]
-    out[2] = b[3]
-    out[3] = b[4]
-    out[4] = b[2]
-    out[5] = b[5]
-    return out
+def to_nndet(boxes: torch.Tensor) -> torch.Tensor:  #AI
+    """Convert exclusive xyzxyz boxes to nnDetection xyxyzz with padded minima."""
+    native = boxes.reshape(-1, 6)[:, [0, 1, 3, 4, 2, 5]]
+    native[:, [0, 1, 4]] -= 1
+    return native
 
 
-def xyzxyz_exclusive_batch_to_nndet(boxes):
-    # AI
-    boxes = torch.as_tensor(boxes, dtype=torch.float32)
-    if boxes.numel() == 0:
-        return boxes.reshape(0, 6)
-    if boxes.ndim == 1:
-        boxes = boxes.unsqueeze(0)
-    rows = [xyzxyz_exclusive_to_nndet(boxes[i]) for i in range(boxes.shape[0])]
-    return torch.stack(rows, 0)
+def from_nndet(boxes: torch.Tensor) -> torch.Tensor:  #AI
+    """Convert xyxyzz to exclusive xyzxyz, preserving a clamped zero minimum.
 
-
-def disk_bbox_to_nndet_xyxyzz(disk_bbox: torch.Tensor) -> torch.Tensor:
-    # AI
-    out = xyzxyz_exclusive_batch_to_nndet(disk_bbox)
-    if out.numel():
-        out[:, [0, 1, 4]] -= 1
-    return out
-
-
-def nndet_xyxyzz_to_xyzxyz(box):
-    # AI
-    """nnDet xyxyzz -> xyzxyz axis reorder only (no +/-1)."""
-    b = torch.as_tensor(box, dtype=torch.float32).reshape(-1)
-    out = torch.empty(6, dtype=b.dtype, device=b.device)
-    out[0] = b[0]
-    out[1] = b[1]
-    out[2] = b[4]
-    out[3] = b[2]
-    out[4] = b[3]
-    out[5] = b[5]
-    return out
-
-
-def nndet_batch_to_xyzxyz(boxes):
-    # AI
-    boxes = torch.as_tensor(boxes, dtype=torch.float32)
-    if boxes.numel() == 0:
-        return boxes.reshape(0, 6)
-    if boxes.ndim == 1:
-        boxes = boxes.unsqueeze(0)
-    rows = [nndet_xyxyzz_to_xyzxyz(boxes[i]) for i in range(boxes.shape[0])]
-    return torch.stack(rows, 0)
+    Native zero is ambiguous after clamping, so a det3d minimum of 1 round-trips to 0.
+    """
+    canonical = boxes.reshape(-1, 6)[:, [0, 1, 4, 2, 3, 5]]
+    minima = canonical[:, :3]
+    canonical[:, :3] = torch.where(minima > 0, minima + 1, 0)
+    return canonical
 
 
 def offset_nndet_xyxyzz_boxes(boxes, origin):
@@ -222,24 +183,14 @@ def det3d_batch_to_nndet(
     fg_labels,
     *,
     seg_key="lm",
-    use_disk_box_plug=True,
 ):
     # AI
-    # nnDet head expects xyxyzz tile-local boxes. Upstream contract: batch["bbox"] is
-    # xyzxyz in patch/crop voxel space (LMG → LBD sidecar bbox_xyzxyz → DataManager).
-    # disk_bbox_to_nndet_xyxyzz / xyzxyz_exclusive_batch_to_nndet complete the bridge.
     data = batch["image"]
     n = int(data.shape[0])
     target_boxes = []
     target_classes_raw = []
-    box_to_nndet = (
-        disk_bbox_to_nndet_xyxyzz
-        if use_disk_box_plug
-        else xyzxyz_exclusive_batch_to_nndet
-    )
     for i in range(n):
-        box = batch["bbox"][i]
-        target_boxes.append(box_to_nndet(box))
+        target_boxes.append(to_nndet(batch["bbox"][i]))
         label = torch.as_tensor(batch["label"][i], dtype=torch.long).reshape(-1)
         target_classes_raw.append(label)
     target_classes = nndet_target_classes(target_boxes, target_classes_raw, fg_labels)

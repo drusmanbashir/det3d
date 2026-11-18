@@ -8,7 +8,7 @@ import wandb
 from fran.callback.wandb.wandb import WandbImageGridCallback, _annotate_wandb_grid_image
 from utilz.stringz import info_from_filename
 
-from det3d.managers.helpers.nndet_retinaunet import nndet_batch_to_xyzxyz
+from det3d.managers.helpers.nndet_retinaunet import from_nndet
 from det3d.detection.visualize_image import (
     annotate_snippet_grid,
     draw_slice_boxes,
@@ -66,8 +66,8 @@ def _resize_panel_tensor(panel, height, width):
 
 
 def adapt_retinaunet_pred_boxes(pred):
-    """nnDet xyxyzz -> xyzxyz layout for ImageBBoxViewer (no +/-1)."""
-    pred[_PRED_BOX_KEY] = nndet_batch_to_xyzxyz(pred[_PRED_BOX_KEY])
+    """Convert nnDetection predictions to exclusive xyzxyz for ImageBBoxViewer."""
+    pred[_PRED_BOX_KEY] = from_nndet(pred[_PRED_BOX_KEY])
     return pred
 
 

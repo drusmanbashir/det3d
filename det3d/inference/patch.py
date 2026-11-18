@@ -1,7 +1,7 @@
 import torch
 from det3d.managers.helpers.nndet_retinaunet import (
     ensure_nndet_importable,
-    nndet_batch_to_xyzxyz,
+    from_nndet,
     offset_nndet_xyxyzz_boxes,
 )
 from det3d.utils.tensor import plain_tensor
@@ -215,7 +215,7 @@ class DetPatchRetinaUNet(DetPatchInfererBase):
         b = b[:cap]
         p = p[:cap]
         l = l[:cap]
-        return nndet_batch_to_xyzxyz(b), p, l
+        return from_nndet(b), p, l
 
     def merge_tile_boxes(self, acc, spatial):
         if not acc:
@@ -570,6 +570,6 @@ if __name__ == "__main__":
     batch = P.predict_inner(batch)
     batch = P.postprocess(batch)
     img = batch["image"][0, 0].detach().cpu()
-    boxes = nndet_batch_to_xyzxyz(batch["pred_box"]).detach().cpu()
+    boxes = batch["pred_box"].detach().cpu()
     print("RetinaNet n_boxes", boxes.shape[0])
     ImageBBoxViewer(img, boxes)

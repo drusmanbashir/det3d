@@ -7,8 +7,7 @@ from nndet.core.retina import BaseRetinaNet
 import torch
 from det3d.managers.helpers.nndet_retinaunet import (
     det3d_batch_to_nndet,
-    nndet_batch_to_xyzxyz,
-    xyzxyz_exclusive_batch_to_nndet,
+    from_nndet,
 )
 from det3d.detection.retinanet_detector2 import RetinaNetDetector2
 from fran.callback.debug_epoch_limit import DebugEpochBatchLimit
@@ -636,7 +635,7 @@ if __name__ == "__main__":
     boxes = nb['target_boxes']
     box=  boxes[0]
 
-    box_viz = nndet_batch_to_xyzxyz(box)
+    box_viz = from_nndet(box)
     im = img[0]
     ImageBBoxViewer(im, box_viz)
 
@@ -674,7 +673,7 @@ if __name__ == "__main__":
     im.mean()
     im.min()
     box = preds[0]
-    box_viz = nndet_batch_to_xyzxyz(box)
+    box_viz = from_nndet(box)
     ImageBBoxViewer(im, box_viz)
     from torch import Tensor
 

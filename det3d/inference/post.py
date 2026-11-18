@@ -191,7 +191,7 @@ class PackRetinaUNetPredsd(MapTransform):
 
     def __call__(self, data):
         from det3d.managers.helpers.nndet_retinaunet import (
-            nndet_batch_to_xyzxyz,
+            from_nndet,
             nndet_pred_to_vis,
         )
 
@@ -199,7 +199,7 @@ class PackRetinaUNetPredsd(MapTransform):
         image = d["image"][0, 0]
         if "raw_pred" in d:
             vis = nndet_pred_to_vis(d.pop("raw_pred"))
-            d["pred_box"] = nndet_batch_to_xyzxyz(vis["bbox"].detach())
+            d["pred_box"] = from_nndet(vis["bbox"].detach())
             d["pred_label"] = vis["label"].detach()
             d["pred_score"] = vis["label_scores"].detach()
             seg = vis["pred_seg"].detach()

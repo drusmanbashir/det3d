@@ -8,7 +8,7 @@ import nibabel as nib
 import numpy as np
 import torch
 from det3d.inference.lbd_pt import intensity_clip_range, load_lbd_pt, normalize_lbd_image
-from det3d.managers.helpers.nndet_retinaunet import ensure_nndet_importable
+from det3d.managers.helpers.nndet_retinaunet import ensure_nndet_importable, from_nndet
 from det3d.utils.tensor import plain_tensor, to_numpy
 from fran.data.dataregistry import DS
 from fran.managers import Project
@@ -144,8 +144,9 @@ def nndet_predict_case(
         restore=False,
     )
     boxes = result["boxes"]
+    pred_boxes = from_nndet(torch.as_tensor(boxes["pred_boxes"], device=device))
     out = {
-        "pred_boxes": [torch.as_tensor(boxes["pred_boxes"], device=device)],
+        "pred_boxes": [pred_boxes],
         "pred_scores": [torch.as_tensor(boxes["pred_scores"], device=device)],
         "pred_labels": [torch.as_tensor(boxes["pred_labels"], device=device)],
     }
