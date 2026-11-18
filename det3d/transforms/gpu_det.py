@@ -110,6 +110,7 @@ class RandAffineBoxSyncd(MapTransform):
             prob=prob,
             rotate_range=rotate_range,
             scale_range=scale_range,
+            padding_mode="zeros",
         )
 
     def __call__(self, data):
