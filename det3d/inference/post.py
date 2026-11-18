@@ -60,6 +60,7 @@ def _box_corners(box):
 
 
 def _apply_ornt_points(pts, ornt, spatial_shape):
+    """Flip + permute Nx3 exclusive box-edge points by a MONAI orientation."""
     sh = torch.tensor([float(v) for v in spatial_shape], dtype=torch.float64)
     coords = pts.clone()
     axes = [int(o[0]) for o in ornt]
@@ -67,7 +68,7 @@ def _apply_ornt_points(pts, ornt, spatial_shape):
     sh = sh[axes]
     for i, flip in enumerate(ornt[:, 1]):
         if int(flip) == -1:
-            coords[:, i] = sh[i] - 1.0 - coords[:, i]
+            coords[:, i] = sh[i] - coords[:, i]
     return coords
 
 
@@ -101,7 +102,7 @@ def apply_affine_row_points(pts, mat):
 
 
 def apply_ornt_points_np(pts, ornt, shape):
-    """#AI Flip + permute Nx3 points like _apply_ornt_points (MONAI orientation indices)."""
+    """#AI Flip + permute Nx3 exclusive box-edge points like _apply_ornt_points (MONAI orientation indices)."""
     sh = np.array(shape, dtype=np.float64)
     coords = np.asarray(pts, dtype=np.float64).copy()
     if coords.ndim == 1:
@@ -112,7 +113,7 @@ def apply_ornt_points_np(pts, ornt, shape):
     sh = sh[axes]
     for i, flip in enumerate(tr[:, 1]):
         if int(flip) == -1:
-            coords[:, i] = sh[i] - 1.0 - coords[:, i]
+            coords[:, i] = sh[i] - coords[:, i]
     return coords
 
 

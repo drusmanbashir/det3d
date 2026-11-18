@@ -35,11 +35,13 @@ def _resize_pad_crop_voxel_shift(pre_spatial, spatial_size):
 
 
 def _warp_box_corners(corners, a0, aff):
+    """Warp exclusive box-edge corners by the voxel affine delta, which maps voxel centres (edge = centre + 0.5)."""
     dev = corners.device
     a0 = a0.to(device=dev, dtype=torch.float64)
     aff = aff.to(device=dev, dtype=torch.float64)
     final_affine = torch.linalg.inv(aff) @ a0
-    return apply_affine_to_points_gpu(corners, final_affine, dtype=torch.float32)
+    warped = apply_affine_to_points_gpu(corners - 0.5, final_affine, dtype=torch.float32) + 0.5
+    return warped
 
 
 class ResizeWithPadOrCropBoxSyncd(MapTransform):
