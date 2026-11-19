@@ -1,6 +1,7 @@
 """Detection data managers (source, whole, patch, LBD, RBD) on FRAN's DataManager."""
 
 import json
+import os
 import resource
 from ast import literal_eval
 from functools import partial
@@ -206,7 +207,7 @@ class DataManagerDet(DataManager):
             return 0, False
         if self.is_train_all_split():
             return super()._num_workers()
-        num_workers = min(4, max(2, int(self.configs["dataset_params"].get("num_workers_val", 2))))
+        num_workers = min(4, max(1, len(os.sched_getaffinity(0)) - 2))
         return num_workers, False
 
     def create_dataloader(self):
