@@ -161,10 +161,6 @@ class WandbDetImageGridCallback(WandbImageGridCallback):
         self._train_items = []
         self._val_items = []
 
-    def on_validation_epoch_start(self, trainer, pl_module):
-        super().on_validation_epoch_start(trainer, pl_module)
-        trainer.store_preds = (trainer.current_epoch + 1) % self.epoch_freq == 0
-
     def on_validation_batch_end(
         self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0
     ):
