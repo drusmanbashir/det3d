@@ -3,14 +3,16 @@ from pathlib import Path
 
 import nndet
 import nndet.compat  # noqa: F401  nnDetection's runtime shims, as its own scripts/train.py imports them
+import numpy as np
 import torch
 import yaml
 from fran.managers.project import Project
 from lightning.pytorch import LightningModule
+from nndet.evaluator.seg import SegmentationEvaluator
 
 from det3d.managers.det_schedule import configure_detection_optimizers
 from det3d.geometry.nndet_boxes import nndet_pred_to_vis, to_nndet
-from det3d.utils.tensor import sanitize_tensor_for_numpy, to_numpy
+from det3d.utils.tensor import to_numpy
 
 
 # %%
@@ -41,7 +43,6 @@ class RetinaUNetManager(LightningModule):
         self.val_loss_sums = {}
         self.val_loss_count = 0
         self._val_patch_stream = False
-        self._nndet_wandb_grid_val_batches = []
 
     @property
     def net(self):
@@ -72,6 +73,7 @@ class RetinaUNetManager(LightningModule):
         model_cfg, trainer_cfg = RetinaUNetManager.nndet_cfgs(configs)
         plan = RetinaUNetManager.plan_from_det3d(configs)
         module = RetinaUNetV001(model_cfg=model_cfg, trainer_cfg=trainer_cfg, plan=plan)
+        module.seg_evaluator = SegmentationEvaluatorTorch.create()
         return module, plan
 
     @staticmethod
@@ -205,17 +207,12 @@ class RetinaUNetManager(LightningModule):
         )
         return losses, prediction, nb
 
-    def maybe_store_grid_preds(self, batch, batch_idx):
-        if not (hasattr(self.trainer, "store_preds") and self.trainer.store_preds):
-            return
-        with torch.no_grad():
-            _, prediction, _ = self.step_losses(batch, batch_idx, evaluation=True)
-            store_batch_grid_preds(self, batch, prediction)
-
     def training_step(self, batch, batch_idx):
-        losses, _, _ = self.step_losses(batch, batch_idx, evaluation=False)
+        store_preds = getattr(self.trainer, "store_preds", False)
+        losses, prediction, _ = self.step_losses(batch, batch_idx, evaluation=store_preds)
+        if store_preds:
+            batch["pred"] = batch_pred_to_vis_list(prediction)
         total = self.log_step_losses(losses, "train0")
-        self.maybe_store_grid_preds(batch, batch_idx)
         return total
 
     def on_validation_epoch_start(self):
@@ -256,12 +253,11 @@ class RetinaUNetManager(LightningModule):
                 gt_classes=to_numpy(nb["target_classes"]),
                 gt_ignore=None,
             )
+            batch["pred"] = batch_pred_to_vis_list(prediction)
         self.nndet_module.seg_evaluator.run_online_evaluation(
-            seg_probs=to_numpy(prediction["pred_seg"]),
-            target=to_numpy(nb["target_seg"]),
+            seg_probs=prediction["pred_seg"],
+            target=nb["target_seg"],
         )
-        if not patch_stream:
-            store_batch_grid_preds(self, batch, prediction)
 
     def on_validation_epoch_end(self):
         n = self.val_loss_count
@@ -282,8 +278,6 @@ class RetinaUNetManager(LightningModule):
         else:
             val_metric = float(metric_scores[self.nndet_module.eval_score_key])
         self.log("val0_metric", val_metric, prog_bar=True, sync_dist=self.sync_dist)
-        # Grid callbacks have consumed the stash; holding GPU val batches into training starves cuDNN workspace.
-        self._nndet_wandb_grid_val_batches = []
 
     def configure_optimizers(self):
         holder = {}
@@ -298,39 +292,35 @@ class RetinaUNetManager(LightningModule):
 
 def batch_pred_to_vis_list(pred):
     #AI
-    n = len(pred["pred_boxes"])
+    """Per-case grid predictions as detached views on the device; the grid copies only what it draws."""
     vis_preds = []
-    for b in range(n):
+    for b in range(len(pred["pred_boxes"])):
         item = {
-            "pred_boxes": [pred["pred_boxes"][b]],
-            "pred_labels": [pred["pred_labels"][b]],
-            "pred_scores": [pred["pred_scores"][b]],
+            "pred_boxes": [pred["pred_boxes"][b].detach()],
+            "pred_labels": [pred["pred_labels"][b].detach()],
+            "pred_scores": [pred["pred_scores"][b].detach()],
+            "pred_seg": pred["pred_seg"][b : b + 1].detach(),
         }
-        if "pred_seg" in pred:
-            item["pred_seg"] = pred["pred_seg"][b : b + 1]
-        vis = nndet_pred_to_vis(item)
-        vis_preds.append(
-            {
-                k: sanitize_tensor_for_numpy(v) if isinstance(v, torch.Tensor) else v
-                for k, v in vis.items()
-            }
-        )
+        vis_preds.append(nndet_pred_to_vis(item))
     return vis_preds
 
 
-def store_batch_grid_preds(pl_module, batch, preds):
-    #AI
-    if isinstance(preds, list):
-        batch["pred"] = [
-            {
-                k: sanitize_tensor_for_numpy(v) if isinstance(v, torch.Tensor) else v
-                for k, v in p.items()
-            }
-            for p in preds
-        ]
-    else:
-        batch["pred"] = batch_pred_to_vis_list(preds)
-    pl_module._nndet_wandb_grid_val_batches.append(batch)
+class SegmentationEvaluatorTorch(SegmentationEvaluator):
+    """nnDetection's global seg dice with tp/fp/fn counted on the device; finish_online_evaluation is nnDetection's."""
+
+    def run_online_evaluation(self, seg_probs, target):  #AI
+        output_seg = seg_probs.argmax(dim=1)
+        tp, fp, fn = [], [], []
+        for c in range(1, seg_probs.shape[1]):
+            pred_c = output_seg == c
+            true_c = target == c
+            tp.append((pred_c & true_c).sum().item())
+            fp.append((pred_c & ~true_c).sum().item())
+            fn.append((~pred_c & true_c).sum().item())
+        self.results_list["tp"].append(np.array(tp, dtype=np.float64))
+        self.results_list["fp"].append(np.array(fp, dtype=np.float64))
+        self.results_list["fn"].append(np.array(fn, dtype=np.float64))
+        return {}
 
 
 # %%

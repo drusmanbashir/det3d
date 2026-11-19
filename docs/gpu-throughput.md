@@ -15,8 +15,19 @@ Validation (every 2 epochs) takes about 45 s once fixed.
 
 1. **Data starvation.** `DataManagerDet._num_workers` used `min(4, max(2, bs // 8))`, which gives 2 workers at batch 4. Each step waited 0.63 s for data. Training workers now come from `training_num_workers` in each host's `$FRAN_CONF/config.yaml` (8 on Sinclair, 12 on andrena). 8 workers and 12 workers measured the same (0.585 s/step), with 0.01 s of data wait.
 2. **cuDNN fallback after validation.** `RetinaUNetManager.validation_step` stashed every validation batch, GPU tensors included, in `_nndet_wandb_grid_val_batches`. Nothing cleared the list until the next validation started. With that memory held, cuDNN could not get workspace for the training convolutions. It switched to direct kernels and kept them for the rest of the run. `wgrad2d_grouped_direct_kernel` alone took about 1,040 ms per step. Training ran 3× slower from the first validation onward, and allocator retries rose from 2 to 57.
-   - The grid callback now releases each stashed batch after it reads it (`WandbDetImageGridCallback.on_validation_batch_end`).
-   - The manager clears the stash in `on_validation_epoch_end`.
+   - The stash is gone. Steps put predictions on `batch["pred"]` (fran's pattern), and the grid copies one 2D slice per drawn case, on grid epochs only.
+
+## Validation cost (3090, 121 cases, 31 batches of 4)
+
+| Part | Before | After |
+|---|---|---|
+| Model: nnDet loss + predict (GPU) | 17.9 s | 18.7 s |
+| Seg dice: nnDet numpy evaluator → `SegmentationEvaluatorTorch` (GPU counts, nnDet's finish) | 15.9 s | 0.09 s |
+| GPU→CPU copies for evaluators | 7.8 s | ≈0 |
+| Grid stash on every validation | 4.0 s | 0 |
+| Wall, including data wait | 53 s | 24 s |
+
+GPU and numpy seg dice gave identical tp/fp/fn on all 31 batches. Training rows are back on the grid (`images/grid_train`), from the same forward with `evaluation=True` on the batches fran flags.
 
 ## Settings tested (5090, batch 4, sustained steps 10–50)
 

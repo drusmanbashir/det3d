@@ -19,7 +19,6 @@ from det3d.detection.visualize_image import (
     filter_detection_pred,
     overlay_panel_label,
     pick_slice_index_max_visible,
-    pick_slice_index,
     count_boxes_on_slice,
 )
 from det3d.utils.tensor import sanitize_tensor_for_numpy, to_numpy
@@ -71,7 +70,11 @@ def adapt_retinaunet_pred_boxes(pred):
     return pred
 
 
-def _items_from_batch(batch, preds, score_min, top_k, retinaunet=False, adapt_nndet_boxes=True, gt_seg_key=None):
+def _items_from_batch(batch, preds, score_min, top_k, slice_axis, retinaunet=False, adapt_nndet_boxes=True, gt_seg_key=None):
+    """Grid items holding only the slice the grid draws: it is picked from the boxes, cut on the device, then copied.
+
+    Volumes are one-slice slabs and boxes are shifted onto them, so the grid draws slice 0.
+    """
     batch_size = int(batch["image"].shape[0])
     case_ids = _case_ids_from_batch(batch)
     while len(case_ids) < batch_size:
@@ -81,31 +84,32 @@ def _items_from_batch(batch, preds, score_min, top_k, retinaunet=False, adapt_nn
         pred_cpu = {
             k: sanitize_tensor_for_numpy(v) if isinstance(v, torch.Tensor) else v
             for k, v in preds[b].items()
+            if k != _PRED_SEG_KEY
         }
         pred = filter_detection_pred(pred_cpu, score_min=score_min, top_k=top_k)
-        if retinaunet and adapt_nndet_boxes:
-            pred = adapt_retinaunet_pred_boxes(pred)
         pred_overlap = filter_detection_pred(pred_cpu, score_min=score_min, top_k=None)
         if retinaunet and adapt_nndet_boxes:
+            pred = adapt_retinaunet_pred_boxes(pred)
             pred_overlap = adapt_retinaunet_pred_boxes(pred_overlap)
+        gt_box = batch["bbox"][b].detach().cpu()
+        vol = batch["image"][b, 0]
+        s = pick_slice_index_max_visible(pred[_PRED_BOX_KEY], gt_box, vol.shape, slice_axis)
+        shift = torch.zeros(6)
+        shift[[slice_axis, slice_axis + 3]] = s
+        pred[_PRED_BOX_KEY] = pred[_PRED_BOX_KEY] - shift
+        pred_overlap[_PRED_BOX_KEY] = pred_overlap[_PRED_BOX_KEY] - shift
         item = {
             "case_id": case_ids[b],
-            "vol": to_numpy(batch["image"][b, 0]).astype(np.float32),
-            "bbox": batch["bbox"][b].detach().cpu(),
+            "vol": to_numpy(vol.narrow(slice_axis, s, 1)).astype(np.float32),
+            "bbox": gt_box - shift,
             "label": batch["label"][b].detach().cpu(),
             "pred": pred,
             "pred_overlap": pred_overlap,
         }
         if retinaunet:
-            item["pred_seg"] = pred[_PRED_SEG_KEY]
+            item["pred_seg"] = sanitize_tensor_for_numpy(preds[b][_PRED_SEG_KEY].narrow(slice_axis + 1, s, 1))
         if gt_seg_key:
-            gt_seg = batch[gt_seg_key]
-            if isinstance(gt_seg, list):
-                item["gt_seg"] = gt_seg[b].detach().cpu()
-            else:
-                item["gt_seg"] = gt_seg[b].detach().cpu()
-                if item["gt_seg"].ndim == 4:
-                    item["gt_seg"] = item["gt_seg"][0]
+            item["gt_seg"] = sanitize_tensor_for_numpy(batch[gt_seg_key][b][0].narrow(slice_axis, s, 1))
         items.append(item)
     return items
 
@@ -149,94 +153,68 @@ class WandbDetImageGridCallback(WandbImageGridCallback):
         self.tiny_side_px = int(tiny_side_px)
         self.pred_top_k = pred_top_k
         self.show_fg_heatmap = show_fg_heatmap
-        self._cached_items = []
-        self._grid_collect_target = 0
+        self._train_items = []
+        self._val_items = []
 
     def reset_grid(self):
         super().reset_grid()
-
-    def on_train_epoch_start(self, trainer, pl_module):
-        super().on_train_epoch_start(trainer, pl_module)
-
-    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
-        super().on_train_batch_start(trainer, pl_module, batch, batch_idx)
-        trainer.store_preds = False
+        self._train_items = []
+        self._val_items = []
 
     def on_validation_epoch_start(self, trainer, pl_module):
         super().on_validation_epoch_start(trainer, pl_module)
-        pl_module._nndet_wandb_grid_val_batches = []
-        epoch = trainer.current_epoch + 1
-        if epoch % self.epoch_freq == 0:
-            self._cached_items = []
-            self._grid_collect_target = self.imgs_per_batch * self.grid_rows
-        else:
-            self._grid_collect_target = 0
+        trainer.store_preds = (trainer.current_epoch + 1) % self.epoch_freq == 0
 
     def on_validation_batch_end(
         self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0
     ):
-        epoch = trainer.current_epoch + 1
-        if epoch % self.epoch_freq == 0 and len(self._cached_items) < self._grid_collect_target:
-            self.populate_grid_val(pl_module, batch, batch_idx)
-        stashed = pl_module._nndet_wandb_grid_val_batches
-        if batch_idx < len(stashed):
-            stashed[batch_idx] = None  # free this batch's GPU tensors once the grid has read it
+        if trainer.store_preds and len(self._val_items) < self.imgs_per_batch * self.grid_rows:
+            self._val_items.extend(self._det_items(batch))
 
     def populate_grid(self, pl_module, batch):
-        return
+        self._train_items.extend(self._det_items(batch))
 
-    def populate_grid_val(self, pl_module, batch, batch_idx=0):
-        stashed = getattr(pl_module, "_nndet_wandb_grid_val_batches", None)
-        if stashed and batch_idx < len(stashed):
-            batch = stashed[batch_idx]
-        if "pred" not in batch:
-            return
-        self._append_det_batch(batch)
-
-    def _append_det_batch(self, batch):
-        self._cached_items.extend(
-            _items_from_batch(
-                batch,
-                batch["pred"],
-                self.score_min,
-                top_k=self.pred_top_k,
-            )
+    def _det_items(self, batch):
+        items = _items_from_batch(
+            batch,
+            batch["pred"],
+            self.score_min,
+            top_k=self.pred_top_k,
+            slice_axis=self.slice_axis,
         )
+        return items
 
-    def _log_grid(self, trainer, epoch: int) -> None:
-        if len(self._cached_items) == 0:
+    def _log_grid(self, trainer, epoch, key, items) -> None:
+        if len(items) == 0:
             return
-        rendered_image, triplet_case_ids, tile_w, tile_h, n_tiles = self._render_grid(
-            self._cached_items
-        )
-        padding = 2
+        rendered_image, triplet_case_ids, tile_w, tile_h, n_tiles = self._render_grid(items)
         rendered_image = _annotate_wandb_grid_image(
             img=rendered_image,
             case_ids=triplet_case_ids,
             tile_w=tile_w,
             tile_h=tile_h,
             nrow=n_tiles,
-            padding=padding,
-            val_start_idx=self.val_start_idx,
+            padding=2,
         )
 
         if self.local_folder is not None:
-            fig_fname = self.local_folder / f"grid_epoch{epoch - 1}.png"
+            fig_fname = self.local_folder / f"{key.split('/')[-1]}_epoch{epoch - 1}.png"
             cv2.imwrite(str(fig_fname), cv2.cvtColor(rendered_image, cv2.COLOR_RGB2BGR))
 
         if trainer.logger is not None and hasattr(trainer.logger, "log_image"):
             caption = f"epoch {epoch} cases={len(triplet_case_ids)}"
             trainer.logger.log_image(
-                key="images/grid",
+                key=key,
                 images=[wandb.Image(rendered_image, caption=caption)],
                 step=trainer.global_step,
             )
 
     def on_validation_epoch_end(self, trainer, pl_module):
-        epoch = trainer.current_epoch + 1
-        if epoch % self.epoch_freq != 0:
+        if not trainer.store_preds:
             return
-        self._log_grid(trainer, epoch)
+        epoch = trainer.current_epoch + 1
+        self._log_grid(trainer, epoch, "images/grid_train", self._train_items)
+        self._log_grid(trainer, epoch, "images/grid", self._val_items)
 
     def _draw_gt_panel(self, item, vol, slice_idx, gt_box, gt_label):
         if "gt_seg" in item:
@@ -307,7 +285,6 @@ class WandbDetImageGridCallback(WandbImageGridCallback):
         return overlay_panel_label(panel, panel_label)
 
     def _render_grid(self, items):
-        rng = np.random.default_rng()
         n_unique = len({item["case_id"] for item in items})
         if self.n_tiles is not None:
             n_tiles = self.n_tiles
@@ -323,19 +300,18 @@ class WandbDetImageGridCallback(WandbImageGridCallback):
         padding = 2
         max_items = self.imgs_per_batch * 10
 
-        order = rng.permutation(len(items))
         selected = []
         seen_case_ids = set()
-        for idx in order:
-            idx = int(idx)
-            cid = items[idx]["case_id"]
+        for item in items:
+            cid = item["case_id"]
             if cid in seen_case_ids:
                 continue
             seen_case_ids.add(cid)
-            selected.append(items[idx])
+            selected.append(item)
             if len(selected) >= min(n_tiles * grid_rows, max_items):
                 break
 
+        slice_idx = 0
         for item in selected:
             vol = item["vol"]
             gt_box = item["bbox"]
@@ -344,15 +320,6 @@ class WandbDetImageGridCallback(WandbImageGridCallback):
             pred_box = pred[_PRED_BOX_KEY]
             pred_label = pred[_PRED_LABEL_KEY]
             pred_scores = pred[_PRED_SCORE_KEY]
-
-            if gt_box.shape[0] or pred_box.shape[0]:
-                slice_idx = pick_slice_index_max_visible(
-                    pred_box, gt_box, vol.shape, self.slice_axis, rng
-                )
-            else:
-                slice_idx = pick_slice_index(
-                    np.zeros((0, 6)), vol.shape, self.slice_axis, rng
-                )
 
             n_pred = int(pred_box.shape[0])
             n_on_slice = count_boxes_on_slice(pred_box, slice_idx, self.slice_axis)
@@ -388,46 +355,13 @@ class WandbDetImageGridCallback(WandbImageGridCallback):
 
 
 class WandbDetImageGridTrainCallback(WandbDetImageGridCallback):
-    """Run-through train-batch wandb grid (fran TrainerRT parity; no val dataloader)."""
-
-    def on_train_start(self, trainer, pl_module):
-        trainer.store_preds = False
-        len_dl = int(len(trainer.train_dataloader) / trainer.accumulate_grad_batches)
-        self.freq = max(2, int(len_dl / self.grid_rows))
-
-    def on_train_epoch_start(self, trainer, pl_module):
-        epoch = trainer.current_epoch + 1
-        if epoch % self.epoch_freq == 0:
-            self._cached_items = []
-            self._grid_collect_target = self.imgs_per_batch * self.grid_rows
-            self.validation_grid_created = True
-            self.val_start_idx = None
-        else:
-            self._grid_collect_target = 0
-
-    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
-        epoch = trainer.current_epoch + 1
-        if epoch % self.epoch_freq == 0:
-            trainer.store_preds = trainer.global_step % self.freq == 0
-        else:
-            trainer.store_preds = False
-
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        if trainer.store_preds:
-            self.populate_grid(pl_module, batch)
-
-    def populate_grid(self, pl_module, batch):
-        if "pred" not in batch:
-            return
-        if len(self._cached_items) >= self._grid_collect_target:
-            return
-        self._append_det_batch(batch)
+    """Run-through grid (no val dataloader): the train grid is logged at train epoch end."""
 
     def on_train_epoch_end(self, trainer, pl_module):
         epoch = trainer.current_epoch + 1
         if epoch % self.epoch_freq != 0:
             return
-        self._log_grid(trainer, epoch)
+        self._log_grid(trainer, epoch, "images/grid_train", self._train_items)
 
 
 class WandbRetinaUNetImageGridCallback(WandbDetImageGridCallback):
@@ -477,19 +411,19 @@ class WandbRetinaUNetImageGridCallback(WandbDetImageGridCallback):
         self.gt_seg_key = gt_seg_key
         self.adapt_nndet_boxes = adapt_nndet_boxes
 
-    def _append_det_batch(self, batch):
+    def _det_items(self, batch):
         gt_seg_key = self.gt_seg_key if self.show_gt_seg else None
-        self._cached_items.extend(
-            _items_from_batch(
-                batch,
-                batch["pred"],
-                self.score_min,
-                top_k=self.pred_top_k,
-                retinaunet=True,
-                adapt_nndet_boxes=self.adapt_nndet_boxes,
-                gt_seg_key=gt_seg_key,
-            )
+        items = _items_from_batch(
+            batch,
+            batch["pred"],
+            self.score_min,
+            top_k=self.pred_top_k,
+            slice_axis=self.slice_axis,
+            retinaunet=True,
+            adapt_nndet_boxes=self.adapt_nndet_boxes,
+            gt_seg_key=gt_seg_key,
         )
+        return items
 
 
 class WandbRetinaUNetImageGridTrainCallback(WandbDetImageGridTrainCallback):
@@ -539,16 +473,16 @@ class WandbRetinaUNetImageGridTrainCallback(WandbDetImageGridTrainCallback):
         self.gt_seg_key = gt_seg_key
         self.adapt_nndet_boxes = adapt_nndet_boxes
 
-    def _append_det_batch(self, batch):
+    def _det_items(self, batch):
         gt_seg_key = self.gt_seg_key if self.show_gt_seg else None
-        self._cached_items.extend(
-            _items_from_batch(
-                batch,
-                batch["pred"],
-                self.score_min,
-                top_k=self.pred_top_k,
-                retinaunet=True,
-                adapt_nndet_boxes=self.adapt_nndet_boxes,
-                gt_seg_key=gt_seg_key,
-            )
+        items = _items_from_batch(
+            batch,
+            batch["pred"],
+            self.score_min,
+            top_k=self.pred_top_k,
+            slice_axis=self.slice_axis,
+            retinaunet=True,
+            adapt_nndet_boxes=self.adapt_nndet_boxes,
+            gt_seg_key=gt_seg_key,
         )
+        return items
