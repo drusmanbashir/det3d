@@ -13,7 +13,7 @@ Validation (every 2 epochs) takes about 45 s once fixed.
 
 ## Causes and fixes
 
-1. **Data starvation.** `DataManagerDet._num_workers` used `min(4, max(2, bs // 8))`, which gives 2 workers at batch 4. Each step waited 0.63 s for data. The fix is fran's rule `min(12, 2 × bs)`, now inherited through `super()._num_workers()`. 8 workers and 12 workers measured the same (0.585 s/step), with 0.01 s of data wait.
+1. **Data starvation.** `DataManagerDet._num_workers` used `min(4, max(2, bs // 8))`, which gives 2 workers at batch 4. Each step waited 0.63 s for data. Training workers now come from `training_num_workers` in each host's `$FRAN_CONF/config.yaml` (8 on Sinclair, 12 on andrena). 8 workers and 12 workers measured the same (0.585 s/step), with 0.01 s of data wait.
 2. **cuDNN fallback after validation.** `RetinaUNetManager.validation_step` stashed every validation batch, GPU tensors included, in `_nndet_wandb_grid_val_batches`. Nothing cleared the list until the next validation started. With that memory held, cuDNN could not get workspace for the training convolutions. It switched to direct kernels and kept them for the rest of the run. `wgrad2d_grouped_direct_kernel` alone took about 1,040 ms per step. Training ran 3× slower from the first validation onward, and allocator retries rose from 2 to 57.
    - The grid callback now releases each stashed batch after it reads it (`WandbDetImageGridCallback.on_validation_batch_end`).
    - The manager clears the stash in `on_validation_epoch_end`.
@@ -45,7 +45,7 @@ No single fix remains that is both cheap and large. The next levers are a larger
 
 ## Per-GPU settings
 
-The same settings work on the RTX 3090 and the 5090. On the 3090, batch 2 runs at 0.63 s/step, the 5090 at 0.32 s/step. fran's worker rule feeds both, so no per-GPU profile file under `FRAN_CONF` is needed. Patch and batch size already follow the planning card through BoxC002.
+The 5090 is about twice as fast as the 3090 per sample (batch 2: 0.32 s/step on the 5090, 0.63 s/step on the 3090), but both use the same settings. 8 workers feed both: the 5090 consumes about 6.8 samples/s and the 3090 about 3.3. The worker count is set per host in `$FRAN_CONF` (`training_num_workers`), because host RAM, not the GPU, limits it: 46 workers at batch 4 used about 65% of 121 GB and systemd-oomd killed the run. Patch and batch size already follow the planning card through BoxC002.
 
 ## Harness
 
