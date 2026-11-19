@@ -158,6 +158,10 @@ class WandbDetImageGridCallback(WandbImageGridCallback):
     def on_train_epoch_start(self, trainer, pl_module):
         super().on_train_epoch_start(trainer, pl_module)
 
+    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
+        super().on_train_batch_start(trainer, pl_module, batch, batch_idx)
+        trainer.store_preds = False
+
     def on_validation_epoch_start(self, trainer, pl_module):
         super().on_validation_epoch_start(trainer, pl_module)
         pl_module._nndet_wandb_grid_val_batches = []
