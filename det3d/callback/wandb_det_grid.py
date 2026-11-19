@@ -176,11 +176,11 @@ class WandbDetImageGridCallback(WandbImageGridCallback):
         self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0
     ):
         epoch = trainer.current_epoch + 1
-        if epoch % self.epoch_freq != 0:
-            return
-        if len(self._cached_items) >= self._grid_collect_target:
-            return
-        self.populate_grid_val(pl_module, batch, batch_idx)
+        if epoch % self.epoch_freq == 0 and len(self._cached_items) < self._grid_collect_target:
+            self.populate_grid_val(pl_module, batch, batch_idx)
+        stashed = pl_module._nndet_wandb_grid_val_batches
+        if batch_idx < len(stashed):
+            stashed[batch_idx] = None  # free this batch's GPU tensors once the grid has read it
 
     def populate_grid(self, pl_module, batch):
         return

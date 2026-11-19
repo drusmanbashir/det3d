@@ -282,6 +282,8 @@ class RetinaUNetManager(LightningModule):
         else:
             val_metric = float(metric_scores[self.nndet_module.eval_score_key])
         self.log("val0_metric", val_metric, prog_bar=True, sync_dist=self.sync_dist)
+        # Grid callbacks have consumed the stash; holding GPU val batches into training starves cuDNN workspace.
+        self._nndet_wandb_grid_val_batches = []
 
     def configure_optimizers(self):
         holder = {}
