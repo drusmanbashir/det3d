@@ -1,23 +1,28 @@
-import torch
 from copy import deepcopy
+from pathlib import Path
+
+import nndet
+import nndet.compat  # noqa: F401  nnDetection's runtime shims, as its own scripts/train.py imports them
+import torch
+import yaml
 from fran.managers.project import Project
 from lightning.pytorch import LightningModule
 
 from det3d.managers.det_schedule import configure_detection_optimizers
-from det3d.managers.helpers.nndet_retinaunet import (
-    build_nndet_retinaunet_module,
-    det3d_batch_to_nndet,
-    fast_nndet_batch_to_device,
-    log_nndet_det3d_step_losses,
-    NNDET_LOSS_LOG_NAMES,
-    nndet_pred_to_vis,
-)
+from det3d.geometry.nndet_boxes import nndet_pred_to_vis, to_nndet
 from det3d.utils.tensor import sanitize_tensor_for_numpy, to_numpy
 
 
 # %%
 class RetinaUNetManager(LightningModule):
     """nnDetection RetinaUNetV001 on det3d DataManager batches."""
+
+    NNDET_LOSS_LOG_NAMES = {
+        "cls": "cls_loss",
+        "reg": "box_reg_loss",
+        "seg_ce": "loss_ce",
+        "seg_dice": "loss_dice",
+    }
 
     def __init__(self, project_title, configs, lr=None, sync_dist=False):
         super().__init__()
@@ -31,8 +36,8 @@ class RetinaUNetManager(LightningModule):
         self.plan = configs["plan_train"]
         self.model_params = configs["model_params"]
         self.lr = float(lr if lr is not None else self.model_params["lr"])
-        self.class_names = [self.plan["class_name"]]
-        self.nndet_module, self.nndet_plan = build_nndet_retinaunet_module(self.configs)
+        self.class_names = [self.model_params["class_name"]]
+        self.nndet_module, self.nndet_plan = self.build_nndet_module(self.configs)
         self.val_loss_sums = {}
         self.val_loss_count = 0
         self._val_patch_stream = False
@@ -42,9 +47,152 @@ class RetinaUNetManager(LightningModule):
     def net(self):
         return self.nndet_module.model
 
+    @staticmethod
+    def nndet_cfgs(configs):  #AI
+        """nnDetection's V001 model and trainer config, with the det loss sheet applied to the matcher and sampler."""
+        train_cfg = yaml.safe_load((Path(nndet.__file__).parent / "conf/train/v001.yaml").read_text())
+        model_cfg, trainer_cfg = train_cfg["model_cfg"], train_cfg["trainer_cfg"]
+        loss = configs["loss_params"]
+        model_cfg["matcher_kwargs"].update(
+            num_candidates=int(loss["matcher_num_candidates"]), center_in_gt=bool(loss["matcher_center_in_gt"])
+        )
+        model_cfg["head_sampler_kwargs"].update(
+            batch_size_per_image=int(loss["sampler_batch_size_per_image"]),
+            positive_fraction=float(loss["balanced_sampler_pos_fraction"]),
+            pool_size=int(loss["sampler_pool_size"]),
+            min_neg=int(loss["sampler_min_neg"]),
+        )
+        return model_cfg, trainer_cfg
+
+    @staticmethod
+    def build_nndet_module(configs):  #AI
+        """nnDetection RetinaUNetV001 and the plan it is built from."""
+        from nndet.ptmodule.retinaunet.v001 import RetinaUNetV001
+
+        model_cfg, trainer_cfg = RetinaUNetManager.nndet_cfgs(configs)
+        plan = RetinaUNetManager.plan_from_det3d(configs)
+        module = RetinaUNetV001(model_cfg=model_cfg, trainer_cfg=trainer_cfg, plan=plan)
+        return module, plan
+
+    @staticmethod
+    def plan_from_det3d(configs):
+        # AI
+        plan_train = configs["plan_train"]
+        plan = {
+            "architecture": RetinaUNetManager.plan_architecture_from_det3d(configs),
+            "anchors": deepcopy(configs["plan_train"]["model"]["anchors"]),
+            "patch_size": [int(v) for v in plan_train["patch_size"]],
+        }
+        return plan
+
+    @staticmethod
+    def plan_architecture_from_det3d(configs):
+        # AI
+        """nnDetection's flat architecture dict, built from the nested configs; the only place these keys are flattened."""
+        from det3d.detection.retinaunet_network import plan_model
+
+        plan_train = configs["plan_train"]
+        model_params = configs["model_params"]
+        model = plan_model(configs)
+        postprocess = plan_train["postprocess"]
+        n_fg = len(plan_train["fg_labels"])
+        start_channels = int(model_params["encoder_start_channels"])
+        arch = {
+            "dim": int(model_params["spatial_dims"]),
+            "in_channels": int(model_params["in_channels"]),
+            "start_channels": start_channels,
+            "max_channels": int(model_params["encoder_max_channels"]),
+            "conv_kernels": model["conv_kernels"],
+            "strides": model["strides"],
+            "decoder_levels": tuple(model["decoder_levels"]),
+            "fpn_channels": start_channels * 4,
+            "head_channels": start_channels * 4,
+            "classifier_classes": n_fg,
+            "seg_classes": n_fg,
+            "score_thresh": float(postprocess["score_thresh"]),
+            "nms_thresh": float(postprocess["nms_thresh"]),
+            "detections_per_img": int(postprocess["detections_per_img"]),
+            "topk_candidates": int(configs["postprocess"]["topk_candidates_per_level"]),
+            "remove_small_boxes": float(configs["postprocess"]["remove_small_boxes"]),
+        }
+        return arch
+
+    @staticmethod
+    def nndet_target_classes(target_boxes, target_classes_raw, fg_labels):
+        # AI
+        label_to_idx = {int(v): i for i, v in enumerate(fg_labels)}
+        out = []
+        for boxes, cls in zip(target_boxes, target_classes_raw):
+            cls = torch.as_tensor(cls, dtype=torch.long).reshape(-1)
+            n = int(boxes.shape[0])
+            cls = cls[:n]
+            mapped = torch.tensor(
+                [label_to_idx[int(v.item())] for v in cls],
+                dtype=torch.long,
+                device=boxes.device,
+            )
+            out.append(mapped)
+        return out
+
+    @staticmethod
+    def det3d_batch_to_nndet(
+        batch,
+        fg_labels,
+        *,
+        seg_key="lm",
+    ):
+        # AI
+        data = batch["image"]
+        n = int(data.shape[0])
+        target_boxes = []
+        target_classes_raw = []
+        for i in range(n):
+            target_boxes.append(to_nndet(batch["bbox"][i]))
+            label = torch.as_tensor(batch["label"][i], dtype=torch.long).reshape(-1)
+            target_classes_raw.append(label)
+        target_classes = RetinaUNetManager.nndet_target_classes(target_boxes, target_classes_raw, fg_labels)
+        lm = batch[seg_key]
+        if isinstance(lm, list):
+            lm = torch.stack(lm, dim=0)
+        lm = lm.squeeze(1).long()
+        label_to_seg = {int(label): index + 1 for index, label in enumerate(fg_labels)}
+        target_seg = torch.zeros_like(lm)
+        for label, mapped in label_to_seg.items():
+            target_seg[lm == label] = mapped
+        out = {
+            "data": data,
+            "target_boxes": target_boxes,
+            "target_classes": target_classes,
+            "target_seg": target_seg,
+        }
+        return out
+
+    @staticmethod
+    def fast_nndet_batch_to_device(nb, device):
+        # AI
+        nb["data"] = nb["data"].to(device)
+        nb["target_boxes"] = [b.to(device) for b in nb["target_boxes"]]
+        nb["target_classes"] = [c.to(device) for c in nb["target_classes"]]
+        nb["target_seg"] = nb["target_seg"].to(device)
+        return nb
+
+    def log_step_losses(self, losses, prefix):  #AI
+        """Log the summed and per-term nnDetection losses; return the sum."""
+        total = sum(losses.values())
+        self.log(f"{prefix}_loss", total, prog_bar=(prefix == "train0"), on_step=True, on_epoch=True, sync_dist=self.sync_dist)
+        for key, val in losses.items():
+            self.log(
+                f"{prefix}_{self.NNDET_LOSS_LOG_NAMES.get(key, key)}",
+                val,
+                on_step=(prefix == "train0"),
+                on_epoch=True,
+                sync_dist=self.sync_dist,
+            )
+        return total
+
     def step_losses(self, batch, batch_idx, evaluation=False):
-        nb = det3d_batch_to_nndet(batch, self.plan["fg_labels"])
-        nb = fast_nndet_batch_to_device(nb, batch["image"].device)
+        nb = self.det3d_batch_to_nndet(batch, self.plan["fg_labels"])
+        nb = self.fast_nndet_batch_to_device(nb, batch["image"].device)
         losses, prediction = self.net.train_step(
             images=nb["data"],
             targets={
@@ -66,7 +214,7 @@ class RetinaUNetManager(LightningModule):
 
     def training_step(self, batch, batch_idx):
         losses, _, _ = self.step_losses(batch, batch_idx, evaluation=False)
-        total = log_nndet_det3d_step_losses(self, losses, "train0", self.sync_dist)
+        total = self.log_step_losses(losses, "train0")
         self.maybe_store_grid_preds(batch, batch_idx)
         return total
 
@@ -91,7 +239,7 @@ class RetinaUNetManager(LightningModule):
                 ]
             }
         for key, val in losses.items():
-            log_key = NNDET_LOSS_LOG_NAMES.get(key, key)
+            log_key = self.NNDET_LOSS_LOG_NAMES.get(key, key)
             self.val_loss_sums[log_key] = self.val_loss_sums.get(log_key, 0.0) + float(
                 val.detach()
             )
@@ -139,10 +287,10 @@ class RetinaUNetManager(LightningModule):
         holder = {}
         return configure_detection_optimizers(
             self.net.parameters(),
-            self.plan,
+            self.configs,
             self.lr,
             holder,
-            monitor=self.plan["scheduler_monitor"],
+            monitor=self.configs["scheduler_params"]["scheduler_monitor"],
         )
 
 

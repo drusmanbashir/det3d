@@ -223,9 +223,8 @@ class RemeasureTracker(BoxTracker):
 
     def finalize(self, data):  #AI
         """Remeasure nnDetection boxes and convert them to exclusive xyzxyz."""
-        from det3d.managers.helpers.nndet_retinaunet import ensure_nndet_importable
-
-        ensure_nndet_importable()
+        
+        import nndet.compat  # noqa: F401
         from nndet.io.transforms.instances import instances_to_boxes
 
         d = dict(data)

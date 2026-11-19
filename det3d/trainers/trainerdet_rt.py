@@ -200,7 +200,7 @@ class TrainerDetRunThrough(TrainerDet):
         dm = dm_class(
             project_title=self.project.project_title,
             configs=self.configs,
-            batch_size=self.configs["dataset_params"]["batch_size"],
+            batch_size=self.configs["plan_train"]["batch_size"],
             cache_rate=self.configs["dataset_params"]["cache_rate"],
             device=self.configs["dataset_params"].get("device", "cuda"),
             ds_type=self.configs["dataset_params"].get("ds_type"),

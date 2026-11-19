@@ -1,9 +1,5 @@
 import torch
-from det3d.managers.helpers.nndet_retinaunet import (
-    ensure_nndet_importable,
-    from_nndet,
-    offset_nndet_xyxyzz_boxes,
-)
+from det3d.geometry.nndet_boxes import from_nndet, offset_nndet_xyxyzz_boxes
 from det3d.transforms.intensity import det_intensity_transform
 from det3d.utils.tensor import plain_tensor
 from fran.inference.base import BaseInferer
@@ -24,7 +20,7 @@ class DetPatchInfererBase(BaseInferer):
 
     def norm_dtype_transforms(self):
         norm = det_intensity_transform(
-            self.dataset_params, self.params["configs"]["plan_train"], legacy_checkpoint=True,
+            self.dataset_params, self.params["configs"]["plan_train"],
         )
         dtype = EnsureTyped(keys=["image"], dtype=torch.float16)
         return {"Norm": norm, "Dtype": dtype}
@@ -140,7 +136,7 @@ class DetPatchRetinaUNet(DetPatchInfererBase):
 
     def inference_params(self):
         net = self.model.net
-        ensure_nndet_importable()
+        import nndet.compat  # noqa: F401
         from nndet.inference.detection.model import batched_weighted_nms_model
 
         params = {
@@ -162,7 +158,7 @@ class DetPatchRetinaUNet(DetPatchInfererBase):
         return offset_nndet_xyxyzz_boxes(boxes, origin)
 
     def box_tile_weight(self, boxes, tile_size):
-        ensure_nndet_importable()
+        import nndet.compat  # noqa: F401
         from nndet.core.boxes.ops import box_center
         from nndet.inference.ensembler.detection import BoxEnsemblerSelective
 
@@ -182,7 +178,7 @@ class DetPatchRetinaUNet(DetPatchInfererBase):
         return out
 
     def filter_boxes(self, boxes, probs, labels, weights, spatial):
-        ensure_nndet_importable()
+        import nndet.compat  # noqa: F401
         from nndet.core.boxes.clip import clip_boxes_to_image
         from nndet.core.boxes.ops import remove_small_boxes
 

@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from det3d.inference.lbd_pt import load_lbd_pt
 from det3d.transforms.intensity import det_intensity_transform
-from det3d.managers.helpers.nndet_retinaunet import ensure_nndet_importable, from_nndet
+from det3d.geometry.nndet_boxes import from_nndet
 from det3d.utils.tensor import plain_tensor, to_numpy
 from fran.data.dataregistry import DS
 from fran.managers import Project
@@ -79,18 +79,18 @@ def save_nifti_volume(arr, out_path, spacing):
     return out_path
 
 
-def predict_plan_for_inference(nndet_plan, plan_train):
+def predict_plan_for_inference(nndet_plan, configs):
     #AI
-    arch = nndet_plan["architecture"]
+    postprocess = configs["plan_train"]["postprocess"]
     plan = deepcopy(nndet_plan)
     plan["network_dim"] = 3
     plan["batch_size"] = 1
     plan["transpose_backward"] = [0, 1, 2]
     plan["inference_plan"] = {
-        "model_score_thresh": float(plan_train["score_thresh"]),
-        "model_detections_per_image": int(arch["detections_per_img"]),
-        "model_topk": int(arch["topk_candidates"]),
-        "remove_small_boxes": float(arch["remove_small_boxes"]),
+        "model_score_thresh": float(postprocess["score_thresh"]),
+        "model_detections_per_image": int(postprocess["detections_per_img"]),
+        "model_topk": int(configs["postprocess"]["topk_candidates_per_level"]),
+        "remove_small_boxes": float(configs["postprocess"]["remove_small_boxes"]),
     }
     return plan
 
@@ -116,19 +116,19 @@ def identity_properties(spatial_shape, spacing):
 
 @torch.no_grad()
 def nndet_predict_case(
-    net, nndet_plan, plan_train, image, device, overlap=0.25, do_seg=True, num_tta=0
+    net, nndet_plan, configs, image, device, overlap=0.25, do_seg=True, num_tta=0
 ):
     #AI
-    ensure_nndet_importable()
+    import nndet.compat  # noqa: F401
     from nndet.ptmodule.retinaunet.v001 import RetinaUNetV001
 
     image = plain_tensor(image)
     if image.dim() == 3:
         image = image.unsqueeze(0)
     case_np = to_numpy(image).astype(np.float32)
-    spacing = plan_train["spacing"]
+    spacing = configs["plan_train"]["spacing"]
     properties = identity_properties(case_np.shape[1:], spacing)
-    plan = predict_plan_for_inference(nndet_plan, plan_train)
+    plan = predict_plan_for_inference(nndet_plan, configs)
     predictor = RetinaUNetV001.get_predictor(
         plan=plan,
         models=[net],
@@ -167,7 +167,7 @@ def infer_case_seg(manager, pt_path, device, normalize, overlap=0.25, num_tta=0)
     pred = nndet_predict_case(
         manager.net,
         manager.nndet_plan,
-        manager.plan,
+        manager.configs,
         img,
         device=device,
         overlap=overlap,
@@ -199,7 +199,7 @@ def run_lidc2_seg_infer(
     project = Project(project_title)
     manager = load_retinaunet_manager(ckpt_path, device)
     plan = manager.plan
-    normalize = det_intensity_transform(manager.configs["dataset_params"], plan, legacy_checkpoint=True)
+    normalize = det_intensity_transform(manager.configs["dataset_params"], plan)
     spacing = spacing_from_plan(plan)
 
     manifest = []

@@ -2,9 +2,6 @@
 
 from fran.preprocessing.labelbounded import LabelBoundedDataGenerator
 
-# backward-compat alias
-LabelBoundedDetDataGenerator = LabelBoundedDataGenerator
-
 # %%
 if __name__ == "__main__":
     from det3d.configs.parser import ConfigMakerDet

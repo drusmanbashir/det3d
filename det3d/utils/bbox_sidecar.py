@@ -30,25 +30,6 @@ def _label_to_int(label):
     return int(torch.as_tensor(label).reshape(-1)[0].item())
 
 
-def normalize_detection_sidecar(sidecar: dict) -> dict:
-    payload = dict(sidecar)
-    if "bbox" not in payload and "box" in payload:
-        payload["bbox"] = payload.pop("box")
-    elif "bbox" in payload and "box" in payload:
-        payload.pop("box")
-    return payload
-
-
-def migrate_detection_sidecar_file(bbox_fn) -> bool:
-    path = Path(bbox_fn)
-    sidecar = json.loads(path.read_text())
-    normalized = normalize_detection_sidecar(sidecar)
-    if normalized == sidecar:
-        return False
-    save_json(normalized, path)
-    return True
-
-
 def save_detection_sidecar(out_fn, boxes, labels, ignore_labels=None, instances: dict = None):
     if not isinstance(boxes, list):
         boxes = [boxes]
@@ -105,19 +86,14 @@ def load_detection_sidecar(bbox_fn):
     if path.suffix == ".csv":
         return nbrhood_df_to_detection_records(load_nbrhood_sidecar(path))
     sidecar = json.loads(path.read_text())
-    normalized = normalize_detection_sidecar(sidecar)
-    if normalized != sidecar:
-        save_json(normalized, path)
-    boxes = normalized["bbox"]
-    labels = normalized["label"]
+    boxes = sidecar["bbox"]
+    labels = sidecar["label"]
     valid_boxes = []
     valid_labels = []
     for box, label in zip(boxes, labels):
         valid_boxes.append(torch.tensor(box, dtype=torch.float32))
         valid_labels.append(torch.tensor(int(label), dtype=torch.long))
-    instances = normalized.get("instances")
-    if instances is not None:
-        instances = {str(k): int(v) for k, v in instances.items()}
+    instances = {str(k): int(v) for k, v in sidecar["instances"].items()}
     return valid_boxes, valid_labels, instances
 
 

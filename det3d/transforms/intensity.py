@@ -5,14 +5,12 @@ from fran.transforms.intensitytransforms import NormaliseClipd
 from monai.transforms import Compose, EnsureTyped, ScaleIntensityRanged
 
 
-def det_intensity_transform(dataset_params, plan, keys=("image",), *, legacy_checkpoint=False):  #AI
-    """Build the configured transform from fitted statistics or a historical checkpoint's clip range."""
+def det_intensity_transform(dataset_params, plan, keys=("image",)):  #AI
+    """Build the configured transform from the plan's fitted intensity statistics."""
     mode = dataset_params.get("intensity_norm", "scale01")
     stats = plan.get("intensity_properties")
     if stats is not None and stats != "auto":
         clip = [stats["percentile_00_5"], stats["percentile_99_5"]]
-    elif legacy_checkpoint and "intensity_norm" not in dataset_params and dataset_params.get("intensity_clip_range") is not None:
-        clip = dataset_params["intensity_clip_range"]
     else:
         raise ValueError("Set intensity_properties in the workbook or run detection preprocessing to fit them.")
     if mode == "scale01":

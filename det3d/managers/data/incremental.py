@@ -32,32 +32,28 @@ class DataManagerDetPatchI(DataManagerPatchI, DataManagerDetI):
     pass
 
 
-class DataManagerDetModeSpec(DataManagerModeSpec):
-    pass
-
-
 class DataManagerDetModes:
-    SOURCE = DataManagerDetModeSpec(
+    SOURCE = DataManagerModeSpec(
         mode="source",
         manager_cls=DataManagerDetSourceI,
         collate_fn=source_collated,
     )
-    sourcepbd = DataManagerDetModeSpec(
+    sourcepbd = DataManagerModeSpec(
         mode="sourcepbd",
         manager_cls=DataManagerDetPatchI,
         collate_fn=patch_collated,
     )
-    WHOLE = DataManagerDetModeSpec(
+    WHOLE = DataManagerModeSpec(
         mode="whole",
         manager_cls=DataManagerDetWholeI,
         collate_fn=whole_collated,
     )
-    PATCH = DataManagerDetModeSpec(
+    PATCH = DataManagerModeSpec(
         mode="patch",
         manager_cls=DataManagerDetPatchI,
         collate_fn=patch_collated,
     )
-    LBD = DataManagerDetModeSpec(
+    LBD = DataManagerModeSpec(
         mode="lbd",
         manager_cls=DataManagerDetLBDI,
         collate_fn=source_collated,
@@ -72,7 +68,7 @@ class DataManagerDetModes:
     }
 
     @classmethod
-    def by_mode(cls, mode: str, split: Optional[str] = None) -> DataManagerDetModeSpec:
+    def by_mode(cls, mode: str, split: Optional[str] = None) -> DataManagerModeSpec:
         try:
             spec = cls._BY_MODE[mode]
         except KeyError as exc:

@@ -4,7 +4,11 @@ from pathlib import Path
 
 import torch
 from fran.callback.base import BatchSizeSafetyMargin
-from fran.managers.wandb.wandb import WandbManager
+from fran.managers.wandb.wandb import (
+    WandbManager,
+    derive_wandb_project_name,
+    wandb_run_exists,
+)
 from fran.trainers.helpers import (
     available_checkpoint_epochs_for_run,
     normalize_checkpoint_path,
@@ -116,9 +120,14 @@ class TrainerDetTransfer(TrainerDet):
     def resolve_resume_lr_ckpt(self, run_name: str, resume_lr: float, ckpts=None):
         if ckpts is None:
             ckpts = available_checkpoint_epochs_for_run(run_name)
+        wandb_project = self.wandb_project_name()
+        legacy_project = derive_wandb_project_name(self.project)
+        if wandb_project != legacy_project and not wandb_run_exists(wandb_project, run_name):
+            wandb_project = legacy_project
         logger = WandbManager(
             project=self.project,
             run_id=run_name,
+            wandb_project_name=wandb_project,
             wb_mode="online",
             log_model_checkpoints=False,
         )

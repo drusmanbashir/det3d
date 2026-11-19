@@ -191,7 +191,7 @@ class PackRetinaUNetPredsd(MapTransform):
         return MetaTensor(out.contiguous(), meta=meta)
 
     def __call__(self, data):
-        from det3d.managers.helpers.nndet_retinaunet import (
+        from det3d.geometry.nndet_boxes import (
             from_nndet,
             nndet_pred_to_vis,
         )

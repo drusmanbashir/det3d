@@ -16,17 +16,17 @@ from det3d.managers.data.main import (
     DataManagerDetShort,
     DataManagerDetSource,
     DataManagerDetWhole,
-    DataManagerDualDet,
-    DataManagerMultiDet,
+)
+from det3d.managers.data.dual import DataManagerDualDet
+from det3d.managers.data.transforms import (
     BboxCenterCropSlicesd,
     CropDetPatchd,
     LoadHDF5DetCaseFulld,
     LoadHDF5DetCropd,
     LoadHDF5DetShardExtendedBBoxd,
-    RandCropExtendedBBoxd,
     PadDetPatchd,
+    RandCropExtendedBBoxd,
 )
-from det3d.managers.data.nifti import DataManagerNiftiDet
 from det3d.managers.data.tfm_debug import (
     DataManagerDualDetBTfmsTfmDebug,
     DataManagerDualDetTfmDebug,
@@ -44,7 +44,6 @@ try:
     from det3d.managers.data.incremental import (
         DataManagerDetI,
         DataManagerDetLBDI,
-        DataManagerDetModeSpec,
         DataManagerDetModes,
         DataManagerDetPatchI,
         DataManagerDetSourceI,
@@ -58,17 +57,7 @@ except Exception:
     DataManagerDetWholeI = None
     DataManagerDetLBDI = None
     DataManagerDetPatchI = None
-    DataManagerDetModeSpec = None
     DataManagerDetModes = None
-
-# Backward-compatible aliases for pre-mirror names.
-DataManagerTrainDet = DataManagerDetSource
-DataManagerTrainDetBTfms = DataManagerDetSourceBTfms
-DataManagerTrainDetShard = DataManagerDetSource
-DataManagerTrainDetShardBTfms = DataManagerDetSourceBTfms
-DataManagerDetShard = DataManagerDetSource
-DataManagerDetLBDShard = DataManagerDetLBD
-DataManagerDualDetShardBTfms = DataManagerDualDetBTfms
 
 __all__ = [
     "DataManagerDet",
@@ -77,15 +66,12 @@ __all__ = [
     "DataManagerDetLBD",
     "DataManagerDetLBDI",
     "DataManagerDetLBDBTfms",
-    "DataManagerDetLBDShard",
-    "DataManagerDetModeSpec",
     "DataManagerDetModes",
     "DataManagerDetPatch",
     "DataManagerDetPatchBTfms",
     "DataManagerDetPatchI",
     "DataManagerDetRBD",
     "DataManagerDetRBDBTfms",
-    "DataManagerDetShard",
     "DataManagerDetShort",
     "DataManagerDetSource",
     "DataManagerDetSourceBTfms",
@@ -97,18 +83,11 @@ __all__ = [
     "DataManagerDualDetBTfms",
     "DataManagerDualDetBTfmsTfmDebug",
     "DataManagerDualDetTfmDebug",
-    "DataManagerDualDetShardBTfms",
     "DataManagerDualDetI",
-    "DataManagerMultiDet",
     "DataManagerMultiDetBTfms",
-    "DataManagerNiftiDet",
     "DataManagerRTDet",
     "DataManagerRTDetBTfms",
     "DataManagerTestFFDet",
-    "DataManagerTrainDet",
-    "DataManagerTrainDetBTfms",
-    "DataManagerTrainDetShard",
-    "DataManagerTrainDetShardBTfms",
     "LoadHDF5DetCaseFulld",
     "LoadHDF5DetCropd",
     "LoadHDF5DetShardExtendedBBoxd",

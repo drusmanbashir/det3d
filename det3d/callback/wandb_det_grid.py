@@ -8,7 +8,7 @@ import wandb
 from fran.callback.wandb.wandb import WandbImageGridCallback, _annotate_wandb_grid_image
 from utilz.stringz import info_from_filename
 
-from det3d.managers.helpers.nndet_retinaunet import from_nndet
+from det3d.geometry.nndet_boxes import from_nndet
 from det3d.detection.visualize_image import (
     annotate_snippet_grid,
     draw_slice_boxes,

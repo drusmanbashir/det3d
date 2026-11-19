@@ -1,5 +1,5 @@
 # FUNCTIONS.md
-Scope: `det3d/configs/nndet_planning.py` `det3d/configs/nndet_intensity.py` `det3d/transforms/box_tracker.py` `det3d/transforms/intensity.py` `det3d/run/e2e.sh`
+Scope: `det3d/planning/c002.py` `det3d/transforms/box_tracker.py` `det3d/transforms/intensity.py` `det3d/run/e2e.sh`
 
 ## run
 
@@ -7,7 +7,6 @@ Scope: `det3d/configs/nndet_planning.py` `det3d/configs/nndet_intensity.py` `det
 
 ## run/preprocessing
 
-- `backfill_sidecar_instances.py` — add ``instances`` {lm_cc_id: semantic_label} to existing `bboxes/*.json` from matching `lms/*.pt` (`--project`, `--plan-id`, `--lbd-folder`, `--dry-run`)
 - `binarize_lbd_lms.py` — collapse LBD `lms/*.pt` to 0=bg / 1=lesion; set `label_org=1` on bbox sidecars (`--project`, `--plan-id`, `--lbd-folder`, `--dry-run`); shell `binarize_lbd_lms.sh`
 
 ## run/preproc
@@ -19,8 +18,8 @@ Detection LBD preprocessing uses `fran/run/preproc/analyze_resample.py --pipelin
 ## det/preprocessing
 
 - `object_bounded.py` — `ObjectBoundedDataGenerator` + `_OBJWorker`: fixed_spacing PT in; strict bbox crop (`expand_by=0`); compose `LoadT,Chan,Dev,Stats,N2P,AttachGT,Int`; patch size native — train `batch_size=1`, no collate/pad → `images/`, `lms/`, `bboxes/*_bboxN.json`
-- `labelbounded.py` — thin re-export: `LabelBoundedDetDataGenerator` → fran `LabelBoundedDataGenerator` (`hdf5_shard_mode=det`)
-- `hdf5_shards_det.py`, `dataset_details.py`, `helpers.py` — re-exports from fran
+- `labelbounded.py` — scratch entry only; LBD preprocessing lives in fran `LabelBoundedDataGenerator` (`hdf5_shard_mode=det`)
+- `helpers.py` — re-exports from fran
 - `bbox_sidecar.py` — nbrhood symbols from fran; local JSON inference sidecar helpers remain
 
 ## det/utils
@@ -30,6 +29,7 @@ Detection LBD preprocessing uses `fran/run/preproc/analyze_resample.py --pipelin
 ## det/geometry
 
 - `lmg.py` — `DetectionLabelMapGeometryPT.to_voxel_detection_records`: ITK `[idx,idx,idx,size,size,size]` → xyzxyz voxel box
+- `nndet_boxes.py` — `to_nndet` / `from_nndet`: exclusive xyzxyz ↔ nnDetection xyxyzz (padded minima); `offset_nndet_xyxyzz_boxes` tile → volume; `nndet_pred_to_vis` prediction dict → det3d keys
 
 ## det/transforms
 
@@ -50,8 +50,8 @@ Detection LBD preprocessing uses `fran/run/preproc/analyze_resample.py --pipelin
 
 ## Libraries (import, not run)
 
-- `det3d/configs/nndet_planning.py` — save target spacing, intensity statistics and the BoxC002 fit in `plans/<plan_id>.pkl`. `ConfigMakerDet` can load the workbook by itself. When a pickle exists, it fills only missing or `auto` plan fields from `PLAN_PICKLE_FIELDS` and missing or `auto` batch size. Detection preprocessing adds LBD centre ranges for the selected training patch.
-- `det3d/configs/nndet_intensity.py` — pool the native per-label HU histograms for the detection foreground after plan remaps and connected-component exclusions
+- Det plan file `plans/<plan_id>.pkl` (`requested` / `plan_train` / `fit`): path `FolderNames.plan_file`; written by fran `analyze_resample` (`configure_plan` spacing, `PreprocessingManager.plan_detection` intensity, BoxC002 fit, validation patch); read by `ConfigMakerDet._load_computed_plan`.
+- `det3d/planning/c002.py` — `LBDBoxC002`, nnDetection's BoxC002 on LBD crops: fixed patch kept, auto batch grows once the patch is at its cap (≤5% dataset coverage), fixed batch fits only the patch; budget = planning card's free memory minus `PLAN_GPU_BUFFER_MB` (FRAN_CONF defaults.yaml), refit when the card or buffer changes; `from_lbd` builds its input.
 - `det3d/transforms/box_tracker.py` — track LBD boxes through crops and spatial augmentation. The detection workbook defaults to `hull`, which uses `hull_xyz` and checks mask occupancy. `corner` warps box corners. `remeasure` rebuilds boxes from the warped `inst` map. For missing tracker data, rerun detection LBD with `--overwrite`.
 - `det3d/transforms/intensity.py` — share CT clipping across training and inference. `intensity_norm` defaults to `scale01` and also supports `zscore_fg`. Set `intensity_properties` in the workbook or fit them during detection preprocessing.
 
@@ -68,11 +68,12 @@ Detection LBD preprocessing uses `fran/run/preproc/analyze_resample.py --pipelin
 
 ## det/managers
 
-- `data.py` — `DataManagerTrainDet` (LBD train: load image/mask, Norm, spatial aug + point sync, `lbd_det_collate`), `DataManagerTrainDetBTfms` / `DataManagerDetBTfms` (GPU batch tail), `DataManagerDetLBD` (val full volumes), `DataManagerDualDet` / `DataManagerDualDetBTfms`; `DataManagerDet` alias → TrainDet
+- `data/main.py` — `DataManagerDet` family: `DataManagerDetSource` (LBD train: load image/mask, Norm, spatial aug + point sync, `lbd_det_collate`), `DataManagerDetLBD` (val full volumes), Whole/Patch/RBD/Short
+- `data/dual.py` — `DataManagerDualDet`: paired train/valid detection managers for `TrainerDet`; `data/batch_tfms.py` adds the GPU batch tail (`DataManagerDualDetBTfms`)
+- `data/transforms.py` — HDF5 shard/crop/case loaders (`LoadHDF5Det*`), box-centred crops (`RandCropExtendedBBoxd`, `CropDetPatchd`, `BboxCenterCropSlicesd`), `PadDetPatchd`
 - `detector_factory.py` — `resolve_detector_manager`, `build_detector_manager` (retinanet | retinaunet)
-- `retinaunet.py` — `RetinaUNetManager` Lightning module (vendored UFPN + MONAI RetinaNet head)
+- `retinaunet.py` — `RetinaUNetManager`: nnDetection RetinaUNetV001 built from the nested configs (the only place nnDet's flat architecture dict is made); det3d batch → nnDet targets; nnDet loss logging
 - `det_schedule.py` — `configure_detection_optimizers` (SGD + ReduceLROnPlateau from plan `scheduler_*` / `nndet` keys)
-- `retinanet_bk.py` — canonical `RetinaNetManager` (plan-driven loss/sampler)
 
 ## run/training
 
@@ -80,15 +81,6 @@ Detection LBD preprocessing uses `fran/run/preproc/analyze_resample.py --pipelin
 - `train_det.sh` — HPC Slurm det training (`train_retry.py --pipeline det`); defaults bones plan 1, retinanet, run-through, 500 epochs
 - `local_train_det.sh` — local det training via `train.py` shim (PYTHONPATH + bones defaults)
 - `submit_train_det.sh` — HPC submit wrapper (optional)
-## run/archived/training
-
-Retired nnDet migration / benchmark CLIs (superseded by `run/training/train.py` + `TrainerDet`):
-
-- `benchmark_det_pipelines.py` — native nnDet + det3d pipeline benchmarks (`run|report|all|sweep`)
-- `train_hybrid_fast_lbd.py` — hybrid fast LBD → nnDet RetinaUNetV001 (`det3d.archived.hybrid`)
-- `train_native_lbd.py` — native nnDet LBD materialize + pre_trafo (`det3d.archived.nndet_native_lbd`)
-- `hybrid.sh`, `hybrid_fast_lbd_benchmark.sh` — launchers for hybrid fast LBD CLI
-
 ## det3d/inference
 
 - `post.py` — `PackRetinaNetPredsd`, `PackRetinaUNetPredsd`, `InvPreprocessBoxd`, `Offd`, `BoxRd`, `SaveDetOutputd`
@@ -103,12 +95,6 @@ Retired nnDet migration / benchmark CLIs (superseded by `run/training/train.py` 
 - `retinaunet_nifti.py` — RetinaUNet tiled seg infer on LIDC2 nifti cases
 - `jaeger.py`, `mirror_tta.py` — placeholders (phase 5)
 
-## det3d/extra/archived
-
-- `hybrid_lbd.py` — Luna16-hybrid RetinaNet on LBD `.pt` (archived)
-- `hybrid_samples.py` — hybrid sample infer + viewer sidecars (archived)
-- `hybrid_transfer.py` — hybrid fast-LBD ckpt path helpers (archived)
-
 ## run/inference
 
 - `_infer_common.py` — shared helpers for inference CLIs: `default_run_w`, `resolve_input_images`, `resolve_localiser_labels`
@@ -118,15 +104,8 @@ Retired nnDet migration / benchmark CLIs (superseded by `run/training/train.py` 
 - `view_retinaunet_seg_slicer.py` — open seg NIfTI outputs in 3D Slicer
 - `view_preds.py` — view stored sidecars only (`--dir` or `--run-p`)
 - `sidecar_to_mrk.py` — batch sidecar JSON → Slicer ROI Box `.mrk.json`
-- `view_det.py` — alias for `view_preds.py`
 
 ## run/tools
 
 - `affine_voxel_world_demo.py` — numeric affine forward/inverse demos (toy, two-grid same world, preproc InvB trap); see `docs/affine-voxel-world.md`
-
-## run/archived/inference
-
-- `infer_lbd_pt.py` — hybrid Luna16 RetinaNet on LBD `.pt` (archived)
-- `infer_hybrid_samples.py` — hybrid DM sample infer (archived)
-- `view_hybrid_samples.py` — hybrid sample viewer (archived)
 

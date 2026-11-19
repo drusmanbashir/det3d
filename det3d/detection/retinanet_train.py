@@ -47,7 +47,7 @@ def forward_train_batched(detector, images: torch.Tensor, targets: list):
     )
 
 
-def forward_train_joint(detector, images: torch.Tensor, targets: list, seg_loss_fnc, lm_batch, plan):
+def forward_train_joint(detector, images: torch.Tensor, targets: list, seg_loss_fnc, lm_batch, retinanet_params):
     """Single forward: MONAI det loss + RetinaUNet seg loss."""
     from det3d.evaluation.losses import combine_det_seg_loss_dict
 
@@ -72,5 +72,5 @@ def forward_train_joint(detector, images: torch.Tensor, targets: list, seg_loss_
     )
     seg_total = seg_loss_fnc(seg_logits, lm_batch)
     return combine_det_seg_loss_dict(
-        det_losses, seg_total, seg_loss_fnc.loss_dict, detector, plan
+        det_losses, seg_total, seg_loss_fnc.loss_dict, detector, retinanet_params
     )

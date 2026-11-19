@@ -171,7 +171,7 @@ def test_preprocessing_writes_hulls_and_shard_instances(tmp_path):  #AI
 def test_patch_stream_finalizes_each_crop(name):  #AI
     """A tile inside the case box can contain no voxels from the object."""
     from det3d.managers.data.valid_patch_stream import PatchStreamDatasetDet, patch_stream_det_collated
-    from det3d.managers.helpers.nndet_retinaunet import det3d_batch_to_nndet
+    from det3d.managers.retinaunet import RetinaUNetManager
     from det3d.transforms.box_tracker import BOX_TRACKERS
 
     tracker = BOX_TRACKERS[name]()
@@ -193,7 +193,7 @@ def test_patch_stream_finalizes_each_crop(name):  #AI
     ))
     assert len(tiles) == 4
     batch = patch_stream_det_collated(tiles)
-    assert det3d_batch_to_nndet(batch, [2])["target_seg"].shape == (4, 8, 8, 8)
+    assert RetinaUNetManager.det3d_batch_to_nndet(batch, [2])["target_seg"].shape == (4, 8, 8, 8)
     for tile in tiles:
         mask = tile["lm"][0] == 2
         assert len(tile["bbox"]) == int(mask.any())

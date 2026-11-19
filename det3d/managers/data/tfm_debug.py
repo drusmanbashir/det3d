@@ -21,8 +21,8 @@ from det3d.managers.data.main import (
     DataManagerDetRBD,
     DataManagerDetSource,
     DataManagerDetWhole,
-    DataManagerDualDet,
 )
+from det3d.managers.data.dual import DataManagerDualDet
 from det3d.transforms.gpu_det import BatchItemCompose, ResizeWithPadOrCropBoxSyncd
 from fran.utils.folder_names import FolderNames
 from monai.apps.detection.transforms.dictionary import ClipBoxToImaged

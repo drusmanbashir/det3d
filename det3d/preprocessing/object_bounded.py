@@ -3,7 +3,7 @@ from pathlib import Path
 import pandas as pd
 import ray
 from fastcore.basics import listify
-from det3d.preprocessing.helpers import dusting_threshold
+from fran.preprocessing.helpers import dusting_threshold
 from det3d.transforms.bbox_stats import AttachDetectionGTd, BBoxInfoStatsd2
 from det3d.transforms.patch_size import NbrhoodsToPatchesOBDD
 from det3d.utils.bbox_sidecar import bbox_sidecar_path, save_detection_sidecar
@@ -75,7 +75,8 @@ class _OBJWorker(RayWorkerBase):
             dusting_threshold=dusting_threshold(plan),
             ignore_labels=self.ignore_labels,
         )
-        clip = self.project.global_properties["intensity_clip_range"]
+        stats = plan["intensity_properties"]
+        clip = [stats["percentile_00_5"], stats["percentile_99_5"]]
         self.Int = ScaleIntensityRanged(
             keys=[self.image_key],
             a_min=float(clip[0]),

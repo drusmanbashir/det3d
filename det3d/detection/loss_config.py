@@ -4,10 +4,10 @@ from monai.losses.giou_loss import BoxGIoULoss
 
 
 def apply_detector_loss_plan(detector, configs):
-    plan = configs["plan_train"]
+    retinanet = configs["retinanet"]
     arch = str(configs["model_params"]["arch"]).lower()
-    cls_loss = str(plan["cls_loss"]).lower()
-    reg_loss = str(plan["reg_loss"]).lower()
+    cls_loss = str(retinanet["cls_loss"]).lower()
+    reg_loss = str(retinanet["reg_loss"]).lower()
     if arch == "retinaunet":
         reg_loss = "giou"
 
@@ -27,14 +27,14 @@ def apply_detector_loss_plan(detector, configs):
 
 
 def apply_detector_sampler_plan(detector, configs):
-    plan = configs["plan_train"]
+    loss_params = configs["loss_params"]
     detector.set_atss_matcher(
-        num_candidates=int(plan["matcher_num_candidates"]),
-        center_in_gt=bool(plan["matcher_center_in_gt"]),
+        num_candidates=int(loss_params["matcher_num_candidates"]),
+        center_in_gt=bool(loss_params["matcher_center_in_gt"]),
     )
     detector.set_hard_negative_sampler(
-        batch_size_per_image=int(plan["sampler_batch_size_per_image"]),
-        positive_fraction=float(plan["balanced_sampler_pos_fraction"]),
-        pool_size=int(plan["sampler_pool_size"]),
-        min_neg=int(plan["sampler_min_neg"]),
+        batch_size_per_image=int(loss_params["sampler_batch_size_per_image"]),
+        positive_fraction=float(loss_params["balanced_sampler_pos_fraction"]),
+        pool_size=int(loss_params["sampler_pool_size"]),
+        min_neg=int(loss_params["sampler_min_neg"]),
     )

@@ -73,11 +73,11 @@ class RetinaUNetSegLoss(nn.Module):
         return total
 
 
-def combine_det_seg_loss_dict(det_losses, seg_total, seg_loss_dict, detector, plan):
+def combine_det_seg_loss_dict(det_losses, seg_total, seg_loss_dict, detector, retinanet_params):
     cls_key = detector.cls_key
     box_key = detector.box_reg_key
-    w_cls = float(plan["w_cls"])
-    w_reg = float(plan["w_reg"])
+    w_cls = float(retinanet_params["w_cls"])
+    w_reg = float(retinanet_params["w_reg"])
     cls_loss = det_losses[cls_key]
     box_loss = det_losses[box_key]
     total = w_cls * cls_loss + w_reg * box_loss + seg_total

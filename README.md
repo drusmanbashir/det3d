@@ -11,7 +11,7 @@ python run/training/train.py --project test --plan 1 --epochs 1 --devices 0
 
 ## Config
 
-- `plans_det` sheet in `fran/configurations/experiment_configs_det.xlsx`
+- `plans` sheet in `fran/configurations/experiment_configs_det.xlsx`
 **Design docs** (patch plans, HDF5 reuse, `src_dims`): [`docs/README.md`](docs/README.md)
 
 ## Layout

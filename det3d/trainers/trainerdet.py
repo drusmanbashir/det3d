@@ -1,20 +1,18 @@
 from ast import List
+import os
 from torch import Tensor
 from copy import deepcopy
 from pathlib import Path
 from typing import Optional
 from nndet.core.retina import BaseRetinaNet
 import torch
-from det3d.managers.helpers.nndet_retinaunet import (
-    det3d_batch_to_nndet,
-    from_nndet,
-)
+from det3d.geometry.nndet_boxes import from_nndet
 from det3d.detection.retinanet_detector2 import RetinaNetDetector2
 from fran.callback.debug_epoch_limit import DebugEpochBatchLimit
 from fran.callback.incremental import LRFloorStop
 from fran.configs.helpers import normalize_logging_payload
 from fran.managers import Project
-from fran.managers.wandb.wandb import WandbManager
+from fran.managers.wandb.wandb import DET3D_WANDB_WORKSPACE, WandbManager
 from fran.preprocessing.helpers import import_h5py
 from fran.trainers.helpers import switch_ckpt_keys
 from fran.trainers.trainer import Trainer, _flatten_dict
@@ -31,7 +29,7 @@ from lightning.pytorch.profilers import AdvancedProfiler
 from utilz.imageviewers import ImageMaskBboxViewer, ImageMaskViewer
 from utilz.stringz import ast_literal_eval, headline
 
-from det3d.architectures.create_detector import arch_from_conf
+from det3d.architectures.create_detector import arch_from_conf, val_patch_size_from_conf
 from det3d.callback.wandb_det_grid import (
     WandbDetImageGridCallback,
     WandbRetinaUNetImageGridCallback,
@@ -54,15 +52,14 @@ class TrainerDet(Trainer):
     monitor_metric_name = "val0_metric"
     _DET_PIPELINE_MODES = frozenset({"det", "lbd"})
 
+    def wandb_project_name(self) -> str:  #AI
+        """Use the detection workspace by default and allow resuming in an older project."""
+        return os.environ.get("DET3D_WANDB_PROJECT", DET3D_WANDB_WORKSPACE)
+
     def wandb_grid_cb_kwargs(self, wandb_grid_epoch_freq: int) -> dict:
-        val_patch_size = self.configs["plan_valid"].get("val_patch_size")
-        if val_patch_size is None:
-            val_patch_size = self.configs["plan_valid"]["patch_size"]
-        if isinstance(val_patch_size, str):
-            val_patch_size = ast_literal_eval(val_patch_size)
         plan = self.configs["plan_train"]
         kwargs = {
-            "patch_size": [int(v) for v in val_patch_size],
+            "patch_size": val_patch_size_from_conf(self.configs),
             "epoch_freq": max(1, int(wandb_grid_epoch_freq)),
             "local_folder": str(self.project.log_folder / "wandb_grid"),
             "score_min": float(plan.get("wandb_grid_score_min", 0.3)),
@@ -218,8 +215,8 @@ class TrainerDet(Trainer):
             enable_checkpointing=True,
             default_root_dir=self.project.checkpoints_parent_folder,
             strategy=strategy,
-            benchmark=bool(self.configs["plan_train"]["benchmark"]),
-            deterministic=bool(self.configs["plan_train"]["deterministic"]),
+            benchmark=bool(self.configs["nndet"]["benchmark"]),
+            deterministic=bool(self.configs["nndet"]["deterministic"]),
         )
         if arch_from_conf(self.configs) == "retinaunet":
             trainer_kwargs["gradient_clip_val"] = 1.0
@@ -259,7 +256,7 @@ class TrainerDet(Trainer):
 
     def init_dm(self):
         self.normalize_plan_modes_for_det_pipeline()
-        batch_size = int(self.configs["dataset_params"]["batch_size"])
+        batch_size = int(self.configs["plan_train"]["batch_size"])
         cache_rate = self.configs["dataset_params"].get("cache_rate", 0.0)
         ds_type = self.configs["dataset_params"].get("ds_type")
         dm_class = self.resolve_orchestrator_class()
@@ -337,7 +334,7 @@ class TrainerDet(Trainer):
 
     def maybe_alter_configs(self, batch_size, compiled):
         if batch_size is not None:
-            self.configs["dataset_params"]["batch_size"] = int(batch_size)
+            self.configs["plan_train"]["batch_size"] = int(batch_size)
         if compiled is not None:
             self.configs["model_params"]["compiled"] = bool(compiled)
 
@@ -495,7 +492,7 @@ if __name__ == "__main__":
 
     from det3d.configs.parser import ConfigMakerDet
 
-    project_title = "lidca"
+    project_title = "lidc"
     plan_id = 3
 
     P = Project(project_title)
@@ -647,7 +644,7 @@ if __name__ == "__main__":
     batch = batch
     batch_idx = 0
     evaluation = True
-    nb = det3d_batch_to_nndet(batch, N.plan["fg_labels"])
+    nb = N.det3d_batch_to_nndet(batch, N.plan["fg_labels"])
     nb.keys()
     nb["target_classes"]
     nb["target_boxes"]

@@ -150,13 +150,14 @@ class RetinaUNet(nn.Module):
         return out
 
 
-def build_retinaunet(plan: dict, num_anchors: int) -> RetinaUNet:
-    feature_extractor = build_retinaunet_feature_extractor(plan)
-    size_divisible = encoder_abs_strides_from_plan(plan)[-1]
-    head_channels = int(plan.get("encoder_start_channels", 32)) * 4
+def build_retinaunet(configs: dict, num_anchors: int) -> RetinaUNet:
+    model_params = configs["model_params"]
+    feature_extractor = build_retinaunet_feature_extractor(configs)
+    size_divisible = encoder_abs_strides_from_plan(configs)[-1]
+    head_channels = int(model_params["encoder_start_channels"]) * 4
     return RetinaUNet(
-        spatial_dims=int(plan["spatial_dims"]),
-        num_classes=len(plan["fg_labels"]),
+        spatial_dims=int(model_params["spatial_dims"]),
+        num_classes=len(configs["plan_train"]["fg_labels"]),
         num_anchors=int(num_anchors),
         feature_extractor=feature_extractor,
         head_channels=head_channels,

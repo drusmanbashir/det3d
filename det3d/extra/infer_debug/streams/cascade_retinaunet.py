@@ -19,7 +19,6 @@ from det3d.geometry.lmg import voxel_start_size_to_xyzxyz
 from det3d.inference.post import BoxRd, InvPreprocessBoxd, Offd, PackRetinaUNetPredsd
 from det3d.transforms.intensity import det_intensity_transform
 from fran.data.dataset import FillBBoxPatchesd
-from fran.inference.helpers import load_params
 from fran.transforms.inferencetransforms import MakeWritabled, RenameDictKeys, SqueezeListofListsd
 from fran.transforms.spatialtransforms import RestoreOriginalOrientationd
 from label_analysis.geometry_pt import LabelMapGeometryPT
@@ -38,7 +37,7 @@ def build_patch_preprocess(params):
             EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
             Spacingd(keys=["image"], pixdim=spacing),
             Orientationd(keys=["image"], axcodes="RAS"),
-            det_intensity_transform(configs["dataset_params"], plan, legacy_checkpoint=True),
+            det_intensity_transform(configs["dataset_params"], plan),
             EnsureTyped(keys=["image"], dtype=torch.float16),
         ]
     )
@@ -167,6 +166,3 @@ def patch_batch_to_cascade_item(patch_out, case: InferFixtureCase, run_p: str):
         "full_meta": case.full_meta,
     }
 
-
-def load_run_params(run_p: str, project_title=None):
-    return load_params(run_p)

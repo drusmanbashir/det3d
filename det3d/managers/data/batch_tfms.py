@@ -7,11 +7,11 @@ from det3d.managers.data.main import (
     DataManagerDetRBD,
     DataManagerDetSource,
     DataManagerDetWhole,
-    DataManagerDualDet,
-    DataManagerMultiDet,
 )
+from det3d.managers.data.dual import DataManagerDualDet
 from det3d.transforms.gpu_det import BatchItemCompose, build_train_gpu_tail_compose
 from fran.managers.data.batch_tfms import DataManagerDualBTfms
+from fran.managers.data.main import DataManagerMulti
 from utilz.cprint import cprint
 
 
@@ -153,7 +153,7 @@ class DataManagerDualDetBTfms(DataManagerDualDet, DataManagerDualBTfms):
         return mode_to_class[train_mode], mode_to_class[valid_mode]
 
 
-class DataManagerMultiDetBTfms(DataManagerMultiDet):
+class DataManagerMultiDetBTfms(DataManagerMulti):
     def infer_manager_classes(self, configs):
         train_mode = configs["plan_train"]["mode"]
         valid_mode = configs["plan_valid"]["mode"]

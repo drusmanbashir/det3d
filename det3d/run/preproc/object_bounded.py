@@ -7,6 +7,7 @@ from det3d.preprocessing.object_bounded import (
     resolve_input_folder,
 )
 from fran.managers import Project
+from fran.preprocessing.plan_intensity import plan_intensity_properties
 
 
 def main():
@@ -26,6 +27,8 @@ def main():
     config_maker = ConfigMakerDet(project)
     config_maker.setup(args.plan)
     plan = config_maker.configs["plan_train"]
+    if "intensity_properties" not in plan:
+        plan["intensity_properties"], _ = plan_intensity_properties(project, plan)
     input_folder = resolve_input_folder(
         project,
         plan,

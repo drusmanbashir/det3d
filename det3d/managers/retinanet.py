@@ -20,9 +20,9 @@ class RetinaNetManager(LightningModule):
         self.model_params = configs["model_params"]
         self.plan = configs["plan_train"]
         self.lr = float(lr if lr is not None else self.configs["model_params"]["lr"])
-        self.w_cls = float(self.plan["w_cls"])
-        self.w_reg = float(self.plan["w_reg"])
-        self.class_names = [self.plan["class_name"]]
+        self.w_cls = float(self.configs["retinanet"]["w_cls"])
+        self.w_reg = float(self.configs["retinanet"]["w_reg"])
+        self.class_names = [self.model_params["class_name"]]
         self.val_outputs_all = []
         self.val_targets_all = []
         self.scheduler_warmup = None
@@ -162,10 +162,10 @@ class RetinaNetManager(LightningModule):
         holder = {}
         result = configure_detection_optimizers(
             self.detector.network.parameters(),
-            self.plan,
+            self.configs,
             self.lr,
             holder,
-            monitor=self.plan["scheduler_monitor"],
+            monitor=self.configs["scheduler_params"]["scheduler_monitor"],
         )
         self.scheduler_warmup = holder["scheduler_warmup"]
         return result
