@@ -5,7 +5,7 @@ Short notes on non-obvious design. CLI and run scripts: repo `README.md` and `FU
 | Topic | File |
 |-------|------|
 | Plans, patch dimensions, and training crops | [plans-and-patches.md](plans-and-patches.md) |
-| Label remaps, `ignore_labels_cc`, det class channels | [labels.md](labels.md) |
+| Label remaps, `ignore_labels`, det class channels | [labels.md](labels.md) |
 | LBD vs HDF5, shard reuse across plans | [preprocessing.md](preprocessing.md) |
 | Affine voxel ↔ world, InvP vs InvB | [affine-voxel-world.md](affine-voxel-world.md) |
 | det3d versus nnDetection, per phase, with work groups | [nndetection-integration.md](nndetection-integration.md), [integration/](integration/) |

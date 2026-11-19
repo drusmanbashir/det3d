@@ -181,7 +181,7 @@ class ObjectBoundedDataGenerator(Preprocessor):
         plan = self.plan
         return {
             "dusting_threshold": dusting_threshold(plan),
-            "ignore_labels": plan["ignore_labels_cc"],
+            "ignore_labels": plan["ignore_labels"],
         }
 
     def should_use_ray(self, num_processes=8):

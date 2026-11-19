@@ -16,5 +16,5 @@ Preprocessing writes HDF5 under `project.rapid_access_folder / {mode} / {lbd_nam
 
 ## See also
 
-- [labels.md](labels.md) — remapping keys, `ignore_labels_cc`, semantic → class channels
+- [labels.md](labels.md) — remapping keys, `ignore_labels`, semantic → class channels
 - [plans-and-patches.md](plans-and-patches.md)

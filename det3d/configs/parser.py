@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 from fran.configs.helpers import is_excel_None, is_unspecified, normalize_tree
+from fran.configs.plan_keys import normalize_ignore_labels
 from fran.configs.parser import (
     KEYS_STR_TO_LIST,
     ConfigMaker,
@@ -22,7 +23,6 @@ DET_PLAN_LIST_KEYS = (
     "patch_size",
     "val_patch_size",
     "spacing",
-    "ignore_labels_cc",
     "fg_indices_exclude",
     "model",
     "postprocess",
@@ -46,7 +46,13 @@ class ConfigMakerDet(ConfigMaker):
         model = configs["model_params"]
         plan = {key: value for key, value in configs["plan_train"].items() if key not in ConfigMakerDet.UNPLANNED_PLAN_KEYS}
         request = {"plan_train": plan, "model_params": {key: model[key] for key in ConfigMakerDet.REQUEST_MODEL_KEYS}}
-        return normalize_tree(request, tuple_mode="list")
+        return ConfigMakerDet.normalize_plan_request(request)
+
+    @staticmethod
+    def normalize_plan_request(request):  #AI
+        """Compare stored plans by the effective ignore list across workbook versions."""
+        plan = normalize_ignore_labels(request["plan_train"])
+        return normalize_tree(dict(request, plan_train=plan), tuple_mode="list")
 
     @staticmethod
     def resolved_val_patch_size(plan, patch_size):  #AI
@@ -155,7 +161,7 @@ class ConfigMakerDet(ConfigMaker):
             return
         stored = pickle.loads(path.read_bytes())
         requested = self.plan_request(self.configs)
-        old = stored["requested"]
+        old = self.normalize_plan_request(stored["requested"])
         if old != requested:
             missing = "<missing>"
             differences = [

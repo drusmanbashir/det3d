@@ -39,7 +39,7 @@ def test_plan_histogram_uses_selected_cases_and_composed_foreground(tmp_path):  
     )
     plan = {
         "plan_name": 9, "datasources": "lidc", "remapping_source": {2: 4},
-        "remapping_lbd_rbd": {4: 5, 3: 0}, "ignore_labels_cc": 1,
+        "remapping_lbd_rbd": {4: 5, 3: 0}, "ignore_labels": [1],
     }
     try:
         stats, labels = plan_intensity_properties(project, plan)
@@ -51,7 +51,7 @@ def test_plan_histogram_uses_selected_cases_and_composed_foreground(tmp_path):  
             "percentile_99_5": np.percentile(voxels, 99.5),
         })
         with pytest.raises(ValueError, match="empty foreground"):
-            plan_intensity_properties(project, dict(plan, ignore_labels_cc=[1, 5]))
+            plan_intensity_properties(project, dict(plan, ignore_labels=[1, 5]))
     finally:
         db.close()
 
@@ -163,6 +163,21 @@ def test_detection_stale_resolved_plan_is_refused(tmp_path):  #AI
     edited.configs["model_params"]["encoder_start_channels"] = 16
     with pytest.raises(parser.StalePlanError, match="model_params.encoder_start_channels: 32 -> 16"):
         edited.setup(1)
+
+
+def test_renamed_ignore_labels_reuses_legacy_plan_card(tmp_path):  #AI
+    row = {"mode": "lbd", "spacing": [1, 1, 2], "patch_dim0": 192, "patch_dim1": 96}
+    resolved = {"spacing": [1, 1, 2], "val_patch_size": [192, 192, 96], "fg_labels": [2]}
+    pkl = _write_resolved(_det_plan_maker(tmp_path, row), resolved)
+    stored = pickle.loads(pkl.read_bytes())
+    stored["requested"]["plan_train"].update(ignore_labels_cc=1, ignore_labels=[])
+    pkl.write_bytes(pickle.dumps(stored))
+
+    maker = _det_plan_maker(tmp_path, row | {"ignore_labels": 1})
+    maker.setup(1)
+    assert maker.configs["plan_train"]["fg_labels"] == [2]
+    with pytest.raises(parser.StalePlanError, match="plan_train.ignore_labels"):
+        _det_plan_maker(tmp_path, row | {"ignore_labels": 2}).setup(1)
 
 
 def test_detection_postprocess_auto_is_refused(tmp_path):  #AI

@@ -9,14 +9,14 @@ Semantic LM values → detection class indices. Seg remaps and bbox sidecars are
 | `remapping_source` | `Remap` on source LM | — | — |
 | `remapping_lbd_rbd` | — | `Remap` on LBD LM | — |
 | `fg_indices_exclude` | `Indx` + `indices_fg_exclude_*` | `Indx` again | loads saved indices |
-| `ignore_labels_cc` | — | `DetectionBBoxStatsd` / LMG | `bboxes/*.csv` only |
+| `ignore_labels` | — | `DetectionBBoxStatsd` / LMG | Foreground box classes from `manifest.json` |
 | `remapping_train` | — | — | FRAN `MapLabelValued` on `lm` (not for det) |
 
-Preproc order: remap LM → `fg_indices_exclude` (crop sampling only) → `ignore_labels_cc` (drop CCs for boxes).
+Preproc order: source remap → foreground indices → LBD crop → LBD remap → box filtering.
 
 ## Preproc → manifest
 
-`ignore_labels_cc` **filters** CCs; it does not assign channels. Survivors keep semantic `label_org` in `bboxes/*.csv` (no `0..K-1` remap).
+`ignore_labels` filters connected components. Survivors keep semantic `label_org` in `bboxes/*.csv`.
 
 Example: ignore `[1, 5]` → boxes only for **2, 3, 4, 6**.
 
@@ -37,7 +37,7 @@ Dense index = position in `fg_labels` (`label_to_idx` in `RetinaNetManager` / `n
 
 Head width: `len(fg_labels)` (`create_detector.py`), not `max(label_org)+1`. Seg `lm` / `target_seg` stay semantic — separate from det classes.
 
-**LIDC single-class:** all nodules label `1` → `fg_labels = [1]`, class 0. Do not put lesion label in `ignore_labels_cc`.
+**LIDC single-class:** all nodules label `1` → `fg_labels = [1]`, class 0. Keep the lesion label out of `ignore_labels`.
 
 ## `remapping_train`
 
