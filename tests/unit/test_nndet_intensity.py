@@ -107,7 +107,7 @@ def _det_plan_maker(tmp_path, row):  #AI
 def _write_resolved(maker, resolved, fits=None):  #AI
     """Save a resolved plan (and its per-GPU-key fits) made from the maker's current sheet values."""
     maker.setup(1, load_computed=False)
-    pkl = FolderNames(maker.project, {"plan_name": 1}).plan_file
+    pkl = FolderNames(maker.project, {"plan_name": 1}, maker.PIPELINE).plan_file
     pkl.parent.mkdir(exist_ok=True)
     pkl.write_bytes(pickle.dumps({"plan_train": resolved, "fits": fits or {}}))
     return pkl
@@ -239,11 +239,12 @@ def test_detection_planning_updates_intensity_and_preserves_the_fit(tmp_path, mo
             "batch_size": "auto", "model": "auto", "val_patch_size": "auto"}
     project = SimpleNamespace(project_folder=tmp_path)
     maker = SimpleNamespace(
+        PIPELINE=parser.ConfigMakerDet.PIPELINE,
         setup=lambda plan_id, load_computed, gpu_key: None,
         configs={f"plan_{key}": dict(plan) for key in ("train", "valid", "test")} | {"model_params": dict(MODEL_PARAMS)},
     )
     configs = configure_plan(project, maker, 1, pipeline="det")
-    pkl = tmp_path / "plans" / "1.pkl"
+    pkl = tmp_path / "plans" / "det3d_plan1.pkl"
     spacing_only = pickle.loads(pkl.read_bytes())
     assert spacing_only == {"plan_train": {"spacing": [1, 1, 2]}}
     configs["plan_train"]["spacing"] = [2, 2, 2]

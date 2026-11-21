@@ -7,6 +7,7 @@ class ConfigMakerDet(ConfigMaker):
     """Read detection plans from the det workbook on top of the base fran parameter sheets."""
 
     CONFIG_FILENAME = "experiment_configs_det.xlsx"
+    PIPELINE = "det3d"  # names the plan file, `FolderNames.plan_file`
     SKIP_SHEETS = frozenset({"plans", "plans_dot", "legend"})
     FIT_KEYS = ("spacing", "fg_labels", "intensity_properties", "val_patch_size")  # val_patch_size: non-lbd plans
     GPU_FIT_KEYS = ("patch_size", "val_patch_size", "batch_size", "model")

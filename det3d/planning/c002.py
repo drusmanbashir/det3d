@@ -11,7 +11,7 @@ from fran.configs.parser import ConfigMaker
 from fran.configs.defaults import plan_gpu_buffer_mb
 from fran.configs.helpers import is_unspecified
 from fran.preprocessing.dataset_details_lbd import details_shape, lbd_box_records
-from fran.preprocessing.plan_budget import check_planning_gpu, planning_budget
+from fran.nn_compat.gpu_memory import check_planning_gpu, planning_budget
 
 from det3d.managers.retinaunet import RetinaUNetManager
 from det3d.geometry.nndet_boxes import to_nndet
