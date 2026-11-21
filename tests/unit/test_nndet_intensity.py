@@ -247,7 +247,7 @@ def test_detection_base_builds_transforms_without_legacy_intensity_keys():  #AI
     manager.plan = {"patch_size": [16, 16, 16], "samples_per_file": 1, "intensity_properties": {
         "mean": 1.0, "sd": 0.5, "percentile_00_5": 0.0, "percentile_99_5": 2.0,
     }}
-    manager.dataset_params = {"intensity_norm": "zscore_fg", "prezoom_scale": 1.0, "fgbg_ratio": 1.0}
+    manager.dataset_params = {"intensity_norm": "zscore_fg", "prezoom_scale": 1.0, "fgbg_ratio": 1.0, "augment": "monai"}
     manager.configs = {"affine3d": {"p": 0.0, "rotate_range": 0.0, "scale_range": 0.0}}
     manager.flip = dict(prob=0.0)
     manager.scale = dict(prob=0.0, value=0.1)
