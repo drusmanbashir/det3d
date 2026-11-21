@@ -14,7 +14,7 @@ class DetLBDRunner:
         run_p,
         project_title=None,
         devices=(0,),
-        patch_overlap=0.25,
+        patch_overlap=None,
         safe_mode=False,
         params=None,
         debug=False,

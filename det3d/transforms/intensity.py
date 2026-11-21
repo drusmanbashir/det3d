@@ -2,6 +2,7 @@
 
 import torch
 from fran.transforms.intensitytransforms import NormaliseClipd
+from fran.transforms.misc_transforms import DummyTransform
 from monai.transforms import Compose, EnsureTyped, ScaleIntensityRanged
 
 
@@ -25,4 +26,14 @@ def det_intensity_transform(dataset_params, plan, keys=("image",)):  #AI
         ])
     else:
         raise ValueError(f"Unknown intensity_norm {mode!r}. Choose scale01 or zscore_fg.")
+    return transform
+
+
+def stored_intensity_transform(dataset_params, plan, keys=("image",)):  #AI
+    """Normalisation for data read from the preprocessed store: a no-op when preprocessing
+    already clipped and standardised it (fran DataManager._intensity_transform).
+    .get: older plans lack the key (= not normalised on disk)."""
+    if plan.get("preprocessing_clip_center", False):
+        return DummyTransform(keys=keys)
+    transform = det_intensity_transform(dataset_params, plan, keys=keys)
     return transform

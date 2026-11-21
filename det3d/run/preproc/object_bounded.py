@@ -6,6 +6,7 @@ from det3d.preprocessing.object_bounded import (
     ObjectBoundedDataGenerator,
     resolve_input_folder,
 )
+from fran.configs.helpers import intensity_values
 from fran.managers import Project
 from fran.preprocessing.plan_intensity import plan_intensity_properties
 
@@ -27,7 +28,7 @@ def main():
     config_maker = ConfigMakerDet(project)
     config_maker.setup(args.plan)
     plan = config_maker.configs["plan_train"]
-    if "intensity_properties" not in plan:
+    if intensity_values(plan, bounds_only=not plan.get("preprocessing_clip_center")) is None:
         plan["intensity_properties"], _ = plan_intensity_properties(project, plan)
     input_folder = resolve_input_folder(
         project,

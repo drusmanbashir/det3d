@@ -31,6 +31,13 @@ def _normalize_label_remap(label_remap: Mapping | None) -> Dict[int, int] | None
     return {int(k): int(v) for k, v in label_remap.items()}
 
 
+def _write_label(image: sitk.Image, path: Path) -> None:
+    # Staged label paths are symlinks into the source dataset; unlink first so the write never follows the link.
+    if path.is_symlink():
+        path.unlink()
+    sitk.WriteImage(image, str(path))
+
+
 def prepare_detection_label(
     case_id: str,
     label_dir: Path,
@@ -59,7 +66,7 @@ def prepare_detection_label(
         stuff_seg_itk.SetOrigin(seg_itk.GetOrigin())
         stuff_seg_itk.SetDirection(seg_itk.GetDirection())
         stuff_seg_itk.SetSpacing(seg_itk.GetSpacing())
-        sitk.WriteImage(stuff_seg_itk, str(label_dir / f"{case_id}_stuff.nii.gz"))
+        _write_label(stuff_seg_itk, label_dir / f"{case_id}_stuff.nii.gz")
 
     things_seg = np.copy(seg)
     things_seg[stuff_seg > 0] = 0
@@ -92,9 +99,9 @@ def prepare_detection_label(
     final_instances_itk.SetOrigin(seg_itk.GetOrigin())
     final_instances_itk.SetDirection(seg_itk.GetDirection())
     final_instances_itk.SetSpacing(seg_itk.GetSpacing())
-    sitk.WriteImage(final_instances_itk, str(label_dir / f"{case_id}.nii.gz"))
+    _write_label(final_instances_itk, label_dir / f"{case_id}.nii.gz")
     save_json({"instances": final_mapping}, label_dir / f"{case_id}.json")
-    sitk.WriteImage(seg_itk, str(label_dir / f"{case_id}_orig.nii.gz"))
+    _write_label(seg_itk, label_dir / f"{case_id}_orig.nii.gz")
 
 
 @env_guard

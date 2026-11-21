@@ -1,17 +1,17 @@
 """nnDetection's BoxC002 architecture planner on FRAN label-bounded crops, with the plan's presets."""
 
-import csv
 import sys
 from collections import Counter
-from subprocess import check_output
 
 import numpy as np
 import torch
 from utilz.cprint import cprint
 
-from fran.configs.defaults import plan_gpu_buffer_mb, plan_gpu_max_process_mb
+from fran.configs.parser import ConfigMaker
+from fran.configs.defaults import plan_gpu_buffer_mb
 from fran.configs.helpers import is_unspecified
 from fran.preprocessing.dataset_details_lbd import details_shape, lbd_box_records
+from fran.preprocessing.plan_budget import check_planning_gpu, planning_budget
 
 from det3d.managers.retinaunet import RetinaUNetManager
 from det3d.geometry.nndet_boxes import to_nndet
@@ -30,15 +30,9 @@ class LBDBoxC002(BoxC002):
     """Run nnDetection's architecture and anchor algorithms on FRAN label-bounded crops, honouring the plan's presets."""
 
     @staticmethod
-    def planning_gpu(index=0):  #AI
-        """The card BoxC002 plans on: budget = free memory minus the buffer; name, size and buffer identify the fit."""
-        device = torch.cuda.get_device_properties(index)
-        free, total = torch.cuda.mem_get_info(index)
-        buffer_mb = plan_gpu_buffer_mb()
-        gpu = {
-            "name": device.name, "total_memory": int(total), "buffer_mb": buffer_mb,
-            "budget": int(free) - buffer_mb * BYTES_PER_MB,
-        }
+    def planning_gpu():  #AI
+        """The card BoxC002 plans on: fran's det budget (free memory of GPU 0 minus the buffer)."""
+        gpu = planning_budget("det")
         return gpu
 
     @staticmethod
@@ -145,6 +139,8 @@ class LBDBoxC002(BoxC002):
         _, pooling, convs, patch, _ = self.plan_pool_and_conv_pool_late(
             np.asarray(self.preset_patch), target_spacing_transposed
         )
+        ConfigMaker.patch_size_stride_compat(self.preset_patch, pooling)
+        patch = np.asarray(self.preset_patch)
         num_resolutions = len(convs)
         decoder_levels_start = min(max(1, num_resolutions - self.num_decoder_level), self.min_decoder_level)
         self.architecture_kwargs.update(
@@ -162,6 +158,8 @@ class LBDBoxC002(BoxC002):
             return super().plan_pool_and_conv_pool_late(patch_size, spacing)
         strides = np.asarray(self.preset_model["strides"])
         divisor = np.prod(strides, axis=0)
+        if self.preset_patch is not None:
+            ConfigMaker.patch_size_stride_compat(patch_size, strides)
         patch = (np.asarray(patch_size) // divisor) * divisor
         if (patch == 0).any():
             raise ValueError(f"patch_size {list(patch_size)} is smaller than the preset model's total stride {list(divisor)}")
@@ -185,27 +183,7 @@ class LBDBoxC002(BoxC002):
 
     def _check_planning_gpu(self):  #AI
         index = self.estimator.gpu_id
-        device = torch.cuda.get_device_properties(index)
-        gpu_uuid = f"GPU-{device.uuid}"
-        max_process_mb = plan_gpu_max_process_mb()
-        processes = check_output(
-            [
-                "nvidia-smi",
-                "--query-compute-apps=gpu_uuid,pid,process_name,used_memory",
-                "--format=csv,noheader,nounits",
-            ],
-            text=True,
-        )
-        offenders = [
-            f"PID {pid} ({name}): {memory} MB"
-            for uuid, pid, name, memory in csv.reader(processes.splitlines(), skipinitialspace=True)
-            if uuid == gpu_uuid and int(memory) > max_process_mb
-        ]
-        if offenders:
-            raise RuntimeError(
-                f"BoxC002 on GPU {index} ({device.name}) found compute processes "
-                f"above {max_process_mb} MB: " + ", ".join(offenders)
-            )
+        device = check_planning_gpu("BoxC002", index)
         free, total = torch.cuda.mem_get_info(index)
         free_mb = free // BYTES_PER_MB
         target_mem = self.estimator.target_mem
@@ -243,13 +221,6 @@ class LBDBoxC002(BoxC002):
             }
         else:
             model = self.preset_model
-        if self.preset_patch is not None and patch != self.preset_patch:
-            cprint(
-                f"BoxC002 CHANGED THE PLAN'S patch_size {self.preset_patch} -> {patch} "
-                f"(GPU memory at batch {self.batch_size} or stride divisibility). The plan now uses {patch}.",
-                color="red",
-                bold=True,
-            )
         fit = {
             "plan_train": {"patch_size": patch, "batch_size": int(self.batch_size), "model": model, "fg_labels": self.labels},
             "fit": {"class_weight": class_weight, "estimator": gpu_metadata},

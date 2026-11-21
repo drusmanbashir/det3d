@@ -1,6 +1,6 @@
 import torch
 from det3d.geometry.nndet_boxes import from_nndet, offset_nndet_xyxyzz_boxes
-from det3d.transforms.intensity import det_intensity_transform
+from det3d.transforms.intensity import det_intensity_transform, stored_intensity_transform
 from det3d.utils.tensor import plain_tensor
 from fran.inference.base import BaseInferer
 from fran.inference.cascade import img_bbox_collated
@@ -13,15 +13,15 @@ from utilz.cprint import cprint
 
 class DetPatchInfererBase(BaseInferer):
     arch_name = "base"
+    stored_input = False  # True: inputs come from the preprocessed store (LBD .pt)
 
     def bind_preprocess_transforms(self):
         for key, value in self.preprocess_transforms_dict.items():
             setattr(self, key, value)
 
     def norm_dtype_transforms(self):
-        norm = det_intensity_transform(
-            self.dataset_params, self.params["configs"]["plan_train"],
-        )
+        build = stored_intensity_transform if self.stored_input else det_intensity_transform
+        norm = build(self.dataset_params, self.params["configs"]["plan_train"])
         dtype = EnsureTyped(keys=["image"], dtype=torch.float16)
         return {"Norm": norm, "Dtype": dtype}
 
@@ -63,7 +63,7 @@ class DetPatchRetinaUNet(DetPatchInfererBase):
         self,
         run_name,
         project_title=None,
-        patch_overlap=0.25,
+        patch_overlap=None,
         devices=(0,),
         safe_mode=False,
         save=False,
@@ -131,8 +131,11 @@ class DetPatchRetinaUNet(DetPatchInfererBase):
             setattr(self, key, value)
 
     def setup(self):
+        from det3d.inference.mirror_tta import inference_tta
+
         super().setup()
         self.inferer.with_coord = True
+        self.num_tta = inference_tta(self.params["configs"])
 
     def inference_params(self):
         net = self.model.net
@@ -236,33 +239,88 @@ class DetPatchRetinaUNet(DetPatchInfererBase):
         return pred
 
     def swi_predictor(self, win_data, unravel_slice):
-        """Weight boxes within each tile, then shift them into crop coordinates."""
+        """Predict every mirror view (inference_tta); the seg is the mean over views.
+        Without TTA boxes are tile-weighted into one pool; with TTA each view goes to
+        its own nnDetection BoxEnsemblerSelective model slot."""
+        from det3d.inference.mirror_tta import mirror_tta_step
+
         device_type = win_data.device.type
         with torch.autocast(device_type, enabled=device_type == "cuda"):
-            pred = self.model.net.inference_step(win_data)
+            views, seg = mirror_tta_step(self.model.net, win_data, self.num_tta)
+        if self.num_tta > 0:
+            origins = [self.tile_origin(entry) for entry in unravel_slice]
+            batch = {"tile_origin": list(zip(*origins)), "data": win_data}
+            for t, pred in enumerate(views):
+                self._ensembler.model_current = f"model0_t{t}"
+                self._ensembler.process_batch(result=pred, batch=batch)
+            return seg
         tile_size = tuple(int(v) for v in win_data.shape[-3:])
-        for i in range(win_data.shape[0]):
-            boxes = pred["pred_boxes"][i].detach()
-            scores = pred["pred_scores"][i].detach()
-            labels = pred["pred_labels"][i].detach()
-            origin = self.tile_origin(unravel_slice[i])
-            weights = self.box_tile_weight(boxes, tile_size)
-            boxes = self.offset_boxes(boxes, origin)
-            self._box_acc.append(
-                {
-                    "boxes": boxes,
-                    "scores": scores,
-                    "labels": labels,
-                    "weights": weights,
-                }
-            )
-        return pred["pred_seg"]
+        for pred in views:
+            for i in range(win_data.shape[0]):
+                boxes = pred["pred_boxes"][i].detach()
+                scores = pred["pred_scores"][i].detach()
+                labels = pred["pred_labels"][i].detach()
+                origin = self.tile_origin(unravel_slice[i])
+                weights = self.box_tile_weight(boxes, tile_size)
+                boxes = self.offset_boxes(boxes, origin)
+                self._box_acc.append(
+                    {
+                        "boxes": boxes,
+                        "scores": scores,
+                        "labels": labels,
+                        "weights": weights,
+                    }
+                )
+        return seg
+
+    def make_tta_ensembler(self, spatial):
+        """nnDetection's BoxEnsemblerSelective, one model slot per mirror view (as
+        Predictor.predict_tiles names them). model_* come from the postprocess sheet (as
+        filter_boxes); ensemble_* stay at nnDetection's defaults."""
+        import nndet.compat  # noqa: F401
+        from nndet.inference.ensembler.detection import BoxEnsemblerSelective
+
+        parameters = BoxEnsemblerSelective.get_default_parameters()
+        params = self.inference_params()
+        for key in ("model_score_thresh", "model_topk", "model_detections_per_image",
+                    "remove_small_boxes", "model_iou", "model_nms_fn"):
+            parameters[key] = params[key]
+        ensembler = BoxEnsemblerSelective(properties={"shape": spatial}, parameters=parameters)
+        for t in range(len(self._tta_view_names())):
+            ensembler.add_model(name=f"model0_t{t}", model_weight=1.0)
+        return ensembler
+
+    def _tta_view_names(self):
+        from nndet.inference.transforms import get_tta_transforms
+
+        return get_tta_transforms(self.num_tta, True)[0]
+
+    def merge_tta_views(self, ensembler):
+        """Per view: topk -> clip -> small boxes -> weighted NMS; then WBC across views
+        (BoxEnsembler.process_model / process_ensemble)."""
+        names = list(ensembler.model_results.keys())
+        boxes, probs, labels, weights = [], [], [], []
+        for name in names:
+            b, p, l, w = ensembler.process_model(name)
+            boxes.append(b)
+            probs.append(p)
+            labels.append(l)
+            weights.append(w)
+        boxes, probs, labels = ensembler.process_ensemble(
+            boxes=boxes, probs=probs, labels=labels, weights=weights
+        )
+        return from_nndet(boxes), probs, labels.long()
 
     def run_swi(self, img):
         self._box_acc = []
-        stitched_seg = self.inferer(inputs=img, network=self.swi_predictor)
         spatial = tuple(int(v) for v in img.shape[-3:])
-        boxes, scores, labels = self.merge_tile_boxes(self._box_acc, spatial)
+        if self.num_tta > 0:
+            self._ensembler = self.make_tta_ensembler(spatial)
+        stitched_seg = self.inferer(inputs=img, network=self.swi_predictor)
+        if self.num_tta > 0:
+            boxes, scores, labels = self.merge_tta_views(self._ensembler)
+        else:
+            boxes, scores, labels = self.merge_tile_boxes(self._box_acc, spatial)
         return stitched_seg, boxes, scores, labels
 
     def predict_inner(self, batch):
@@ -273,7 +331,7 @@ class DetPatchRetinaUNet(DetPatchInfererBase):
         if img.dim() == 3:
             img = img.unsqueeze(0)
         self.model.eval()
-        if self.needs_swi(img):
+        if self.needs_swi(img) or self.num_tta > 0:  # TTA views meet in the tile box merge
             vol = img.unsqueeze(0)
             seg, boxes, scores, labels = self.run_swi(vol)
             batch["stitched_seg"] = seg
@@ -293,7 +351,7 @@ class DetPatchRetinaNet(DetPatchInfererBase):
         self,
         run_name,
         project_title=None,
-        patch_overlap=0.25,
+        patch_overlap=None,
         devices=(0,),
         safe_mode=False,
         save=False,
@@ -374,6 +432,7 @@ class DetPatchLBD(DetPatchRetinaUNet):
     """Pre-spaced LBD .pt crops; patch post includes save when save=True."""
 
     keys_preproc = "L,E,Norm,Dtype"
+    stored_input = True
     keys_postproc = "Pack,SqL,A,Int,W,S"
 
     def create_preprocess_transforms(self):

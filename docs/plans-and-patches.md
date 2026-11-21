@@ -10,7 +10,7 @@ The `plans` sheet in `experiment_configs_det.xlsx` uses `patch_dim0` and `patch_
 patch_size = [patch_dim0, patch_dim0, patch_dim1]
 ```
 
-Setting the patch dimensions to `auto` delegates the training patch to BoxC002.
+Setting the patch dimensions to `auto` delegates the training patch to BoxC002. See [how det3d chooses the LBD training patch](planning/patch-size.md) for fixed and stride-adjusted examples.
 
 ## Crop geometry
 

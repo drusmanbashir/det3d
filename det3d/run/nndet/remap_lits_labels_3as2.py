@@ -23,6 +23,9 @@ def load_label(path: Path) -> tuple[np.ndarray, nib.Nifti1Image | None, sitk.Ima
 
 def save_nifti_gz(out: Path, data: np.ndarray, ref_nib: nib.Nifti1Image | None, ref_sitk: sitk.Image | None) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
+    # Output may be a symlink into the source dataset; unlink first so the write never follows it.
+    if out.is_symlink():
+        out.unlink()
     if ref_nib is not None:
         hdr = ref_nib.header.copy()
         hdr.set_data_dtype(np.int16)

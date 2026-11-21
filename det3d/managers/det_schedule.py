@@ -1,4 +1,6 @@
 import torch
+from nndet.training.learning_rate import LinearWarmupPolyLR
+from nndet.training.optimizer import get_params_no_wd_on_norm
 
 
 def _plateau_lr_scheduler_config(optimizer, scheduler_params: dict, monitor: str):  #AI
@@ -16,21 +18,37 @@ def _plateau_lr_scheduler_config(optimizer, scheduler_params: dict, monitor: str
 
 
 def configure_detection_optimizers(
-    params,
+    model,
     configs: dict,
     lr: float,
     scheduler_warmup_holder: dict,
+    trainer,
     monitor: str = "val0_metric",
 ):
+    """nndet sheet warm_iterations set: nnDetection v001 (no decay on norm layers, LinearWarmupPolyLR
+    stepped per iteration over max_epochs x batches per epoch). Blank (or row absent in older
+    checkpoints): decay on every parameter and ReduceLROnPlateau."""
+    nndet = configs["nndet"]
+    weight_decay = float(nndet["weight_decay"])
+    warm_iterations = nndet.get("warm_iterations")
+    params = model.parameters() if warm_iterations is None else get_params_no_wd_on_norm(model, weight_decay)
     optimizer = torch.optim.SGD(
         params,
         lr,
-        momentum=float(configs["nndet"]["momentum"]),
-        weight_decay=float(configs["nndet"]["weight_decay"]),
-        nesterov=bool(configs["nndet"]["nesterov"]),
+        momentum=float(nndet["momentum"]),
+        weight_decay=weight_decay,
+        nesterov=bool(nndet["nesterov"]),
     )
     scheduler_warmup_holder["scheduler_warmup"] = None
-    return {
-        "optimizer": optimizer,
-        "lr_scheduler": _plateau_lr_scheduler_config(optimizer, configs["scheduler_params"], monitor),
-    }
+    if warm_iterations is None:
+        lr_scheduler = _plateau_lr_scheduler_config(optimizer, configs["scheduler_params"], monitor)
+    else:
+        scheduler = LinearWarmupPolyLR(
+            optimizer=optimizer,
+            warm_iterations=int(warm_iterations),
+            warm_lr=float(nndet["warm_lr"]),
+            poly_gamma=float(nndet["poly_gamma"]),
+            num_iterations=int(trainer.estimated_stepping_batches),
+        )
+        lr_scheduler = {"scheduler": scheduler, "interval": "step"}
+    return {"optimizer": optimizer, "lr_scheduler": lr_scheduler}

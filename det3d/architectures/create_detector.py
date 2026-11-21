@@ -15,10 +15,19 @@ from det3d.detection.loss_config import (
     apply_detector_sampler_plan,
 )
 from det3d.detection.retinanet_detector2 import RetinaNetDetector2
+from det3d.detection.postprocess import postprocess_values
 from det3d.detection.retinaunet import build_retinaunet
 
 VAL_PATCH_SIZE = [512, 512, 208]
 INFER_OVERLAP = 0.25
+
+
+def inference_overlap(configs):  #AI
+    """Sliding-window overlap from dataset_params inference_overlap; blank, or absent in older
+    checkpoints: INFER_OVERLAP."""
+    overlap = configs["dataset_params"].get("inference_overlap")
+    overlap = INFER_OVERLAP if overlap is None else float(overlap)
+    return overlap
 
 
 def arch_from_conf(configs) -> str:
@@ -117,7 +126,7 @@ def wire_detector_from_conf(detector, configs, val_patch_size):
     apply_detector_loss_plan(detector, configs)
     apply_detector_sampler_plan(detector, configs)
     plan = configs["plan_train"]
-    postprocess = plan["postprocess"]
+    postprocess = postprocess_values(configs)
     detector.set_target_keys(box_key="bbox", label_key="label")
     detector.set_box_selector_parameters(
         score_thresh=float(postprocess["score_thresh"]),
@@ -127,7 +136,7 @@ def wire_detector_from_conf(detector, configs, val_patch_size):
     )
     detector.set_sliding_window_inferer(
         roi_size=val_patch_size,
-        overlap=float(plan.get("infer_overlap", INFER_OVERLAP)),
+        overlap=inference_overlap(configs),
         sw_batch_size=int(plan.get("infer_sw_batch_size", 1)),
         mode="constant",
         device="cpu",

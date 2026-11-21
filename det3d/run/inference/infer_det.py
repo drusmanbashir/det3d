@@ -105,7 +105,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--gpus", nargs="+", type=int, default=[1])
     parser.add_argument("--chunksize", type=int, default=4)
-    parser.add_argument("--patch-overlap", type=float, default=0.2)
+    parser.add_argument("--patch-overlap", type=float, default=None)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--safe-mode", action="store_true")

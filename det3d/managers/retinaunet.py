@@ -10,6 +10,7 @@ from fran.managers.project import Project
 from lightning.pytorch import LightningModule
 from nndet.evaluator.seg import SegmentationEvaluator
 
+from det3d.detection.postprocess import postprocess_values
 from det3d.managers.det_schedule import configure_detection_optimizers
 from det3d.geometry.nndet_boxes import nndet_pred_to_vis, to_nndet
 from det3d.utils.tensor import to_numpy
@@ -96,7 +97,7 @@ class RetinaUNetManager(LightningModule):
         plan_train = configs["plan_train"]
         model_params = configs["model_params"]
         model = plan_model(configs)
-        postprocess = plan_train["postprocess"]
+        postprocess = postprocess_values(configs)
         n_fg = len(plan_train["fg_labels"])
         start_channels = int(model_params["encoder_start_channels"])
         arch = {
@@ -282,10 +283,11 @@ class RetinaUNetManager(LightningModule):
     def configure_optimizers(self):
         holder = {}
         return configure_detection_optimizers(
-            self.net.parameters(),
+            self.net,
             self.configs,
             self.lr,
             holder,
+            self.trainer,
             monitor=self.configs["scheduler_params"]["scheduler_monitor"],
         )
 

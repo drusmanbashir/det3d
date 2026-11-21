@@ -7,8 +7,11 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 import torch
+from det3d.detection.postprocess import postprocess_values
 from det3d.inference.lbd_pt import load_lbd_pt
-from det3d.transforms.intensity import det_intensity_transform
+from det3d.architectures.create_detector import inference_overlap
+from det3d.inference.mirror_tta import inference_tta
+from det3d.transforms.intensity import stored_intensity_transform
 from det3d.geometry.nndet_boxes import from_nndet
 from det3d.utils.tensor import plain_tensor, to_numpy
 from fran.data.dataregistry import DS
@@ -81,7 +84,7 @@ def save_nifti_volume(arr, out_path, spacing):
 
 def predict_plan_for_inference(nndet_plan, configs):
     #AI
-    postprocess = configs["plan_train"]["postprocess"]
+    postprocess = postprocess_values(configs)
     plan = deepcopy(nndet_plan)
     plan["network_dim"] = 3
     plan["batch_size"] = 1
@@ -116,9 +119,12 @@ def identity_properties(spatial_shape, spacing):
 
 @torch.no_grad()
 def nndet_predict_case(
-    net, nndet_plan, configs, image, device, overlap=0.25, do_seg=True, num_tta=0
+    net, nndet_plan, configs, image, device, overlap=None, do_seg=True, num_tta=None
 ):
     #AI
+    """overlap / num_tta None: dataset_params inference_overlap / inference_tta."""
+    overlap = inference_overlap(configs) if overlap is None else overlap
+    num_tta = inference_tta(configs) if num_tta is None else num_tta
     import nndet.compat  # noqa: F401
     from nndet.ptmodule.retinaunet.v001 import RetinaUNetV001
 
@@ -161,7 +167,7 @@ def nndet_predict_case(
     return out
 
 
-def infer_case_seg(manager, pt_path, device, normalize, overlap=0.25, num_tta=0):
+def infer_case_seg(manager, pt_path, device, normalize, overlap=None, num_tta=None):
   #AI
     img = normalize({"image": load_lbd_pt(pt_path)})["image"]
     pred = nndet_predict_case(
@@ -183,8 +189,8 @@ def run_lidc2_seg_infer(
     n_cases=10,
     project_title="lidca",
     device=None,
-    overlap=0.25,
-    num_tta=0,
+    overlap=None,
+    num_tta=None,
     open_slicer=False,
     slicer_bin="/home/ub/programs/Slicer/Slicer-SuperBuild-Debug/Slicer-build/Slicer",
 ):
@@ -199,7 +205,7 @@ def run_lidc2_seg_infer(
     project = Project(project_title)
     manager = load_retinaunet_manager(ckpt_path, device)
     plan = manager.plan
-    normalize = det_intensity_transform(manager.configs["dataset_params"], plan)
+    normalize = stored_intensity_transform(manager.configs["dataset_params"], plan)
     spacing = spacing_from_plan(plan)
 
     manifest = []

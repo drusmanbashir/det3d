@@ -86,7 +86,7 @@ flowchart TB
 
 **det3d today.** `TrainerDet` adds Lightning's `StochasticWeightAveraging` when `plan["use_swa"]` is true. No sheet has that key, so it is off.
 
-**Home.** Callback list in `TrainerDet.init_cbs` (`D/trainers/trainerdet.py`).
+**Home.** Shared callback list in fran `Trainer.init_cbs` (`fran/trainers/trainer.py`); `TrainerDet.init_cbs` (`D/trainers/trainerdet.py`) adds SWA.
 
 **Issues in det3d code.** B8, D7 in [issues.md](issues.md).
 
@@ -98,7 +98,7 @@ flowchart TB
 
 **det3d today.** `TrainerDet`: top two by `val0_metric` every 5 epochs, plus last, plus a snapshot every 100 epochs. `TrainerDetRT` (the launchers' default): no validation, checkpoints by lowest training loss. Inference takes one checkpoint by run id.
 
-**Home.** `TrainerDet.init_cbs`; checkpoint lookup `checkpoint_from_model_id` used by `D/run/inference/infer_det.py`.
+**Home.** fran `Trainer.init_cbs`, with the monitor and cadence set by `TrainerDet` / `TrainerDetRT` class attributes; checkpoint lookup `checkpoint_from_model_id` used by `D/run/inference/infer_det.py`.
 
 **Issues in det3d code.** C8 in [issues.md](issues.md).
 

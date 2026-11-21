@@ -36,8 +36,8 @@ if __name__ == "__main__":
     parser.add_argument("--project", default="lidca")
     parser.add_argument("-n", type=int, default=10, help="Number of LIDC2 nifti cases (sorted).")
     parser.add_argument("--device", default=None)
-    parser.add_argument("--overlap", type=float, default=0.25)
-    parser.add_argument("--num-tta", type=int, default=0, help="nnDetection mirror TTA count (0=off, 8=full 3D)")
+    parser.add_argument("--overlap", type=float, default=None, help="default: dataset_params inference_overlap")
+    parser.add_argument("--num-tta", type=int, default=None, help="nnDetection mirror TTA count (0=off, 8=full 3D); default: dataset_params inference_tta")
     parser.add_argument(
         "--open-slicer",
         action="store_true",

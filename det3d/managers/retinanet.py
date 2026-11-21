@@ -3,7 +3,7 @@ import torch
 from monai.apps.detection.utils.detector_utils import check_training_targets
 from monai.apps.detection.utils.predict_utils import ensure_dict_value_to_list_
 
-from det3d.architectures.create_detector import INFER_OVERLAP, create_detector_from_conf
+from det3d.architectures.create_detector import create_detector_from_conf, inference_overlap
 from det3d.evaluation.coco import compute_coco_metrics
 from det3d.managers.det_schedule import configure_detection_optimizers
 from fran.managers.project import Project
@@ -161,10 +161,11 @@ class RetinaNetManager(LightningModule):
     def configure_optimizers(self):
         holder = {}
         result = configure_detection_optimizers(
-            self.detector.network.parameters(),
+            self.detector.network,
             self.configs,
             self.lr,
             holder,
+            self.trainer,
             monitor=self.configs["scheduler_params"]["scheduler_monitor"],
         )
         self.scheduler_warmup = holder["scheduler_warmup"]
@@ -172,7 +173,7 @@ class RetinaNetManager(LightningModule):
         plan = self.plan
         self.detector.set_sliding_window_inferer(
             roi_size=self.val_patch_size,
-            overlap=float(plan.get("infer_overlap", INFER_OVERLAP)),
+            overlap=inference_overlap(self.configs),
             sw_batch_size=int(plan.get("infer_sw_batch_size", 1)),
             mode="constant",
             device=str(self.device),

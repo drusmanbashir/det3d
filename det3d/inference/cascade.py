@@ -54,7 +54,7 @@ class DetBBoxCascadeInferer(FranCascadeInferer):
         project_title=None,
         devices=(0,),
         safe_mode=False,
-        patch_overlap=0.2,
+        patch_overlap=None,
         profile=None,
         save=True,
         save_localiser=True,

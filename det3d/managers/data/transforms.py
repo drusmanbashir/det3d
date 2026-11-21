@@ -5,13 +5,12 @@ from ast import literal_eval
 from pathlib import Path
 import numpy as np
 import torch
-from fran.transforms.crop_indices import sample_crop_center_from_extended_boxes
 from det3d.transforms.crop_indices import monai_crop_center_to_slices
 from det3d.transforms.box_tracker import CornerTracker
 from fran.transforms.detection import patch_size_manifest_key
 from fran.managers.data.valid_patch_stream import _pad_tensor_to_patch_size
 from fran.utils.bbox_sidecar import extended_bbox_df_column
-from fran.managers.data.main import RandCropByFlatIndicesd
+from fran.managers.data.main import RandCropExtendedBBoxd  # noqa: F401  det Rtr; oversample_fg slots as fran's D2
 from fran.preprocessing.helpers import import_h5py
 from monai.data import MetaTensor
 from monai.transforms import MapTransform
@@ -79,85 +78,6 @@ class LoadHDF5DetShardExtendedBBoxd(MapTransform):
         d["src_dims"] = src_dims
         d["extended_center_boxes"] = np.asarray(center_boxes, dtype=np.int64)
         return d
-
-
-class RandCropByFgIndicesd(RandCropByFlatIndicesd):
-    """RandCropByFlatIndicesd with uniform-random neg centers (no stored bg pool)."""
-
-    def __call__(self, data):
-        d = dict(data)
-        src_dims = tuple(int(v) for v in d[self.src_dims_key])
-        fg = np.asarray(d[self.fg_indices_key], dtype=np.int64).reshape(-1)
-        n_voxels = int(np.prod(src_dims))
-        out = []
-        for _ in range(self.num_samples):
-            sample = dict(d)
-            choose_fg = self.R.rand() < self.pos / (self.pos + self.neg)
-            if choose_fg and fg.size > 0:
-                sample_is_fg = True
-                sampled_flat_index = int(fg[self.R.randint(0, fg.size)])
-            else:
-                sample_is_fg = False
-                sampled_flat_index = int(self.R.randint(0, n_voxels))
-            center = tuple(
-                int(v) for v in np.unravel_index(sampled_flat_index, src_dims)
-            )
-            crop_slices, crop_start, crop_end = self._compute_crop(center, src_dims)
-            sample["crop_center"] = center
-            sample["crop_slices"] = crop_slices
-            sample["crop_start"] = crop_start
-            sample["crop_end"] = crop_end
-            sample["sample_is_fg"] = bool(sample_is_fg)
-            sample["sampled_flat_index"] = sampled_flat_index
-            out.append(sample)
-        return out
-
-
-class RandCropExtendedBBoxd(RandCropByFgIndicesd):
-    """RandCrop from precomputed extended center boxes per patch size."""
-
-    def __init__(
-        self,
-        keys,
-        roi_size,
-        pos=1.0,
-        neg=1.0,
-        num_samples=1,
-        extended_boxes_key="extended_center_boxes",
-        src_dims_key="src_dims",
-        allow_missing_keys=False,
-    ):
-        RandCropByFgIndicesd.__init__(
-            self,
-            keys=keys,
-            roi_size=roi_size,
-            pos=pos,
-            neg=neg,
-            num_samples=num_samples,
-            fg_indices_key="fg_indices",
-            src_dims_key=src_dims_key,
-            allow_missing_keys=allow_missing_keys,
-        )
-        self.extended_boxes_key = extended_boxes_key
-
-    def __call__(self, data):
-        d = dict(data)
-        src_dims = tuple(int(v) for v in d[self.src_dims_key])
-        center_boxes = np.asarray(d[self.extended_boxes_key], dtype=np.int64).reshape(-1, 6)
-        out = []
-        for _ in range(self.num_samples):
-            sample = dict(d)
-            choose_fg = self.R.rand() < self.pos / (self.pos + self.neg)
-            sample_is_fg = bool(choose_fg and center_boxes.shape[0] > 0)
-            center = sample_crop_center_from_extended_boxes(
-                center_boxes, src_dims, sample_is_fg, self.R
-            )
-            crop_slices, crop_start, _crop_end = self._compute_crop(center, src_dims)
-            sample["crop_slices"] = crop_slices
-            sample["crop_start"] = crop_start
-            del sample[self.src_dims_key], sample[self.extended_boxes_key]
-            out.append(sample)
-        return out
 
 
 class CropDetPatchd(MapTransform):

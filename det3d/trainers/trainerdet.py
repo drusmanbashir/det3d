@@ -1,31 +1,17 @@
 from ast import List
 import os
 from torch import Tensor
-from copy import deepcopy
 from pathlib import Path
-from typing import Optional
 from nndet.core.retina import BaseRetinaNet
 import torch
 from det3d.geometry.nndet_boxes import from_nndet
 from det3d.detection.retinanet_detector2 import RetinaNetDetector2
 from fran.callback.debug_epoch_limit import DebugEpochBatchLimit
-from fran.callback.incremental import LRFloorStop
-from fran.configs.helpers import normalize_logging_payload
-from fran.managers import Project
-from fran.managers.wandb.wandb import DET3D_WANDB_WORKSPACE, WandbManager
+from fran.managers.wandb.wandb import DET3D_WANDB_WORKSPACE
 from fran.preprocessing.helpers import import_h5py
-from fran.trainers.helpers import switch_ckpt_keys
-from fran.trainers.trainer import Trainer, _flatten_dict
+from fran.trainers.trainer import Trainer
 from lightning.fabric import Fabric
-from lightning.pytorch import Trainer as TrainerL
-from lightning.pytorch.callbacks import (
-    DeviceStatsMonitor,
-    EarlyStopping,
-    LearningRateMonitor,
-    ModelCheckpoint,
-    StochasticWeightAveraging,
-)
-from lightning.pytorch.profilers import AdvancedProfiler
+from lightning.pytorch.callbacks import StochasticWeightAveraging
 from utilz.imageviewers import ImageMaskBboxViewer, ImageMaskViewer
 from utilz.stringz import ast_literal_eval, headline
 
@@ -37,20 +23,38 @@ from det3d.callback.wandb_det_grid import (
 from det3d.managers.retinaunet import RetinaUNetManager
 from det3d.configs.parser import ConfigMakerDet
 from det3d.managers.data import DataManagerDualDet, DataManagerDualDetBTfms
+from det3d.managers.data.labels import infer_det_labels_from_data_folder
 from det3d.managers.detector_factory import resolve_detector_manager
 
 
 class TrainerDet(Trainer):
-    """Detection trainer for RetinaNet / RetinaUNet (mirrors fran ``Trainer``).
+    """Detection trainer for RetinaNet / RetinaUNet on top of fran ``Trainer``.
 
     Wires ``DataManagerDualDet*`` orchestrators, detection W&B image grids, and
-    ``val0_metric`` early stopping. Normalizes ``plan_*`` modes ``det`` / ``lbd``
+    ``val0_metric`` checkpointing. Normalizes ``plan_*`` modes ``det`` / ``lbd``
     to the label-bounded pipeline before DM setup.
     """
 
-    wandb_grid_cb_cls = WandbDetImageGridCallback
+    case_id_recorder_cls = None
     monitor_metric_name = "val0_metric"
+    monitor_mode = "max"
+    monitor_format = ".4f"
+    checkpoint_every_n_epochs = 5
+    early_stopping_monitor = "val0_metric"
+    debug_batch_limit = 2
+    wandb_config_keys = ("dataset_params", "plan_train")
     _DET_PIPELINE_MODES = frozenset({"det", "lbd"})
+
+    def __init__(self, project_title, configs, run_name=None, ckpt_path=None):
+        """`run_name` is used verbatim; `ckpt_path` resumes from that file when no run is named."""
+        super().__init__(project_title=project_title, configs=configs)
+        self.run_name = run_name
+        if ckpt_path is not None:
+            self.ckpt = Path(ckpt_path)
+
+    @property
+    def manager_cls(self):
+        return resolve_detector_manager(self.configs)
 
     def wandb_project_name(self) -> str:  #AI
         """Use the detection workspace by default and allow resuming in an older project."""
@@ -89,26 +93,6 @@ class TrainerDet(Trainer):
             **self.wandb_grid_cb_kwargs(wandb_grid_epoch_freq)
         )
 
-    def __init__(
-        self,
-        project_title,
-        configs,
-        run_name=None,
-        ckpt_path: Optional[str | Path] = None,
-    ):
-        self.project = Project(project_title=project_title)
-        self.configs = configs
-        self.run_name = run_name
-        self.ckpt = Path(ckpt_path) if ckpt_path is not None else None
-        self._wandb_run_is_new = False if run_name is None else None
-        self.qc_configs(configs, self.project)
-        self.checkpoint_kwargs = {}
-        self.early_stopping_kwargs = {
-            "monitor": self.monitor_metric_name,
-            "mode": "max",
-            "check_on_train_epoch_end": False,
-        }
-
     def setup(
         self,
         batch_size=None,
@@ -132,41 +116,46 @@ class TrainerDet(Trainer):
         override_dm_checkpoint=False,
         early_stopping=False,
         early_stopping_patience=30,
-        lr_floor=None,
         wandb_grid_epoch_freq: int = 5,
         permanent_checkpoint_every_n_epochs: int = 100,
         batch_tfms: bool = True,
+        snapshot_freq: int = 1000,
     ):
-        self.val_every_n_epochs = int(val_every_n_epochs)
-        self.max_epochs = int(epochs)
-        if wandb_grid_epoch_freq is None:
-            wandb_grid_epoch_freq = 5
-        wandb_grid_epoch_freq = int(wandb_grid_epoch_freq)
-        self.train_indices = train_indices
-        self.val_indices = val_indices
-        self.val_sampling = float(val_sampling)
-        self.debug = bool(debug)
+        """Detection defaults over ``Trainer.setup``.
+
+        ``snapshot_freq`` is the run-through snapshot cadence; the batch-size
+        finder only runs in run-through trainers.
+        """
         self.debug_tfm_keys = debug_tfm_keys
-        self.batch_tfms = bool(batch_tfms)
-        self._resolve_run_ckpt(wandb=wandb)
-        self.maybe_alter_configs(batch_size, compiled)
-        self.set_lr(lr)
-
-        has_cuda = torch.cuda.is_available()
-        if has_cuda:
-            self.set_strategy(devices)
-            trainer_devices = devices
-            accelerator = "gpu"
-            strategy = self.strategy
-        else:
-            self.devices = 1
-            self.sync_dist = False
-            self.strategy = "auto"
-            trainer_devices = 1
-            accelerator = "cpu"
-            strategy = "auto"
-
-        self.init_dm_unet(self.max_epochs, batch_size, override_dm_checkpoint)
+        self.max_epochs = int(epochs)
+        self.permanent_checkpoint_every_n_epochs = int(
+            permanent_checkpoint_every_n_epochs
+        )
+        super().setup(
+            batch_size=batch_size,
+            train_indices=train_indices,
+            val_indices=val_indices,
+            val_sampling=val_sampling,
+            logging_freq=logging_freq,
+            lr=lr,
+            devices=devices,
+            compiled=compiled,
+            wandb=wandb,
+            profiler=profiler,
+            debug=debug,
+            val_every_n_epochs=int(val_every_n_epochs),
+            cbs=cbs,
+            tags=tags,
+            description=description,
+            epochs=self.max_epochs,
+            batchsize_finder=batchsize_finder and self.run_through,
+            override_dm_checkpoint=override_dm_checkpoint,
+            early_stopping=early_stopping,
+            early_stopping_patience=early_stopping_patience,
+            wandb_grid_epoch_freq=wandb_grid_epoch_freq,
+            batch_tfms=batch_tfms,
+            case_id_recorder_freq=snapshot_freq,
+        )
         self.D.prepare_data()
         self.D.setup(stage="fit")
         valid_mgr = getattr(self.D, "valid_manager", None)
@@ -178,52 +167,18 @@ class TrainerDet(Trainer):
             f"  valid: {type(valid_mgr).__name__} — {valid_mgr}"
         )
 
-        if self.ckpt is not None and batchsize_finder:
-            headline(
-                "BatchSizeFinder was requested, but this run is resuming from an existing checkpoint "
-                f"({self.ckpt}). To preserve resumed epoch/global_step continuity and avoid mixing "
-                "BatchSizeFinder probe steps into the same W&B run history, batchsize_finder is being "
-                "force-disabled for this run."
-            )
-            batchsize_finder = False
-
-        cbs, logger, profiler = self.init_cbs(
-            extra_cbs=cbs,
-            wandb=wandb,
-            batchsize_finder=batchsize_finder,
-            profiler=profiler,
-            tags=tags,
-            description=description,
-            early_stopping=early_stopping,
-            early_stopping_patience=early_stopping_patience,
-            lr_floor=lr_floor,
-            permanent_checkpoint_every_n_epochs=permanent_checkpoint_every_n_epochs,
-            wandb_grid_epoch_freq=wandb_grid_epoch_freq,
+    def lightning_kwargs(self) -> dict:
+        nndet = self.configs["nndet"]
+        precision = nndet.get("precision")  # blank or absent in older checkpoints: bf16-mixed
+        kwargs = dict(
+            precision="bf16-mixed" if precision is None else str(precision),
+            benchmark=bool(nndet["benchmark"]),
+            deterministic=bool(nndet["deterministic"]),
         )
-        self._ensure_local_ckpt_on_wandb_resume(logger)
-        trainer_kwargs = dict(
-            callbacks=cbs,
-            accelerator=accelerator,
-            devices=trainer_devices,
-            precision="bf16-mixed",
-            profiler=profiler,
-            logger=logger,
-            max_epochs=self.max_epochs,
-            check_val_every_n_epoch=self.val_every_n_epochs,
-            log_every_n_steps=logging_freq,
-            num_sanity_val_steps=0,
-            enable_checkpointing=True,
-            default_root_dir=self.project.checkpoints_parent_folder,
-            strategy=strategy,
-            benchmark=bool(self.configs["nndet"]["benchmark"]),
-            deterministic=bool(self.configs["nndet"]["deterministic"]),
-        )
-        if arch_from_conf(self.configs) == "retinaunet":
-            trainer_kwargs["gradient_clip_val"] = 1.0
-        if getattr(self, "run_through", False):
-            trainer_kwargs["limit_val_batches"] = 0
-            trainer_kwargs["check_val_every_n_epoch"] = 1
-        self.trainer = TrainerL(**trainer_kwargs)
+        if self.run_through:
+            kwargs["limit_val_batches"] = 0
+            kwargs["check_val_every_n_epoch"] = 1
+        return kwargs
 
     def resolve_orchestrator_class(self, batch_tfms=None):
         if batch_tfms is None:
@@ -283,118 +238,49 @@ class TrainerDet(Trainer):
             n = self.train_indices if isinstance(self.train_indices, int) else 50
             dm_kwargs["debug_n_cases"] = int(n)
         self.D = dm_class(**dm_kwargs)
-        from det3d.managers.data.labels import infer_det_labels_from_data_folder
-
         infer_det_labels_from_data_folder(dm=self.D, configs=self.configs)
         return self.D
 
-    def init_dm_unet(self, epochs, batch_size, override_dm_checkpoint=False):
+    def init_dm_unet(self, batch_size, override_dm_checkpoint):
+        """A det resume takes the model from the checkpoint and rebuilds the datamodule from current configs."""
         if self.ckpt:
             self.N = self.load_trainer()
             self.D = self.init_dm()
         else:
             self.D = self.init_dm()
-            self.N = self.init_trainer(epochs)
+            self.N = self.init_trainer()
 
-    def init_trainer(self, epochs):
-        from det3d.managers.detector_factory import resolve_detector_manager
-
-        self.configs["model_params"]["max_epochs"] = int(epochs)
-        manager_cls = resolve_detector_manager(self.configs)
-        N = manager_cls(
-            project_title=self.project.project_title,
-            configs=self.configs,
-            lr=self.lr,
-            sync_dist=self.sync_dist,
-        )
+    def init_trainer(self):
+        self.configs["model_params"]["max_epochs"] = self.max_epochs
+        N = super().init_trainer()
         return N
-
-    def load_trainer(self, map_location="cpu", **kwargs):
-        manager_cls = resolve_detector_manager(self.configs)
-        weights_only = False
-        try:
-            N = manager_cls.load_from_checkpoint(
-                self.ckpt,
-                map_location=map_location,
-                strict=True,
-                weights_only=weights_only,
-                **kwargs,
-            )
-        except RuntimeError:
-            switch_ckpt_keys(self.ckpt)
-            N = manager_cls.load_from_checkpoint(
-                self.ckpt,
-                map_location=map_location,
-                strict=True,
-                weights_only=weights_only,
-                **kwargs,
-            )
-        print("Model loaded from checkpoint: ", self.ckpt)
-        return N
-
-    def maybe_alter_configs(self, batch_size, compiled):
-        if batch_size is not None:
-            self.configs["plan_train"]["batch_size"] = int(batch_size)
-        if compiled is not None:
-            self.configs["model_params"]["compiled"] = bool(compiled)
 
     def init_cbs(
         self,
-        extra_cbs,
+        cbs,
         wandb,
         batchsize_finder,
         profiler,
         tags,
-        description="",
-        early_stopping=False,
-        early_stopping_patience=30,
-        lr_floor=None,
-        permanent_checkpoint_every_n_epochs: int = 100,
-        wandb_grid_epoch_freq: int = 5,
+        description,
+        early_stopping,
+        early_stopping_patience,
+        wandb_grid_epoch_freq,
     ):
-        cbs = []
-        if extra_cbs:
-            cbs += list(extra_cbs)
-        if self.debug and not self.debug_tfm_keys:
-            cbs += [DebugEpochBatchLimit(n=2)]
-
-        ckpt_mode = self.early_stopping_kwargs["mode"]
-        cbs += [
-            ModelCheckpoint(
-                save_top_k=2,
-                save_last=True,
-                monitor=self.monitor_metric_name,
-                mode=ckpt_mode,
-                every_n_epochs=5,
-                filename="{epoch}-{" + self.monitor_metric_name + ":.4f}",
-                enable_version_counter=True,
-                auto_insert_metric_name=True,
-                **self.checkpoint_kwargs,
-            ),
-            ModelCheckpoint(
-                save_top_k=-1,
-                save_last=True,
-                every_n_epochs=int(permanent_checkpoint_every_n_epochs),
-                filename="epoch{epoch:04d}-snapshot",
-                enable_version_counter=False,
-                auto_insert_metric_name=False,
-                **self.checkpoint_kwargs,
-            ),
-            LearningRateMonitor(logging_interval="epoch"),
-        ]
-
-        if early_stopping:
-            cbs += [
-                EarlyStopping(
-                    monitor=self.monitor_metric_name,
-                    mode="max",
-                    patience=int(early_stopping_patience),
-                )
-            ]
-
-        if lr_floor is not None:
-            cbs += [LRFloorStop(min_lr=lr_floor)]
-
+        """Trainer callbacks plus optional SWA; a transform-debug run keeps full epochs."""
+        cbs, logger, profiler = super().init_cbs(
+            cbs=cbs,
+            wandb=wandb,
+            batchsize_finder=batchsize_finder,
+            profiler=profiler,
+            tags=tags,
+            description=description,
+            early_stopping=early_stopping,
+            early_stopping_patience=early_stopping_patience,
+            wandb_grid_epoch_freq=wandb_grid_epoch_freq,
+        )
+        if self.debug_tfm_keys:
+            cbs = [cb for cb in cbs if not isinstance(cb, DebugEpochBatchLimit)]
         plan = self.configs["plan_train"]
         if bool(plan.get("use_swa", False)):
             cbs += [
@@ -403,84 +289,14 @@ class TrainerDet(Trainer):
                     swa_epoch_start=self.max_epochs - int(plan.get("swa_epochs", 10)),
                 )
             ]
-
-        logger = None
-        if wandb:
-            logger = WandbManager(
-                project=self.project,
-                run_id=self.run_name,
-                wandb_project_name=self.wandb_project_name(),
-                log_model_checkpoints=False,
-                tags=tags,
-                notes=description,
-            )
-            dm_cfg = {
-                "dataset_params": normalize_logging_payload(
-                    deepcopy(self.D.configs["dataset_params"])
-                ),
-                "plan_train": normalize_logging_payload(
-                    deepcopy(self.D.configs["plan_train"])
-                ),
-            }
-            flat_cfg = _flatten_dict(dm_cfg, base="configs/datamodule")
-            logger.experiment.config.update(flat_cfg, allow_val_change=True)
-            cbs += [
-                self.wandb_grid_callback(wandb_grid_epoch_freq),
-                self.wandb_best_ckpt_cls(),
-            ]
-
-        if profiler:
-            profiler = AdvancedProfiler(
-                dirpath=self.project.log_folder, filename="profiler"
-            )
-            cbs += [DeviceStatsMonitor(cpu_stats=True)]
-        else:
-            profiler = None
-
         return cbs, logger, profiler
 
     def setup_model_for_cuda(self, device=0, precision="bf16-mixed"):
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA is not available.")
-        if not hasattr(self, "N"):
-            raise RuntimeError("Call setup() before setup_model_for_cuda().")
-        fabric, model = self.setup_tm_for_cuda(
-            device=device, precision=precision, wrap_inner_model=False
-        )
-        self.fabric_infer = fabric
-        return model
-
-    def fabric_inner_module(self):
-        arch = arch_from_conf(self.configs)
-        if arch == "retinaunet":
-            return self.N.net
-        return self.N.detector
-
-    def setup_tm_for_cuda(
-        self, device=0, precision="bf16-mixed", wrap_inner_model=True
-    ):
-        fabric = Fabric(
-            accelerator="gpu",
-            devices=[device],
-            precision=precision,
-        )
-
-        if wrap_inner_model:
-            inner = self.fabric_inner_module()
-            inner.eval()
-            inner = fabric.setup(inner)
-            arch = arch_from_conf(self.configs)
-            if arch == "retinaunet":
-                self.N.nndet_module.model = inner
-            else:
-                self.N.detector = inner
-            model = inner
-        else:
-            self.N.eval()
-            self.N = fabric.setup(self.N)
-            model = self.N
-
-        return fabric, model
+        """Put the whole manager on one GPU through Fabric, for interactive inference."""
+        self.fabric_infer = Fabric(accelerator="gpu", devices=[device], precision=precision)
+        self.N.eval()
+        self.N = self.fabric_infer.setup(self.N)
+        return self.N
 
 
 # %%

@@ -93,7 +93,8 @@ Detection LBD preprocessing uses `fran/run/preproc/analyze_resample.py --pipelin
 - `markups.py` — Slicer ROI Box `.mrk.json` from sidecar
 - `visualize.py` — sidecar overlay viewers
 - `retinaunet_nifti.py` — RetinaUNet tiled seg infer on LIDC2 nifti cases
-- `jaeger.py`, `mirror_tta.py` — placeholders (phase 5)
+- `mirror_tta.py` — `inference_tta` (dataset_params row), `mirror_tta_step` (nnDetection 8-mirror TTA, boxes + seg inverted) for `DetPatchRetinaUNet`
+- `jaeger.py` — placeholder (phase 5)
 
 ## run/inference
 

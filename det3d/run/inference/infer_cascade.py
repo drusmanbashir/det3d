@@ -33,7 +33,7 @@ if __name__ == "__main__":
     parser.add_argument("--run-p", required=True, help="RetinaUNet det run name")
     parser.add_argument("--project", default="lidca")
     parser.add_argument("--gpus", nargs="+", type=int, default=[1])
-    parser.add_argument("--patch-overlap", type=float, default=0.25)
+    parser.add_argument("--patch-overlap", type=float, default=None)
     parser.add_argument("--localiser-labels", nargs="*", type=int, default=None)
     parser.add_argument("--lung-localiser", action="store_true")
     parser.add_argument("--folder", nargs="*", default=None)

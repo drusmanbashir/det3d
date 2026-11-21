@@ -20,12 +20,14 @@ from fran.preprocessing.hdf5_shards import find_hdf5_shard_folder
 from det3d.transforms.box_tracker import BOX_TRACKERS
 from fran.transforms.detection import patch_size_manifest_key
 from det3d.transforms.gpu_det import RandAffineBoxSyncd, RandFlipBoxSyncd, ResizeWithPadOrCropBoxSyncd
-from det3d.transforms.intensity import det_intensity_transform
+from det3d.transforms.intensity import stored_intensity_transform
 from det3d.utils.bbox_sidecar import bbox_sidecar_path, load_detection_sidecar, valid_detection_box
 from fran.utils.bbox_sidecar import extended_bbox_df_column, nbrhood_df_to_detection_records
 from fran.configs.helpers import is_excel_None
 from fran.managers.data.main import (
     DataManager,
+    ForcedFgBatchSampler,
+    ForcedFgDataset,
     DataManagerLBD,
     DataManagerPatch,
     DataManagerRBD,
@@ -36,6 +38,7 @@ from fran.managers.data.main import (
 from fran.run.preproc.archive_preprocessed import ensure_rapid_data_folder
 from fran.transforms.imageio import TorchReader
 from monai.data import DataLoader, Dataset
+from torch.utils.data import RandomSampler
 from fran.transforms.intensitytransforms import RandRandGaussianNoised
 from monai.transforms import (
     Compose,
@@ -147,7 +150,7 @@ class DataManagerDet(DataManager):
 
     def _intensity_transform(self, keys):  #AI
         """Build detection normalization from the intensity properties for this split."""
-        transform = det_intensity_transform(self.dataset_params, self.plan, keys=keys)
+        transform = stored_intensity_transform(self.dataset_params, self.plan, keys=keys)
         return transform
 
     def _valid_impl(self):
@@ -210,28 +213,42 @@ class DataManagerDet(DataManager):
         num_workers = min(4, max(1, len(os.sched_getaffinity(0)) - 2))
         return num_workers, False
 
+    def train_batching(self):  #AI
+        """Fran's nnU-Net batching: num_iterations_per_epoch set draws exactly that many batches with
+        replacement; oversample_fg set forces the last slots of every batch to foreground (ForcedFg)."""
+        sampler = self.epoch_sampler("train")
+        ds = self.ds
+        batching = dict(batch_size=self.effective_batch_size, shuffle=sampler is None, sampler=sampler)
+        if self.oversample_fg() is not None and "Rtr" in self.keys:
+            ds = ForcedFgDataset(self.ds)
+            batch_sampler = ForcedFgBatchSampler(
+                sampler or RandomSampler(self.ds),
+                self.effective_batch_size,
+                self.plan["samples_per_file"],
+                self.oversample_fg(),
+            )
+            batching = dict(batch_sampler=batch_sampler)
+        return ds, batching
+
     def create_dataloader(self):
         num_workers, persistent_workers = self._num_workers()
         if self.is_train_all_split():
-            batch_size = self.effective_batch_size
-            collate_fn = self.collate_fn
+            ds, batching = self.train_batching()
         else:
-            batch_size = 1
-            collate_fn = self.collate_fn
+            ds, batching = self.ds, dict(batch_size=1, shuffle=False)
         pin_memory = torch.cuda.is_available() and not self.debug
         if num_workers > 0:
             persistent_workers = True
         dl_kwargs = dict(
-            batch_size=batch_size,
-            shuffle=self.is_train_all_split(),
             num_workers=num_workers,
-            collate_fn=collate_fn,
+            collate_fn=self.collate_fn,
             persistent_workers=persistent_workers,
             pin_memory=pin_memory,
+            **batching,
         )
         if num_workers > 0:
             dl_kwargs["prefetch_factor"] = 2
-        self.dl = DataLoader(self.ds, **dl_kwargs)
+        self.dl = DataLoader(ds, **dl_kwargs)
 
     def derive_data_folder(self, plan):
         data_folder = Path(FolderNames(self.project, plan).lbd_folder)
@@ -258,7 +275,7 @@ class DataManagerDet(DataManager):
 
     def cases_from_project_split(self):
         ds_tokens = [x.strip() for x in self.plan["datasources"].split(",") if x.strip()]
-        nnz_allowed = self.plan.get("nnz_allowed", False)
+        nnz_allowed = self.dataset_params["nnz_allowed"]
         if self.split == "all":
             self.cases = list(
                 self.project.get_train_val_case_ids(
@@ -396,7 +413,7 @@ class DataManagerDet(DataManager):
 
     def _shard_cases_from_project_split(self):
         ds_tokens = [x.strip() for x in self.plan["datasources"].split(",") if x.strip()]
-        nnz_allowed = self.plan.get("nnz_allowed", False)
+        nnz_allowed = self.dataset_params["nnz_allowed"]
         train_cases, valid_cases = self.project.get_train_val_case_ids(
             self.dataset_params["fold"],
             ds_tokens,
@@ -495,6 +512,7 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
             num_samples=int(plan["samples_per_file"]),
             pos=self.dataset_params["fgbg_ratio"],
             neg=1,
+            oversample_fg=self.oversample_fg(),
             src_dims_key="src_dims",
         )
         self.L2 = LoadHDF5DetCropd(keys=load_keys, box_key=bk, tracker=self.box_tracker)
@@ -649,6 +667,7 @@ class DataManagerDetLBD(DataManagerDetSource, DataManagerLBD):
         dl_kwargs = dict(
             batch_size=self.effective_batch_size,
             shuffle=False,
+            sampler=self.epoch_sampler("valid"),  # num_val_iterations_per_epoch set: that many batches
             num_workers=num_workers,
             collate_fn=self.collate_fn,
             persistent_workers=persistent_workers,
