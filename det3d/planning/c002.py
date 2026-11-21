@@ -1,4 +1,4 @@
-"""nnDetection's BoxC002 architecture planner on FRAN label-bounded crops, with the plan's presets."""
+"""nnDetection's BoxC002 architecture planner on FRAN label-bounded crops, and the det3d fit at training start."""
 
 import sys
 from collections import Counter
@@ -7,11 +7,15 @@ import numpy as np
 import torch
 from utilz.cprint import cprint
 
-from fran.configs.parser import ConfigMaker
 from fran.configs.defaults import plan_gpu_buffer_mb
-from fran.configs.helpers import is_unspecified
-from fran.preprocessing.dataset_details_lbd import details_shape, lbd_box_records
-from fran.nn_compat.gpu_memory import check_planning_gpu, planning_budget
+from fran.nn_compat.fit_store import FitStore
+from fran.nn_compat.gpu_memory import check_fixed_memory, check_planning_gpu, planning_budget
+from fran.nn_compat.linked_config_keys import LinkedConfigKeys
+from fran.preprocessing.dataset_details_lbd import (
+    append_center_ranges, details_shape, lbd_box_records, lbd_input_key, selected_lbd_details,
+)
+from fran.preprocessing.plan_intensity import plan_cases
+from fran.utils.folder_names import FolderNames
 
 from det3d.managers.retinaunet import RetinaUNetManager
 from det3d.geometry.nndet_boxes import to_nndet
@@ -22,18 +26,11 @@ from nndet.planning.estimator import MemoryEstimatorDetection
 from nndet.ptmodule.retinaunet.v001 import RetinaUNetV001
 
 
-MAX_DATASET_COVERED = 0.05  # nnU-Net ExperimentPlanner: one batch sees at most 5% of the dataset's voxels
 BYTES_PER_MB = 1024**2
 
 
 class LBDBoxC002(BoxC002):
-    """Run nnDetection's architecture and anchor algorithms on FRAN label-bounded crops, honouring the plan's presets."""
-
-    @staticmethod
-    def planning_gpu():  #AI
-        """The card BoxC002 plans on: fran's det budget (free memory of GPU 0 minus the buffer)."""
-        gpu = planning_budget("det")
-        return gpu
+    """Run nnDetection's architecture and anchor algorithms on FRAN label-bounded crops: batch 4, the patch adapts."""
 
     @staticmethod
     def trial_model_cfg(configs):  #AI
@@ -52,19 +49,17 @@ class LBDBoxC002(BoxC002):
         return model_cfg
 
     @classmethod
-    def from_lbd(cls, configs, lbd_folder, details, spacing, gpu):  #AI
-        """Planner for the selected LBD cases: boxes in nnDetection layout, model config from the det sheets, memory budget from `gpu`."""
+    def from_lbd(cls, configs, lbd_folder, details, spacing, gpu, index):  #AI
+        """Planner for the selected LBD cases: boxes in nnDetection layout, model config from the det sheets, memory budget from `gpu` (GPU `index`)."""
         cases = []
         for row in details.itertuples(index=False):
             boxes, labels = lbd_box_records(lbd_folder, row)
             cases.append((to_nndet(boxes).numpy(), labels, details_shape(row)))
-        estimator = MemoryEstimatorDetection(target_mem=gpu["budget"], gpu_id=0)
-        planner = cls(
-            cases, spacing, cls.trial_model_cfg(configs), estimator, configs["model_params"]["in_channels"], configs["plan_train"]
-        )
+        estimator = MemoryEstimatorDetection(target_mem=gpu["budget"], gpu_id=index)
+        planner = cls(cases, spacing, cls.trial_model_cfg(configs), estimator, configs["model_params"]["in_channels"])
         return planner
 
-    def __init__(self, cases, spacing, model_cfg, estimator, in_channels, plan):
+    def __init__(self, cases, spacing, model_cfg, estimator, in_channels):
         self.cases = cases
         self.spacing = np.asarray(spacing)
         self.model_cfg = model_cfg
@@ -74,97 +69,6 @@ class LBDBoxC002(BoxC002):
         self.dim = 3
         self.transpose_forward = [0, 1, 2]
         self.architecture_kwargs = {}
-        self.preset_patch = None if is_unspecified(plan["patch_size"]) else [int(v) for v in plan["patch_size"]]
-        self.preset_batch = None if is_unspecified(plan["batch_size"]) else int(plan["batch_size"])
-        self.preset_model = None if is_unspecified(plan["model"]) else plan["model"]
-
-    def create_default_settings(self):  #AI
-        super().create_default_settings()
-        self.patch_was_shrunk = False
-        if self.preset_batch is not None:
-            self.batch_size = self.preset_batch
-
-    def _decrease_patch_size(self, *args, **kwargs):  #AI
-        """Record that memory forced the patch below its cap, then shrink as nnDetection does."""
-        self.patch_was_shrunk = True
-        patch = super()._decrease_patch_size(*args, **kwargs)
-        return patch
-
-    def _fits_at_batch(self, batch_size, patch):  #AI
-        """Measure on the GPU whether the planned network and patch fit the memory target at this batch."""
-        _, _, _, _, divisor = self.plan_pool_and_conv_pool_late(patch, self.spacing)
-        self.estimator.batch_size = batch_size
-        _, fits = self.estimator.estimate(
-            min_shape=divisor,
-            target_shape=patch,
-            in_channels=self.architecture_kwargs["in_channels"],
-            network=self.network_cls.from_config_plan(
-                model_cfg=self.model_cfg,
-                plan_arch=self.architecture_kwargs,
-                plan_anchors=self.get_anchors_for_estimation(),
-            ),
-            optimizer_cls=torch.optim.Adam,
-            num_instances=self._estimte_num_instances_per_patch(
-                patch_size=patch,
-                target_spacing_transposed=self.spacing,
-                transpose_forward=self.transpose_forward,
-            ),
-        )
-        return fits
-
-    def _grow_batch(self, patch):  #AI
-        """nnU-Net rule: once the patch is at its cap, raise the batch while it still fits, up to 5% dataset coverage."""
-        total_voxels = sum(int(np.prod(shape)) for _, _, shape in self.cases)
-        cap = max(self.batch_size, int(MAX_DATASET_COVERED * total_voxels / np.prod(patch)))
-        start = self.batch_size
-        while self.batch_size < cap and self._fits_at_batch(self.batch_size + 1, patch):
-            self.batch_size += 1
-        self.estimator.batch_size = self.batch_size
-        if self.batch_size != start:
-            cprint(f"BoxC002: patch {list(patch)} is at its cap; batch raised {start} -> {self.batch_size} (cap {cap})", color="green", bold=True)
-
-    def _plan_architecture(self, target_spacing_transposed, target_median_shape_transposed, transpose_forward, **kwargs):  #AI
-        """nnDetection's patch fit, extended to the plan's presets.
-
-        Patch auto: nnDetection shrinks the patch until it fits; if it did not shrink and the batch is auto, the batch
-        grows (nnU-Net rule). Patch fixed: the patch is kept and only an auto batch is fitted to it. Both fixed: no change.
-        """
-        if self.preset_patch is None:
-            patch = super()._plan_architecture(
-                target_spacing_transposed, target_median_shape_transposed, transpose_forward, **kwargs
-            )
-            if self.preset_batch is None and not self.patch_was_shrunk:
-                self._grow_batch(patch)
-            return patch
-        _, pooling, convs, patch, _ = self.plan_pool_and_conv_pool_late(
-            np.asarray(self.preset_patch), target_spacing_transposed
-        )
-        ConfigMaker.patch_size_stride_compat(self.preset_patch, pooling)
-        patch = np.asarray(self.preset_patch)
-        num_resolutions = len(convs)
-        decoder_levels_start = min(max(1, num_resolutions - self.num_decoder_level), self.min_decoder_level)
-        self.architecture_kwargs.update(
-            conv_kernels=convs, strides=pooling, decoder_levels=tuple(range(decoder_levels_start, num_resolutions))
-        )
-        if self.preset_batch is None:
-            while self.batch_size > 1 and not self._fits_at_batch(self.batch_size, patch):
-                self.batch_size -= 1
-            self._grow_batch(patch)
-        return patch
-
-    def plan_pool_and_conv_pool_late(self, patch_size, spacing):  #AI
-        """Use a preset model's strides and kernels; round the patch down to their total stride."""
-        if self.preset_model is None:
-            return super().plan_pool_and_conv_pool_late(patch_size, spacing)
-        strides = np.asarray(self.preset_model["strides"])
-        divisor = np.prod(strides, axis=0)
-        if self.preset_patch is not None:
-            ConfigMaker.patch_size_stride_compat(patch_size, strides)
-        patch = (np.asarray(patch_size) // divisor) * divisor
-        if (patch == 0).any():
-            raise ValueError(f"patch_size {list(patch_size)} is smaller than the preset model's total stride {list(divisor)}")
-        num_pool = (strides > 1).sum(axis=0)
-        return list(num_pool), self.preset_model["strides"], self.preset_model["conv_kernels"], patch, divisor
 
     def process_properties(self):
         counts = Counter(label for _, labels, _ in self.cases for label in labels)
@@ -200,29 +104,84 @@ class LBDBoxC002(BoxC002):
             "torch_version": str(torch.__version__),
         }
 
-    def fit_lbd(self):  #AI
-        """Resolve patch, batch and model for the plan; presets are kept unless GPU memory or strides force a change."""
+    def _prepare(self):  #AI
+        """BoxC002's default settings (batch 4), the box properties and the class weights."""
         self.create_default_settings()
         self.process_properties()
-        class_weight = self.compute_class_weights()
-        self.architecture_kwargs["class_weight"] = class_weight
+        self.architecture_kwargs["class_weight"] = self.compute_class_weights()
+
+    def fit_lbd(self):  #AI
+        """nnDetection's patch, batch (4) and model, with anchors, for the LBD crops."""
+        self._prepare()
         median_shape = np.median([shape for _, _, shape in self.cases], axis=0)
         gpu_metadata = self._check_planning_gpu()
         patch = [int(value) for value in self._plan_architecture(self.spacing, median_shape, self.transpose_forward)]
-        if self.preset_model is None:
-            anchors = self._plan_anchors(
-                target_spacing_transposed=self.spacing, transpose_forward=self.transpose_forward
-            )
-            model = {
-                "conv_kernels": self.architecture_kwargs["conv_kernels"],
-                "strides": self.architecture_kwargs["strides"],
-                "decoder_levels": self.architecture_kwargs["decoder_levels"],
-                "anchors": anchors,
-            }
-        else:
-            model = self.preset_model
+        anchors = self._plan_anchors(target_spacing_transposed=self.spacing, transpose_forward=self.transpose_forward)
+        model = {
+            "conv_kernels": self.architecture_kwargs["conv_kernels"],
+            "strides": self.architecture_kwargs["strides"],
+            "decoder_levels": self.architecture_kwargs["decoder_levels"],
+            "anchors": anchors,
+        }
         fit = {
-            "plan_train": {"patch_size": patch, "batch_size": int(self.batch_size), "model": model, "fg_labels": self.labels},
-            "fit": {"class_weight": class_weight, "estimator": gpu_metadata},
+            "plan_train": {"patch_size": patch, "batch_size": int(self.batch_size), "model": model},
+            "fit": {"class_weight": self.architecture_kwargs["class_weight"], "estimator": gpu_metadata},
         }
         return fit
+
+    def memory_estimate(self, patch, batch, model):  #AI
+        """Bytes nnDetection's estimator measures for training the fixed `model` (kernels, strides, decoder levels, anchors) on `patch` at `batch`."""
+        self._prepare()
+        self.architecture_kwargs.update(
+            conv_kernels=model["conv_kernels"], strides=model["strides"], decoder_levels=tuple(model["decoder_levels"])
+        )
+        self.estimator.batch_size = batch
+        estimate, _ = self.estimator.estimate(
+            min_shape=np.prod(model["strides"], axis=0),
+            target_shape=patch,
+            in_channels=self.architecture_kwargs["in_channels"],
+            network=self.network_cls.from_config_plan(
+                model_cfg=self.model_cfg, plan_arch=self.architecture_kwargs, plan_anchors=model["anchors"]
+            ),
+            optimizer_cls=torch.optim.Adam,
+            num_instances=self._estimte_num_instances_per_patch(
+                patch_size=patch, target_spacing_transposed=self.spacing, transpose_forward=self.transpose_forward
+            ),
+        )
+        return estimate
+
+
+def fit_plan(project, maker, plan, index, refit):  #AI
+    """det3d, at training start on GPU `index`: BoxC002 fit of the row's linked `auto` keys into the plan file; all-fixed rows get a memory estimate.
+
+    lbd plans only. One fit is kept per GPU memory class (`FitStore`): a changed row or changed LBD crops and boxes stop
+    the run until `refit`. A fit refuses a busy GPU.
+    """
+    row = maker.read_plan(plan["plan_name"])  # the sheet row, never a loaded fit
+    linked = LinkedConfigKeys(row)
+    if plan["mode"] != "lbd":
+        if linked.to_fit:
+            raise ValueError(f"Plan {plan['plan_name']}: {linked.to_fit} are fitted by BoxC002 in mode lbd only, not {plan['mode']}")
+        cprint(f"plan {plan['plan_name']} ({maker.PIPELINE}): no memory estimate in mode {plan['mode']} (BoxC002 reads lbd crops)", color="yellow")
+        return
+    lbd_folder = FolderNames(project, plan).lbd_folder
+    details = selected_lbd_details(lbd_folder, [case_id for _, case_id in plan_cases(project, plan)])
+    gpu = planning_budget("det", index=index)
+    planner = LBDBoxC002.from_lbd(maker.configs, lbd_folder, details, plan["spacing"], gpu, index)
+    if not linked.to_fit:
+        check_fixed_memory(
+            plan["plan_name"], maker.PIPELINE, row["patch_size"], row["batch_size"], gpu,
+            lambda patch, batch: planner.memory_estimate(patch, batch, row["model"]),
+        )
+        return
+
+    def fit():
+        fitted = planner.fit_lbd()
+        plan_train = {key: fitted["plan_train"][key] for key in linked.to_fit}
+        plan_train["val_patch_size"] = maker.resolved_val_patch_size(row, plan_train["patch_size"])
+        return plan_train, fitted["fit"]
+
+    store = FitStore(project, plan["plan_name"], maker.PIPELINE)
+    entry, fitted_now = store.fit({key: row[key] for key in linked.to_fit}, gpu["gpu_key"], lbd_input_key(lbd_folder, details), fit, refit, index)
+    linked.report(plan["plan_name"], maker.PIPELINE, entry["plan_train"])
+    append_center_ranges(lbd_folder, entry["plan_train"]["patch_size"], plan["prezoom_scale"], fitted_now)

@@ -166,46 +166,6 @@ def test_detection_reuses_saved_values_by_plan_id(tmp_path):
         assert edited.configs["plan_train"][key] == value
 
 
-def test_boxc002_preset_model_strides_round_a_patch_down():  #AI
-    """A preset model's total stride rounds the patch down to a multiple of it."""
-    from det3d.planning.c002 import LBDBoxC002
-
-    planner = object.__new__(LBDBoxC002)
-    planner.preset_model = MODEL
-    planner.preset_patch = None
-    _, strides, kernels, patch, divisor = planner.plan_pool_and_conv_pool_late([102, 99, 51], [1, 1, 2])
-    assert list(patch) == [100, 96, 50]
-    assert list(divisor) == [4, 4, 2]
-    assert strides == MODEL["strides"] and kernels == MODEL["conv_kernels"]
-    planner.preset_patch = [128, 128, 65]
-    with pytest.raises(ValueError) as error:
-        planner.plan_pool_and_conv_pool_late(planner.preset_patch, [1, 1, 2])
-    assert str(error.value) == "[128, 128, 65] is not an elementwise multiple of [4, 4, 2] in dim 2"
-
-
-
-def test_boxc002_fixed_patch_keeps_the_patch_and_fits_only_an_auto_batch():  #AI
-    """Fixed patch: the patch is untouched; an auto batch is lowered until it fits; a fixed batch stays."""
-    from det3d.planning.c002 import LBDBoxC002
-
-    planner = object.__new__(LBDBoxC002)
-    planner.preset_patch = [64, 64, 32]
-    planner.preset_batch = None
-    planner.batch_size = 4
-    planner.num_decoder_level, planner.min_decoder_level = 4, 2
-    planner.architecture_kwargs = {}
-    planner.estimator = SimpleNamespace(batch_size=4)
-    planner.cases = [(None, [1], (64, 64, 32))] * 10
-    planner.plan_pool_and_conv_pool_late = lambda p, s: (None, [[2, 2, 2]] * 3, [[3, 3, 3]] * 4, np.asarray(p), None)
-    planner._fits_at_batch = lambda batch, patch: batch <= 2
-    patch = planner._plan_architecture([1, 1, 1], [64, 64, 32], [0, 1, 2])
-    assert list(patch) == [64, 64, 32] and planner.batch_size == 2
-    assert planner.architecture_kwargs["decoder_levels"] == (1, 2, 3)
-    planner.preset_batch, planner.batch_size = 8, 8
-    assert list(planner._plan_architecture([1, 1, 1], [64, 64, 32], [0, 1, 2])) == [64, 64, 32]
-    assert planner.batch_size == 8
-
-
 def test_fixed_spacing_worker_accepts_missing_legacy_stats(tmp_path, monkeypatch):  #AI
     """Skip legacy intensity keys when resampling raw HU values."""
     monkeypatch.setattr("fran.preprocessing.rayworker_base.RayWorkerBase.__init__", lambda *a, **kw: None)
@@ -229,59 +189,48 @@ def test_plan_rejects_datasources_sharing_one_preprocessing_alias(monkeypatch): 
 
 
 @pytest.mark.parametrize("workbook_patch", ["auto", [24, 24, 8]])
-def test_detection_planning_updates_intensity_and_preserves_the_fit(tmp_path, monkeypatch, workbook_patch):  #AI
-    """Keep the early spacing record and add intensity to a compatible BoxC002 fit."""
-    from det3d.planning.c002 import LBDBoxC002
+def test_detection_planning_stores_intensity_and_labels_and_leaves_the_fits(tmp_path, monkeypatch, workbook_patch):  #AI
+    """Spacing is stored with its row value; plan_detection adds intensity, box labels and data key, never a fit."""
     from fran.run.preproc import analyze_resample
     from fran.run.preproc.analyze_resample import configure_plan
 
     plan = {"mode": "lbd", "plan_name": 1, "spacing": [1, 1, 2], "prezoom_scale": 1.0, "patch_size": workbook_patch,
-            "batch_size": "auto", "model": "auto", "val_patch_size": "auto"}
-    project = SimpleNamespace(project_folder=tmp_path)
+            "batch_size": 2 if workbook_patch != "auto" else "auto", "model": MODEL if workbook_patch != "auto" else "auto",
+            "val_patch_size": "auto"}
+    project = SimpleNamespace(project_folder=tmp_path, project_title="t")
     maker = SimpleNamespace(
         PIPELINE=parser.ConfigMakerDet.PIPELINE,
-        setup=lambda plan_id, load_computed, gpu_key: None,
+        setup=lambda plan_id, load_computed=True, gpu_key=None: None,
         configs={f"plan_{key}": dict(plan) for key in ("train", "valid", "test")} | {"model_params": dict(MODEL_PARAMS)},
     )
-    configs = configure_plan(project, maker, 1, pipeline="det")
+    configs = configure_plan(project, maker, 1, False, False, pipeline="det")
     pkl = tmp_path / "plans" / "det3d_plan1.pkl"
-    spacing_only = pickle.loads(pkl.read_bytes())
-    assert spacing_only == {"plan_train": {"spacing": [1, 1, 2]}}
-    configs["plan_train"]["spacing"] = [2, 2, 2]
-    configure_plan(project, maker, 1, pipeline="det")
-    assert pickle.loads(pkl.read_bytes()) == {"plan_train": {"spacing": [1, 1, 2]}}
-    resolved = {
-        "plan_train": {"spacing": [1, 1, 2], "fg_labels": [2]},
-        "fits": {"m32": {"plan_train": {"patch_size": [16, 16, 8]}, "fit": {"input_key": "measured boxes"}}},
-    }
-    pkl.write_bytes(pickle.dumps(resolved))
+    spacing_only = {"plan_train": {"spacing": [1, 1, 2]}, "spacing_fit": {"row": {"spacing": [1, 1, 2]}, "input_key": None}}
+    assert pickle.loads(pkl.read_bytes()) == spacing_only
+    fits = {"m32": {"plan_train": {"patch_size": [16, 16, 8]}, "fit": {"input_key": "measured boxes", "row": {}}}}
+    pkl.write_bytes(pickle.dumps(dict(spacing_only, fits=fits)))
     intensity = {"mean": 1.0, "sd": 0.5, "percentile_00_5": 0.1, "percentile_99_5": 1.9}
     monkeypatch.setattr(analyze_resample, "plan_intensity_properties", lambda p, s: (intensity, [2]))
     monkeypatch.setattr(analyze_resample, "plan_cases", lambda p, plan: [])
-    monkeypatch.setattr(analyze_resample, "selected_lbd_details", lambda folder, case_ids: None)
+    monkeypatch.setattr(analyze_resample, "selected_lbd_details", lambda folder, case_ids: pd.DataFrame({"case_id": ["a", "b"]}))
     monkeypatch.setattr(analyze_resample, "lbd_input_key", lambda folder, details: "measured boxes")
-    monkeypatch.setattr(
-        LBDBoxC002, "planning_gpu", staticmethod(lambda: {"name": "card", "gpu_key": "m32", "budget": 1})
-    )
-    append_ranges = Mock()
-    monkeypatch.setattr(analyze_resample, "append_center_ranges", append_ranges)
+    monkeypatch.setattr(analyze_resample, "lbd_box_records", lambda folder, row: (None, [2, 2]))
+    monkeypatch.setattr(parser.ConfigMakerDet, "__init__", lambda self, project: None)
+    monkeypatch.setattr(parser.ConfigMakerDet, "read_plan", lambda self, plan_id: dict(plan))
     manager = object.__new__(analyze_resample.PreprocessingManager)
     manager.project, manager.configs, manager.L = project, configs, SimpleNamespace(output_folder=tmp_path)
     output = manager.plan_detection()
     assert output == pickle.loads(pkl.read_bytes())
-    assert output == dict(
-        resolved,
-        plan_train=dict(resolved["plan_train"], intensity_properties=intensity),
-        fit={"input_key": "measured boxes", "histogram_labels": [2]},
-        fits={"m32": {"plan_train": {"patch_size": [16, 16, 8], "val_patch_size": [16, 16, 8]}, "fit": {"input_key": "measured boxes"}}},
-    )
-    append_ranges.assert_called_once_with(tmp_path, [16, 16, 8], 1.0, False)
+    plan_train = {"spacing": [1, 1, 2], "intensity_properties": intensity, "fg_labels": [2]}
+    if workbook_patch != "auto":
+        plan_train["val_patch_size"] = [24, 24, 8]
+    assert output == dict(spacing_only, fits=fits, plan_train=plan_train,
+                          fit={"input_key": "measured boxes", "histogram_labels": [2]})
     calls = Mock(side_effect=lambda p, s: (intensity, [2]))
     monkeypatch.setattr(analyze_resample, "plan_intensity_properties", calls)
-    configs["plan_train"]["val_patch_size"] = [64, 64, 64]
     assert manager.plan_detection() == output
     calls.assert_not_called()
-    pkl.write_bytes(pickle.dumps(resolved))
+    pkl.write_bytes(pickle.dumps(dict(spacing_only, fits=fits)))
     before = pkl.read_bytes()
     monkeypatch.setattr(analyze_resample, "plan_intensity_properties", lambda p, s: (intensity, [3]))
     with pytest.raises(ValueError, match="ambiguous detection foreground"):
@@ -309,20 +258,3 @@ def test_detection_base_builds_transforms_without_legacy_intensity_keys():  #AI
     image = torch.tensor([-3.0, 1.0, 10.0])
     output = manager.transforms_dict["N"]({"image": image})["image"]
     assert torch.equal(output, torch.tensor([-2.0, 0.0, 2.0]))
-
-
-def test_boxc002_grows_the_batch_at_the_patch_cap_up_to_dataset_coverage():  #AI
-    """The batch rises while the patch still fits, and stops at 5% dataset coverage."""
-    from det3d.planning.c002 import LBDBoxC002
-
-    planner = object.__new__(LBDBoxC002)
-    planner.estimator = SimpleNamespace(batch_size=4)
-    planner.batch_size = 4
-    planner.cases = [(None, [1], (100, 100, 100))] * 20
-    planner._fits_at_batch = lambda batch, patch: batch <= 6
-    planner._grow_batch([20, 20, 20])
-    assert planner.batch_size == 6 and planner.estimator.batch_size == 6
-    planner.batch_size = 4
-    planner._fits_at_batch = lambda batch, patch: True
-    planner._grow_batch([50, 50, 50])
-    assert planner.batch_size == 8
