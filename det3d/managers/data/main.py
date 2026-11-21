@@ -156,9 +156,6 @@ class DataManagerDet(DataManager):
     def _valid_impl(self):
         return self.dataset_params["valid_impl"]
 
-    def set_effective_batch_size(self):
-        self.effective_batch_size = self.batch_size
-
     def _size_divisible(self):
         from det3d.architectures.create_detector import size_divisible_from_conf
 
@@ -445,14 +442,6 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
         if not manifest_fn.is_file():
             raise FileNotFoundError(f"Missing manifest.json under {data_folder}")
         return data_folder
-
-    def set_effective_batch_size(self):
-        spf = int(self.plan["samples_per_file"])
-        assert self.batch_size % spf == 0, (
-            f"batch_size {self.batch_size} must be divisible by "
-            f"samples_per_file {spf}"
-        )
-        self.effective_batch_size = self.batch_size // spf
 
     def cases_from_project_split(self):
         self._shard_cases_from_project_split()
