@@ -75,6 +75,7 @@ class DataManagerDet(DataManager):
     lm_key = "lm"
     keys_tr_batch = None
     keys_val_batch = None
+    AUGMENT_VALUES = ("monai",)  # future: nnDetection's base_more preset
 
     def __init__(
         self,
@@ -143,6 +144,17 @@ class DataManagerDet(DataManager):
             raise ValueError(f"Unknown box_tracker {name!r}. Choose from {tuple(BOX_TRACKERS)}")
         self.box_tracker_name = name
         self.box_tracker = BOX_TRACKERS[name](self.box_key, self.label_key, self.image_key)
+
+    def augment(self):
+        """det3d's own `augment` row (det workbook data_params, merged over FRAN's dataset_params).
+        `monai` = det3d's MONAI flip, affine and intensity transforms (`keys_tr`); FRAN's nnU-Net path stays off."""
+        augment = self.dataset_params["augment"]
+        if augment not in self.AUGMENT_VALUES:
+            raise ValueError(
+                f"det3d dataset_params.augment = {augment!r} is not allowed; allowed: {self.AUGMENT_VALUES}. "
+                "Fix: set augment to monai in configurations/experiment_configs_det.xlsx, sheet data_params"
+            )
+        return augment
 
     def uses_tracker_lm(self):  #AI
         """Load the semantic map for RetinaUNet or hull filtering."""
