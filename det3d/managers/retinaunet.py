@@ -72,10 +72,12 @@ class RetinaUNetManager(LightningModule):
         model_cfg, trainer_cfg = RetinaUNetManager.nndet_cfgs(configs)
         plan = RetinaUNetManager.plan_from_det3d(configs)
         if "nnfoundation" in configs:
-            from det3d.detection.nnfoundation_encoder import RetinaUNetV001NNF, load_nnfoundation_weights
+            from fran.architectures.nnfoundation import load_nnfoundation_encoder, nnfoundation_checkpoint
+
+            from det3d.detection.nnfoundation_encoder import RetinaUNetV001NNF
 
             module = RetinaUNetV001NNF(model_cfg=model_cfg, trainer_cfg=trainer_cfg, plan=plan)
-            load_nnfoundation_weights(module, configs)
+            load_nnfoundation_encoder(module.model.encoder, nnfoundation_checkpoint(configs))
         else:
             from nndet.ptmodule.retinaunet.v001 import RetinaUNetV001
 
