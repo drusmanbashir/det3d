@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""FRAN localiser + RetinaUNet cascade inference."""
+"""Standalone file-input FRAN localiser and RetinaUNet cascade inference.
+Requires --run-w: stock TotalSegmentator is not integrated. Helpers live in
+_infer_common.py; fran/run/inference/infer.py also uses the cascade class.
+"""
 import argparse
 
 from det3d.inference.cascade import DetSegBBoxCascadeInferer as CascadeInferer

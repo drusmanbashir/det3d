@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+"""Standalone file-input RetinaNet/RetinaUNet cascade or pre-cropped LBD inference.
+Cascade input requires --run-w: stock TotalSegmentator is not integrated;
+LBD input needs no localiser. Helpers live in _infer_common.py; the cascade
+classes are also used by fran/run/inference/infer.py.
+"""
 import argparse
 from pathlib import Path
 

@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Shared helpers for det3d inference CLIs."""
+"""Resolve runs, input images and localiser labels for infer_det.py and infer_cascade.py.
+Stock TotalSegmentator is not integrated for detection; default_run_w raises,
+so cascade inference must supply --run-w with a FRAN localiser run.
+"""
 from pathlib import Path
 
 from label_analysis.totalseg import TotalSegmenterLabels
