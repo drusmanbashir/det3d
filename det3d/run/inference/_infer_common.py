@@ -7,19 +7,11 @@ from label_analysis.totalseg import TotalSegmenterLabels
 from fran.data.dataregistry import DS
 from fran.inference.helpers import load_params
 from fran.run.inference.infer import get_run_row, tsl_label_loc
-from fran.utils.common import COMMON_PATHS
-from utilz.fileio import load_yaml
 
 
 
 def default_run_w(run_p=None):
-    cs = COMMON_PATHS["cold_storage_folder"]
-    best_runs = load_yaml(Path(cs) / "conf" / "best_runs.yaml")
-    if run_p is not None:
-        mnemonic = load_params(run_p)["configs"]["mnemonic"]
-        if mnemonic == "bones":
-            return best_runs["totalseg"]["full"]["runs"][0]
-    return best_runs["totalseg"]["whole"]["runs"][0]
+    raise ValueError("det3d does not yet support the default TotalSegmentator localiser; pass --run-w explicitly to use a FRAN localiser")
 
 
 def resolve_input_images(folder, datasets):
