@@ -68,12 +68,18 @@ class RetinaUNetManager(LightningModule):
 
     @staticmethod
     def build_nndet_module(configs):  #AI
-        """nnDetection RetinaUNetV001 and the plan it is built from."""
+        """nnDetection RetinaUNetV001 and the plan it is built from; an `nnfoundation` config swaps in the pretrained residual encoder."""
         from nndet.ptmodule.retinaunet.v001 import RetinaUNetV001
+
+        from det3d.detection.nnfoundation_encoder import RetinaUNetV001NNF, load_nnfoundation_weights
 
         model_cfg, trainer_cfg = RetinaUNetManager.nndet_cfgs(configs)
         plan = RetinaUNetManager.plan_from_det3d(configs)
-        module = RetinaUNetV001(model_cfg=model_cfg, trainer_cfg=trainer_cfg, plan=plan)
+        foundation = "nnfoundation" in configs
+        module_cls = RetinaUNetV001NNF if foundation else RetinaUNetV001
+        module = module_cls(model_cfg=model_cfg, trainer_cfg=trainer_cfg, plan=plan)
+        if foundation:
+            load_nnfoundation_weights(module, configs)
         module.seg_evaluator = SegmentationEvaluatorTorch.create()
         return module, plan
 

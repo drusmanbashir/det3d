@@ -60,6 +60,7 @@ Detection LBD preprocessing uses `fran/run/preproc/analyze_resample.py --pipelin
 - `retinanet_train.py` — `forward_train_batched`: training loss on DM-prebatched tensors (no detector preprocess)
 - `loss_config.py` — `apply_detector_loss_plan`, `apply_detector_sampler_plan` from plan columns
 - `retinaunet_network.py` — `build_retinaunet_feature_extractor` (nnDetection encoder/UFPN vendored)
+- `nnfoundation_encoder.py` — `ResEncEncoder` (nnU-Net residual encoder on the plan's kernels/strides, nnDetection encoder interface), `RetinaUNetV001NNF`, `load_nnfoundation_weights` (`--pipeline det-fm`)
 - `NNDET_PORT.md` — provenance and MONAI-first decision table
 
 ## det/collate
@@ -77,7 +78,7 @@ Detection LBD preprocessing uses `fran/run/preproc/analyze_resample.py --pipelin
 
 ## run/training
 
-- `train.py` — shim → `fran/run/training/train.py` (prepends `--pipeline det` when omitted; `TrainerDet` / `TrainerDetTransfer`); standard: `--project lidca --plan 4 --arch retinaunet`; transfer: `--transfer true --run-name {source_run} --arch retinaunet --source-ckpt last`; also `--run-through`, `--resume-lr`, `--batch-tfms`
+- `train.py` — shim → `fran/run/training/train.py` (prepends `--pipeline det` when omitted; `--pipeline det-fm` = RetinaUNet with the nnFoundationCNN encoder; `TrainerDet` / `TrainerDetTransfer`); standard: `--project lidca --plan 4 --arch retinaunet`; transfer: `--transfer true --run-name {source_run} --arch retinaunet --source-ckpt last`; also `--run-through`, `--resume-lr`, `--batch-tfms`
 - `train_det.sh` — HPC Slurm det training (`train_retry.py --pipeline det`); defaults bones plan 1, retinanet, run-through, 500 epochs
 - `local_train_det.sh` — local det training via `train.py` shim (PYTHONPATH + bones defaults)
 - `submit_train_det.sh` — HPC submit wrapper (optional)
