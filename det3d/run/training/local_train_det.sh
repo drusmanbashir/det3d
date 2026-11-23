@@ -10,7 +10,7 @@ export PYTHONPATH="/home/ub/code/fran:/home/ub/code/det3d:/home/ub/code/label_an
 PROJECT="${1:-bones}"
 PLAN_NUM="${2:-1}"
 DEVICES="${3:-0}"
-BS="${4:-4}"
+BS="${4:-}"
 EPOCHS="${5:-}"
 FOLD="${6:-0}"
 COMPILED="${7:-false}"
@@ -24,7 +24,7 @@ DS_TYPE="${14:-}"
 RUN_THROUGH="${15:-true}"
 VAL_EVERY_N_EPOCHS="${16:-1}"
 TRAIN_INDICES="${17:-}"
-BSF="${18:-true}"
+BSF="${18:-false}"
 DUAL_SSD="${19:-false}"
 BATCH_TFMS="${20:-true}"
 SNAPSHOT_FREQ="${21:-100}"
@@ -41,7 +41,6 @@ argv=(
   --project "${PROJECT}"
   --plan-num "${PLAN_NUM}"
   --devices "${DEVICES}"
-  --bs "${BS}"
   --fold "${FOLD}"
   --compiled "${COMPILED}"
   --profiler "${PROFILER}"
@@ -58,6 +57,9 @@ argv=(
   --dual-ssd "${DUAL_SSD}"
 )
 
+if [[ -n "${BS}" ]]; then
+  argv+=(--bs "${BS}")
+fi
 if [[ -n "${EPOCHS}" ]]; then
   argv+=(--epochs "${EPOCHS}")
 fi

@@ -9,6 +9,7 @@ PROJECT="${1:-bones}"
 PLAN_NUM="${2:-1}"
 ARCH="${3:-retinanet}"
 EPOCHS="${4:-}"
+BS="${5:-}"
 
 argv=(
   "${HPC_CLI}/hpc_submit_poll_fetch.sh"
@@ -16,7 +17,7 @@ argv=(
   "${PROJECT}"
   "${PLAN_NUM}"
   0
-  4
+  "${BS}"
   "${EPOCHS}"
   0
   false
@@ -30,7 +31,7 @@ argv=(
   true
   1
   ""
-  true
+  false
   false
   3
   1

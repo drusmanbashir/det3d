@@ -25,7 +25,7 @@ conda activate dl
 PROJECT="${1:-bones}"
 PLAN_NUM="${2:-1}"
 DEVICES="${3:-0}"
-BS="${4:-4}"
+BS="${4:-}"
 EPOCHS="${5:-}"
 FOLD="${6:-0}"
 COMPILED="${7:-false}"
@@ -39,7 +39,7 @@ DS_TYPE="${14:-}"
 RUN_THROUGH="${15:-true}"
 VAL_EVERY_N_EPOCHS="${16:-1}"
 TRAIN_INDICES="${17:-}"
-BSF="${18:-true}"
+BSF="${18:-false}"
 DUAL_SSD="${19:-false}"
 MAX_RETRIES="${20:-3}"
 STEP="${21:-1}"
@@ -61,7 +61,6 @@ cmd=(
   --project "$PROJECT"
   --plan-num "$PLAN_NUM"
   --devices "$DEVICES"
-  --bs "$BS"
   --fold "$FOLD"
   --compiled "$COMPILED"
   --profiler "$PROFILER"
@@ -81,6 +80,9 @@ cmd=(
   --min-bs "$MIN_BS"
 )
 
+if [[ -n "$BS" ]]; then
+  cmd+=(--bs "$BS")
+fi
 if [[ -n "$EPOCHS" ]]; then
   cmd+=(--epochs "$EPOCHS")
 fi

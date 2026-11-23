@@ -12,8 +12,8 @@ class ConfigMakerDet(ConfigMaker):
     ENCODERS = (None, "resenc")
     FINETUNING_KEYS = ("checkpoint", "initial_lr", "momentum", "nesterov", "weight_decay", "warm_iterations", "warm_lr", "poly_gamma")
     SKIP_SHEETS = frozenset({"plans", "plans_dot", "legend"})
-    FIT_KEYS = ("spacing", "fg_labels", "intensity_properties", "val_patch_size")  # val_patch_size: non-lbd plans
-    GPU_FIT_KEYS = ("patch_size", "val_patch_size", "batch_size", "model")
+    FIT_KEYS = ("spacing", "fg_labels", "intensity_properties")
+    GPU_FIT_KEYS = ("patch_size", "batch_size", "model")
 
     @staticmethod
     def resolved_val_patch_size(plan, patch_size):  #AI
@@ -32,12 +32,16 @@ class ConfigMakerDet(ConfigMaker):
 
     def setup(
         self, plan_train, plan_valid=None, load_computed=True, gpu_key=None, *,
-        load_gpu_fit=True, epochs=None,
+        load_gpu_fit=True, epochs=None, batch_size=None, patch_size=None,
     ):
         super().setup(
             plan_train, plan_valid, load_computed=load_computed, gpu_key=gpu_key,
-            load_gpu_fit=load_gpu_fit, epochs=epochs,
+            load_gpu_fit=load_gpu_fit, epochs=epochs, batch_size=batch_size, patch_size=patch_size,
         )
+        for split in ("plan_train", "plan_valid", "plan_test"):
+            plan = self.configs[split]
+            if not is_unspecified(plan["patch_size"]):
+                plan["val_patch_size"] = self.resolved_val_patch_size(plan, plan["patch_size"])
         plan = self.configs["plan_train"]
         for sheet, keys in self.PLAN_OVERRIDES.items():
             for key in keys:

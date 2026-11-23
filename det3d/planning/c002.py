@@ -9,6 +9,7 @@ from utilz.cprint import cprint
 
 from fran.architectures.nnunet import encoder_widths
 from fran.configs.defaults import plan_gpu_buffer_mb
+from fran.configs.helpers import is_unspecified
 from fran.nn_compat.fit_store import FitStore
 from fran.nn_compat.gpu_memory import check_fixed_memory, check_planning_gpu, planning_budget
 from fran.nn_compat.linked_config_keys import LinkedConfigKeys
@@ -31,7 +32,7 @@ BYTES_PER_MB = 1024**2
 
 
 class LBDBoxC002(BoxC002):
-    """Run nnDetection's architecture and anchor algorithms on FRAN label-bounded crops: batch 4, the patch adapts."""
+    """Run BoxC002 on FRAN label-bounded crops with the plan's fixed values."""
 
     @staticmethod
     def trial_model_cfg(configs):  #AI
@@ -112,33 +113,65 @@ class LBDBoxC002(BoxC002):
         self.process_properties()
         self.architecture_kwargs["class_weight"] = self.compute_class_weights()
 
-    def fit_lbd(self):  #AI
-        """nnDetection's patch, batch (4) and model, with anchors, for the LBD crops."""
+    def fit_lbd(self, linked):
+        """Fit the automatic patch, batch or model on the LBD crops."""
         self._prepare()
-        median_shape = np.median([shape for _, _, shape in self.cases], axis=0)
         gpu_metadata = self._check_planning_gpu()
-        patch = [int(value) for value in self._plan_architecture(self.spacing, median_shape, self.transpose_forward)]
-        anchors = self._plan_anchors(target_spacing_transposed=self.spacing, transpose_forward=self.transpose_forward)
-        model = {
-            "conv_kernels": self.architecture_kwargs["conv_kernels"],
-            "strides": self.architecture_kwargs["strides"],
-            "decoder_levels": self.architecture_kwargs["decoder_levels"],
-            "anchors": anchors,
-        }
+        patch, batch, model = (linked.row[key] for key in ("patch_size", "batch_size", "model"))
+        if batch != "auto":
+            self.batch_size = batch
+        if is_unspecified(patch):
+            median_shape = np.median([shape for _, _, shape in self.cases], axis=0)
+            try:
+                patch = [int(value) for value in self._plan_architecture(self.spacing, median_shape, self.transpose_forward)]
+            except (ValueError, RuntimeError, AssertionError, IndexError) as exc:
+                raise ValueError(f"Plan {linked.row['plan_name']}: BoxC002 cannot fit {linked.describe()}") from exc
+            model = self.planned_model()
+        else:
+            if is_unspecified(model):
+                _, strides, kernels, _, _ = self.plan_pool_and_conv_pool_late(patch, self.spacing)
+                levels = len(kernels)
+                start = min(max(1, levels - self.num_decoder_level), self.min_decoder_level)
+                self.architecture_kwargs.update(conv_kernels=kernels, strides=strides, decoder_levels=tuple(range(start, levels)))
+                model = self.planned_model()
+            stride = np.prod(model["strides"], axis=0)
+            if np.any(np.asarray(patch) % stride):
+                raise ValueError(f"Plan {linked.row['plan_name']}: {linked.describe()} requires patch divisible by {stride.tolist()}")
+            batches = range(self.batch_size, 0, -1) if batch == "auto" else (batch,)
+            for candidate in batches:
+                _, fits = self.estimate(patch, candidate, model)
+                if fits:
+                    self.batch_size = candidate
+                    break
+            else:
+                raise ValueError(
+                    f"Plan {linked.row['plan_name']}: BoxC002 cannot fit {linked.describe()} "
+                    f"in {self.estimator.target_mem} bytes"
+                )
         fit = {
             "plan_train": {"patch_size": patch, "batch_size": int(self.batch_size), "model": model},
             "fit": {"class_weight": self.architecture_kwargs["class_weight"], "estimator": gpu_metadata},
         }
         return fit
 
-    def memory_estimate(self, patch, batch, model):  #AI
-        """Bytes nnDetection's estimator measures for training the fixed `model` (kernels, strides, decoder levels, anchors) on `patch` at `batch`."""
+    def planned_model(self):
+        anchors = self._plan_anchors(target_spacing_transposed=self.spacing, transpose_forward=self.transpose_forward)
+        model = {key: self.architecture_kwargs[key] for key in ("conv_kernels", "strides", "decoder_levels")}
+        model["anchors"] = anchors
+        return model
+
+    def memory_estimate(self, patch, batch, model):
+        """Measure the fixed architecture's memory at the requested patch and batch."""
         self._prepare()
+        estimate, _ = self.estimate(patch, batch, model)
+        return estimate
+
+    def estimate(self, patch, batch, model):
         self.architecture_kwargs.update(
             conv_kernels=model["conv_kernels"], strides=model["strides"], decoder_levels=tuple(model["decoder_levels"])
         )
         self.estimator.batch_size = batch
-        estimate, _ = self.estimator.estimate(
+        estimate = self.estimator.estimate(
             min_shape=np.prod(model["strides"], axis=0),
             target_shape=patch,
             in_channels=self.architecture_kwargs["in_channels"],
@@ -153,37 +186,42 @@ class LBDBoxC002(BoxC002):
         return estimate
 
 
-def fit_plan(project, maker, plan, index, refit):  #AI
+def fit_plan(project, maker, plan, index, refit, *, batch_size=None, patch_size=None):  #AI
     """det3d, at training start on GPU `index`: BoxC002 fit of the row's linked `auto` keys into the plan file; all-fixed rows get a memory estimate.
 
     lbd plans only. One fit is kept per GPU memory class (`FitStore`): a changed row or changed LBD crops and boxes stop
     the run until `refit`. A fit refuses a busy GPU.
     """
-    row = maker.read_plan(plan["plan_name"])  # the sheet row, never a loaded fit
+    gpu = planning_budget("det", index=index)
+    row, fit_slot, overrides = maker.gpu_fit_request(
+        plan["plan_name"], gpu["gpu_key"], batch_size=batch_size, patch_size=patch_size,
+    )
     linked = LinkedConfigKeys(row)
     if plan["mode"] != "lbd":
         if linked.to_fit:
-            raise ValueError(f"Plan {plan['plan_name']}: {linked.to_fit} are fitted by BoxC002 in mode lbd only, not {plan['mode']}")
+            raise ValueError(f"Plan {plan['plan_name']}: mode {plan['mode']!r} cannot fit {linked.describe()}; BoxC002 requires lbd crops")
         cprint(f"plan {plan['plan_name']} ({maker.PIPELINE}): no memory estimate in mode {plan['mode']} (BoxC002 reads lbd crops)", color="yellow")
         return
     lbd_folder = FolderNames(project, plan).lbd_folder
     details = selected_lbd_details(lbd_folder, [case_id for _, case_id in plan_cases(project, plan)])
-    gpu = planning_budget("det", index=index)
     planner = LBDBoxC002.from_lbd(maker.configs, lbd_folder, details, plan["spacing"], gpu, index)
     if not linked.to_fit:
         check_fixed_memory(
             plan["plan_name"], maker.PIPELINE, row["patch_size"], row["batch_size"], gpu,
             lambda patch, batch: planner.memory_estimate(patch, batch, row["model"]),
         )
+        if "patch_size" in overrides:
+            append_center_ranges(lbd_folder, row["patch_size"], plan["prezoom_scale"], False)
         return
 
     def fit():
-        fitted = planner.fit_lbd()
+        fitted = planner.fit_lbd(linked)
         plan_train = {key: fitted["plan_train"][key] for key in linked.to_fit}
-        plan_train["val_patch_size"] = maker.resolved_val_patch_size(row, plan_train["patch_size"])
         return plan_train, fitted["fit"]
 
     store = FitStore(project, plan["plan_name"], maker.PIPELINE)
-    entry, fitted_now = store.fit(maker.gpu_fit_row(row), gpu["gpu_key"], lbd_input_key(lbd_folder, details), fit, refit, index)
-    linked.report(plan["plan_name"], maker.PIPELINE, entry["plan_train"])
-    append_center_ranges(lbd_folder, entry["plan_train"]["patch_size"], plan["prezoom_scale"], fitted_now)
+    entry, fitted_now = store.fit(
+        maker.gpu_fit_row(row), fit_slot, lbd_input_key(lbd_folder, details), fit, refit, index, overrides=overrides,
+    )
+    patch = entry["plan_train"].get("patch_size", row["patch_size"])
+    append_center_ranges(lbd_folder, patch, plan["prezoom_scale"], fitted_now)
