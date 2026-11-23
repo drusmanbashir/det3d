@@ -1,5 +1,6 @@
 from fran.configs.helpers import is_unspecified
 from fran.configs.parser import ConfigMaker
+from fran.configs.workbook import apply_finetuning, open_config_workbook
 
 
 class ConfigMakerDet(ConfigMaker):
@@ -7,6 +8,9 @@ class ConfigMakerDet(ConfigMaker):
 
     CONFIG_FILENAME = "experiment_configs_det.xlsx"
     PIPELINE = "det3d"  # names the plan file, `FolderNames.plan_file`
+    FM_PIPELINE = "det-fm"
+    ENCODERS = (None, "resenc")
+    FINETUNING_KEYS = ("checkpoint", "initial_lr", "momentum", "nesterov", "weight_decay", "warm_iterations", "warm_lr", "poly_gamma")
     SKIP_SHEETS = frozenset({"plans", "plans_dot", "legend"})
     FIT_KEYS = ("spacing", "fg_labels", "intensity_properties", "val_patch_size")  # val_patch_size: non-lbd plans
     GPU_FIT_KEYS = ("patch_size", "val_patch_size", "batch_size", "model")
@@ -27,19 +31,23 @@ class ConfigMakerDet(ConfigMaker):
         super().__init__(project, include_nnfoundation=include_nnfoundation)
         self.sheet_defaults = {sheet: self.configs[sheet].copy() for sheet in self.PLAN_OVERRIDES}
 
-    def setup(self, plan_train, plan_valid=None, load_computed=True, gpu_key=None):
-        super().setup(plan_train, plan_valid, load_computed=load_computed, gpu_key=gpu_key)
+    def setup(self, plan_train, plan_valid=None, load_computed=True, gpu_key=None, *, load_gpu_fit=True):
+        super().setup(plan_train, plan_valid, load_computed=load_computed, gpu_key=gpu_key, load_gpu_fit=load_gpu_fit)
         plan = self.configs["plan_train"]
         for sheet, keys in self.PLAN_OVERRIDES.items():
             for key in keys:
                 if key in self.plans.columns:
                     value = plan[key]
                     self.configs[sheet][key] = self.sheet_defaults[sheet].get(key) if value is None else value
+        if "finetuning" in self.configs:
+            apply_finetuning(self.configs)
 
-    def load_configs(self, path):
+    def load_configs(self, workbook):
         """Load the base fran sheets, then merge the det sheets over them (data_params into dataset_params)."""
-        configs = super().load_configs(self.resolve_configuration_filename().parent / ConfigMaker.CONFIG_FILENAME)
-        for key, val in super().load_configs(path).items():
+        base_path = self.resolve_configuration_filename().parent / ConfigMaker.CONFIG_FILENAME
+        with open_config_workbook(base_path) as base_workbook:
+            configs = super().load_configs(base_workbook)
+        for key, val in super().load_configs(workbook).items():
             configs.setdefault("dataset_params" if key == "data_params" else key, {}).update(val)
         return configs
 

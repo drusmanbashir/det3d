@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
+from fran.architectures.nnunet import encoder_widths
+from fran.configs.helpers import plan_encoder
 from det3d.detection.arch.nndet.blocks.basic import StackedConvBlock2
 from det3d.detection.arch.nndet.conv import ConvInstanceRelu, Generator
 from det3d.detection.arch.nndet.decoder.base import UFPNModular
@@ -57,20 +59,26 @@ class RetinaUNetFeatureExtractor(nn.Module):
 
 def build_retinaunet_feature_extractor(configs: dict) -> RetinaUNetFeatureExtractor:
     model_params = configs["model_params"]
+    plan = configs["plan_train"]
     model = plan_model(configs)
-    start_channels = int(model_params["encoder_start_channels"])
+    start_channels, max_channels = encoder_widths(model_params, plan)
     decoder_levels = tuple(model["decoder_levels"])
     conv = Generator(ConvInstanceRelu, int(model_params["spatial_dims"]))
-    encoder = Encoder(
-        conv=conv,
-        conv_kernels=model["conv_kernels"],
-        strides=model["strides"],
-        block_cls=StackedConvBlock2,
-        in_channels=int(model_params["in_channels"]),
-        start_channels=start_channels,
-        stage_kwargs=None,
-        max_channels=int(model_params["encoder_max_channels"]),
-    )
+    if plan_encoder(plan) == "resenc":
+        from det3d.detection.nnfoundation_encoder import ResEncEncoder
+
+        encoder = ResEncEncoder(int(model_params["in_channels"]), model["conv_kernels"], model["strides"])
+    else:
+        encoder = Encoder(
+            conv=conv,
+            conv_kernels=model["conv_kernels"],
+            strides=model["strides"],
+            block_cls=StackedConvBlock2,
+            in_channels=int(model_params["in_channels"]),
+            start_channels=start_channels,
+            stage_kwargs=None,
+            max_channels=max_channels,
+        )
     decoder = UFPNModular(
         conv=conv,
         conv_kernels=model["conv_kernels"],

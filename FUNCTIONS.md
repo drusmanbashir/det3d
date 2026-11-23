@@ -51,7 +51,7 @@ Detection LBD preprocessing uses `fran/run/preproc/analyze_resample.py --pipelin
 ## Libraries (import, not run)
 
 - Detection plan file `plans/det3d_plan<id>.pkl`. FRAN preprocessing stores spacing, intensity and foreground labels. BoxC002 stores GPU-specific patch, batch and model at training start.
-- `det3d/planning/c002.py` — `LBDBoxC002`, nnDetection's BoxC002 on LBD crops: measures the encoder used for training, including `planner=resenc`. Stores the fit by GPU memory class.
+- `det3d/planning/c002.py` — `LBDBoxC002`, nnDetection's BoxC002 on LBD crops: measures the encoder used for training, according to `plans.encoder`. Stores the fit by GPU memory class.
 - `det3d/transforms/box_tracker.py` — track LBD boxes through crops and spatial augmentation. The detection workbook defaults to `hull`, which uses `hull_xyz` and checks mask occupancy. `corner` warps box corners. `remeasure` rebuilds boxes from the warped `inst` map. For missing tracker data, rerun detection LBD with `--overwrite`.
 - `det3d/transforms/intensity.py` — share CT clipping across training and inference. `intensity_norm` defaults to `scale01` and also supports `zscore_fg`. Set `intensity_properties` in the workbook or fit them during detection preprocessing.
 
@@ -74,11 +74,11 @@ Detection LBD preprocessing uses `fran/run/preproc/analyze_resample.py --pipelin
 - `data/transforms.py` — HDF5 shard/crop/case loaders (`LoadHDF5Det*`), box-centred crops (`RandCropExtendedBBoxd`, `CropDetPatchd`, `BboxCenterCropSlicesd`), `PadDetPatchd`
 - `detector_factory.py` — `resolve_detector_manager`, `build_detector_manager` (retinanet | retinaunet)
 - `retinaunet.py` — `RetinaUNetManager`: nnDetection RetinaUNetV001 built from the nested configs (the only place nnDet's flat architecture dict is made); det3d batch → nnDet targets; nnDet loss logging
-- `det3d/managers/det_schedule.py` — SGD with step-based linear warmup and polynomial decay when the `nndet` sheet supplies `warm_iterations`. Blank selects ReduceLROnPlateau.
+- `det3d/managers/det_schedule.py` — SGD with step-based linear warmup and polynomial decay when the configuration supplies `warm_iterations`. For `det-fm`, the detection workbook’s `finetuning` sheet takes precedence. Blank selects ReduceLROnPlateau.
 
 ## run/training
 
-- `det3d/run/training/train.py` — shim → `fran/run/training/train.py` (prepends `--pipeline det` when omitted; `--pipeline det-fm` = RetinaUNet with the nnFoundationCNN encoder; `TrainerDet` / `TrainerDetTransfer`); standard `--project lidc --plan sota --pipeline det-fm`. Smoke overrides `--num-iterations-per-epoch` and `--limit-val-batches`; transfer: `--transfer true --run-name {source_run} --arch retinaunet --source-ckpt last`; also `--run-through`, `--resume-lr`, `--batch-tfms`
+- `det3d/run/training/train.py` — shim → `fran/run/training/train.py` (prepends `--pipeline det` when omitted; `--pipeline det-fm` requires `plans.encoder=resenc` and uses the detection workbook’s `finetuning` sheet; `TrainerDet` / `TrainerDetTransfer`); standard `--project lidc --plan sota --pipeline det-fm`. Smoke overrides `--num-iterations-per-epoch` and `--limit-val-batches`; transfer: `--transfer true --run-name {source_run} --arch retinaunet --source-ckpt last`; also `--run-through`, `--resume-lr`, `--batch-tfms`
 - `train_det.sh` — HPC Slurm det training (`train_retry.py --pipeline det`); defaults bones plan 1, retinanet, run-through, 500 epochs
 - `local_train_det.sh` — local det training via `train.py` shim (PYTHONPATH + bones defaults)
 - `submit_train_det.sh` — HPC submit wrapper (optional)

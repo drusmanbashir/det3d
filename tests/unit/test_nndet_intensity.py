@@ -97,8 +97,8 @@ MODEL = {
 def _det_plan_maker(tmp_path, row):  #AI
     """Supply one plans row, nested parameter sheets and a private plan-file location to setup."""
     maker = object.__new__(parser.ConfigMakerDet)
-    maker.project = SimpleNamespace(project_folder=tmp_path)
-    full_row = {"batch_size": "auto", "model": "auto", "val_patch_size": "auto"} | row
+    maker.project = SimpleNamespace(project_folder=tmp_path, project_title="test")
+    full_row = {"batch_size": "auto", "model": "auto", "val_patch_size": "auto", "encoder": None} | row
     maker.plans = pd.DataFrame([full_row], index=[1])
     maker.configs = {"dataset_params": {}, "model_params": dict(MODEL_PARAMS)}
     return maker
@@ -109,6 +109,9 @@ def _write_resolved(maker, resolved, fits=None):  #AI
     maker.setup(1, load_computed=False)
     pkl = FolderNames(maker.project, {"plan_name": 1}, maker.PIPELINE).plan_file
     pkl.parent.mkdir(exist_ok=True)
+    fit_row = maker.gpu_fit_row(maker.read_plan(1))
+    for fit in (fits or {}).values():
+        fit["fit"]["row"] = fit_row
     pkl.write_bytes(pickle.dumps({"plan_train": resolved, "fits": fits or {}}))
     return pkl
 

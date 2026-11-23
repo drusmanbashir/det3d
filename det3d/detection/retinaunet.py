@@ -154,7 +154,7 @@ def build_retinaunet(configs: dict, num_anchors: int) -> RetinaUNet:
     model_params = configs["model_params"]
     feature_extractor = build_retinaunet_feature_extractor(configs)
     size_divisible = encoder_abs_strides_from_plan(configs)[-1]
-    head_channels = int(model_params["encoder_start_channels"]) * 4
+    head_channels = feature_extractor.out_channels
     return RetinaUNet(
         spatial_dims=int(model_params["spatial_dims"]),
         num_classes=len(configs["plan_train"]["fg_labels"]),

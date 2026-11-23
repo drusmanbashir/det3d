@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from utilz.cprint import cprint
 
+from fran.architectures.nnunet import encoder_widths
 from fran.configs.defaults import plan_gpu_buffer_mb
 from fran.nn_compat.fit_store import FitStore
 from fran.nn_compat.gpu_memory import check_fixed_memory, check_planning_gpu, planning_budget
@@ -37,12 +38,12 @@ class LBDBoxC002(BoxC002):
         """nnDetection model config for BoxC002's trial networks, from the det sheets."""
         model = configs["model_params"]
         model_cfg, _ = RetinaUNetManager.nndet_cfgs(configs)
-        start_channels = int(model["encoder_start_channels"])
+        start_channels, max_channels = encoder_widths(model, configs["plan_train"])
         model_cfg["plan_arch_overwrites"].update(
             dim=int(model["spatial_dims"]),
             in_channels=int(model["in_channels"]),
             start_channels=start_channels,
-            max_channels=int(model["encoder_max_channels"]),
+            max_channels=max_channels,
             fpn_channels=start_channels * 4,
             head_channels=start_channels * 4,
         )
@@ -57,9 +58,7 @@ class LBDBoxC002(BoxC002):
             cases.append((to_nndet(boxes).numpy(), labels, details_shape(row)))
         estimator = MemoryEstimatorDetection(target_mem=gpu["budget"], gpu_id=index)
         planner = cls(cases, spacing, cls.trial_model_cfg(configs), estimator, configs["model_params"]["in_channels"])
-        planner.network_cls = RetinaUNetManager.network_class(
-            configs["plan_train"], foundation="nnfoundation" in configs
-        )
+        planner.network_cls = RetinaUNetManager.network_class(configs["plan_train"])
         return planner
 
     def __init__(self, cases, spacing, model_cfg, estimator, in_channels):
@@ -185,9 +184,6 @@ def fit_plan(project, maker, plan, index, refit):  #AI
         return plan_train, fitted["fit"]
 
     store = FitStore(project, plan["plan_name"], maker.PIPELINE)
-    fit_row = {key: row[key] for key in linked.to_fit}
-    if planner.network_cls is not RetinaUNetV001:
-        fit_row["planner"] = "resenc"
-    entry, fitted_now = store.fit(fit_row, gpu["gpu_key"], lbd_input_key(lbd_folder, details), fit, refit, index)
+    entry, fitted_now = store.fit(maker.gpu_fit_row(row), gpu["gpu_key"], lbd_input_key(lbd_folder, details), fit, refit, index)
     linked.report(plan["plan_name"], maker.PIPELINE, entry["plan_train"])
     append_center_ranges(lbd_folder, entry["plan_train"]["patch_size"], plan["prezoom_scale"], fitted_now)

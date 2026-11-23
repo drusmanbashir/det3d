@@ -6,6 +6,9 @@ import nndet.compat  # noqa: F401  nnDetection's runtime shims, as its own scrip
 import numpy as np
 import torch
 import yaml
+from fran.architectures.nnunet import encoder_widths
+from fran.configs.helpers import plan_encoder
+from fran.configs.workbook import apply_finetuning
 from fran.managers.project import Project
 from lightning.pytorch import LightningModule
 from nndet.evaluator.seg import SegmentationEvaluator
@@ -27,11 +30,21 @@ class RetinaUNetManager(LightningModule):
         "seg_dice": "loss_dice",
     }
 
-    def __init__(self, project_title, configs, lr=None, sync_dist=False):
+    def __init__(self, project_title, configs, lr=None, sync_dist=False, finetuning=None):
         super().__init__()
         self.sync_dist = sync_dist
         self.project = Project(project_title)
         configs = deepcopy(configs)
+        legacy = configs.pop("nnfoundation", None)
+        if legacy is not None and "encoder" not in configs["plan_train"]:
+            configs["plan_train"]["encoder"] = "resenc"
+        if finetuning is not None:
+            if plan_encoder(configs["plan_train"]) != "resenc":
+                raise ValueError("det-fm requires a resume checkpoint with a ResEnc-L encoder")
+            configs["finetuning"] = finetuning
+            apply_finetuning(configs)
+        elif legacy is not None:
+            configs["finetuning"] = {"checkpoint": legacy["checkpoint"]}
         if configs.get("mnemonic") is None:
             configs["mnemonic"] = self.project.global_properties["mnemonic"]
         self.save_hyperparameters("project_title", "configs", "lr")
@@ -67,8 +80,8 @@ class RetinaUNetManager(LightningModule):
         return model_cfg, trainer_cfg
 
     @staticmethod
-    def network_class(plan, *, foundation=False):
-        if plan.get("planner") == "resenc" or foundation:
+    def network_class(plan):
+        if plan_encoder(plan) == "resenc":
             from det3d.detection.nnfoundation_encoder import RetinaUNetV001NNF
 
             return RetinaUNetV001NNF
@@ -78,13 +91,12 @@ class RetinaUNetManager(LightningModule):
 
     @staticmethod
     def build_nndet_module(configs):  #AI
-        """nnDetection RetinaUNetV001 and the plan it is built from; an `nnfoundation` config swaps in the pretrained residual encoder."""
+        """Build the plan's RetinaUNet and initialise its encoder when finetuning is active."""
         model_cfg, trainer_cfg = RetinaUNetManager.nndet_cfgs(configs)
         plan = RetinaUNetManager.plan_from_det3d(configs)
-        foundation = "nnfoundation" in configs
-        network_cls = RetinaUNetManager.network_class(configs["plan_train"], foundation=foundation)
+        network_cls = RetinaUNetManager.network_class(configs["plan_train"])
         module = network_cls(model_cfg=model_cfg, trainer_cfg=trainer_cfg, plan=plan)
-        if foundation:
+        if "finetuning" in configs:
             from fran.architectures.nnfoundation import load_nnfoundation_encoder, nnfoundation_checkpoint
 
             load_nnfoundation_encoder(module.model.encoder, nnfoundation_checkpoint(configs))
@@ -113,12 +125,12 @@ class RetinaUNetManager(LightningModule):
         model = plan_model(configs)
         postprocess = postprocess_values(configs)
         n_fg = len(plan_train["fg_labels"])
-        start_channels = int(model_params["encoder_start_channels"])
+        start_channels, max_channels = encoder_widths(model_params, plan_train)
         arch = {
             "dim": int(model_params["spatial_dims"]),
             "in_channels": int(model_params["in_channels"]),
             "start_channels": start_channels,
-            "max_channels": int(model_params["encoder_max_channels"]),
+            "max_channels": max_channels,
             "conv_kernels": model["conv_kernels"],
             "strides": model["strides"],
             "decoder_levels": tuple(model["decoder_levels"]),
