@@ -334,6 +334,10 @@ class DetPatchRetinaUNet(DetPatchInfererBase):
         if self.needs_swi(img) or self.num_tta > 0:  # TTA views meet in the tile box merge
             vol = img.unsqueeze(0)
             seg, boxes, scores, labels = self.run_swi(vol)
+            limit = self.model.plan.get("detections_per_img")
+            if limit is not None:
+                keep = scores.argsort(descending=True)[:int(limit)]
+                boxes, scores, labels = boxes[keep], scores[keep], labels[keep]
             batch["stitched_seg"] = seg
             batch["merged_boxes"] = boxes
             batch["merged_scores"] = scores

@@ -1,6 +1,22 @@
 import torch
-from nndet.training.learning_rate import LinearWarmupPolyLR
+from nndet.training.learning_rate import LinearWarmupPolyLR, linear_warm_up, poly_lr
 from nndet.training.optimizer import get_params_no_wd_on_norm
+
+
+class DetectionWarmupPolyLR(LinearWarmupPolyLR):
+    """Use completed optimizer steps so the first step runs at warm_lr."""
+
+    def get_lr(self):
+        step = self.last_epoch
+        if step < self.warm_iterations:
+            return [
+                linear_warm_up(step, warm_lr, self.warm_iterations, base_lr)
+                for warm_lr, base_lr in zip(self.warm_lr, self.base_lrs)
+            ]
+        return [
+            poly_lr(step - self.warm_iterations, base_lr, self.poly_iterations, self.poly_gamma)
+            for base_lr in self.base_lrs
+        ]
 
 
 def _plateau_lr_scheduler_config(optimizer, scheduler_params: dict, monitor: str):  #AI
@@ -43,7 +59,7 @@ def configure_detection_optimizers(
     if warm_iterations is None:
         lr_scheduler = _plateau_lr_scheduler_config(optimizer, configs["scheduler_params"], monitor)
     else:
-        scheduler = LinearWarmupPolyLR(
+        scheduler = DetectionWarmupPolyLR(
             optimizer=optimizer,
             warm_iterations=int(warm_iterations),
             warm_lr=float(nndet["warm_lr"]),

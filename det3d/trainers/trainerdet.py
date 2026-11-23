@@ -177,6 +177,9 @@ class TrainerDet(Trainer):
             benchmark=bool(nndet["benchmark"]),
             deterministic=bool(nndet["deterministic"]),
         )
+        limit_val_batches = self.configs["dataset_params"].get("limit_val_batches")
+        if limit_val_batches is not None:
+            kwargs["limit_val_batches"] = limit_val_batches
         if self.run_through:
             kwargs["limit_val_batches"] = 0
             kwargs["check_val_every_n_epoch"] = 1

@@ -106,7 +106,7 @@ def _items_from_batch(batch, preds, score_min, top_k, slice_axis, retinaunet=Fal
             "pred": pred,
             "pred_overlap": pred_overlap,
         }
-        if retinaunet:
+        if retinaunet and _PRED_SEG_KEY in preds[b]:
             item["pred_seg"] = sanitize_tensor_for_numpy(preds[b][_PRED_SEG_KEY].narrow(slice_axis + 1, s, 1))
         if gt_seg_key:
             item["gt_seg"] = sanitize_tensor_for_numpy(batch[gt_seg_key][b][0].narrow(slice_axis, s, 1))

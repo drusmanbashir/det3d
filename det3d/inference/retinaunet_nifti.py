@@ -95,6 +95,9 @@ def predict_plan_for_inference(nndet_plan, configs):
         "model_topk": int(configs["postprocess"]["topk_candidates_per_level"]),
         "remove_small_boxes": float(configs["postprocess"]["remove_small_boxes"]),
     }
+    candidate_limit = configs["plan_train"].get("detections_per_img")
+    if candidate_limit is not None:
+        plan["inference_plan"]["ensemble_topk"] = int(candidate_limit)
     return plan
 
 
@@ -119,7 +122,7 @@ def identity_properties(spatial_shape, spacing):
 
 @torch.no_grad()
 def nndet_predict_case(
-    net, nndet_plan, configs, image, device, overlap=None, do_seg=True, num_tta=None
+    net, nndet_plan, configs, image, device, overlap=None, do_seg=True, num_tta=None, *, native_boxes=False
 ):
     #AI
     """overlap / num_tta None: dataset_params inference_overlap / inference_tta."""
@@ -151,7 +154,9 @@ def nndet_predict_case(
         restore=False,
     )
     boxes = result["boxes"]
-    pred_boxes = from_nndet(torch.as_tensor(boxes["pred_boxes"], device=device))
+    pred_boxes = torch.as_tensor(boxes["pred_boxes"], device=device)
+    if not native_boxes:
+        pred_boxes = from_nndet(pred_boxes)
     out = {
         "pred_boxes": [pred_boxes],
         "pred_scores": [torch.as_tensor(boxes["pred_scores"], device=device)],

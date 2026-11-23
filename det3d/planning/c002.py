@@ -57,6 +57,9 @@ class LBDBoxC002(BoxC002):
             cases.append((to_nndet(boxes).numpy(), labels, details_shape(row)))
         estimator = MemoryEstimatorDetection(target_mem=gpu["budget"], gpu_id=index)
         planner = cls(cases, spacing, cls.trial_model_cfg(configs), estimator, configs["model_params"]["in_channels"])
+        planner.network_cls = RetinaUNetManager.network_class(
+            configs["plan_train"], foundation="nnfoundation" in configs
+        )
         return planner
 
     def __init__(self, cases, spacing, model_cfg, estimator, in_channels):
@@ -182,6 +185,9 @@ def fit_plan(project, maker, plan, index, refit):  #AI
         return plan_train, fitted["fit"]
 
     store = FitStore(project, plan["plan_name"], maker.PIPELINE)
-    entry, fitted_now = store.fit({key: row[key] for key in linked.to_fit}, gpu["gpu_key"], lbd_input_key(lbd_folder, details), fit, refit, index)
+    fit_row = {key: row[key] for key in linked.to_fit}
+    if planner.network_cls is not RetinaUNetV001:
+        fit_row["planner"] = "resenc"
+    entry, fitted_now = store.fit(fit_row, gpu["gpu_key"], lbd_input_key(lbd_folder, details), fit, refit, index)
     linked.report(plan["plan_name"], maker.PIPELINE, entry["plan_train"])
     append_center_ranges(lbd_folder, entry["plan_train"]["patch_size"], plan["prezoom_scale"], fitted_now)

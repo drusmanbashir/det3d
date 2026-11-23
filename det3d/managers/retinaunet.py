@@ -67,21 +67,27 @@ class RetinaUNetManager(LightningModule):
         return model_cfg, trainer_cfg
 
     @staticmethod
+    def network_class(plan, *, foundation=False):
+        if plan.get("planner") == "resenc" or foundation:
+            from det3d.detection.nnfoundation_encoder import RetinaUNetV001NNF
+
+            return RetinaUNetV001NNF
+        from nndet.ptmodule.retinaunet.v001 import RetinaUNetV001
+
+        return RetinaUNetV001
+
+    @staticmethod
     def build_nndet_module(configs):  #AI
         """nnDetection RetinaUNetV001 and the plan it is built from; an `nnfoundation` config swaps in the pretrained residual encoder."""
         model_cfg, trainer_cfg = RetinaUNetManager.nndet_cfgs(configs)
         plan = RetinaUNetManager.plan_from_det3d(configs)
-        if "nnfoundation" in configs:
+        foundation = "nnfoundation" in configs
+        network_cls = RetinaUNetManager.network_class(configs["plan_train"], foundation=foundation)
+        module = network_cls(model_cfg=model_cfg, trainer_cfg=trainer_cfg, plan=plan)
+        if foundation:
             from fran.architectures.nnfoundation import load_nnfoundation_encoder, nnfoundation_checkpoint
 
-            from det3d.detection.nnfoundation_encoder import RetinaUNetV001NNF
-
-            module = RetinaUNetV001NNF(model_cfg=model_cfg, trainer_cfg=trainer_cfg, plan=plan)
             load_nnfoundation_encoder(module.model.encoder, nnfoundation_checkpoint(configs))
-        else:
-            from nndet.ptmodule.retinaunet.v001 import RetinaUNetV001
-
-            module = RetinaUNetV001(model_cfg=model_cfg, trainer_cfg=trainer_cfg, plan=plan)
         module.seg_evaluator = SegmentationEvaluatorTorch.create()
         return module, plan
 
@@ -231,7 +237,35 @@ class RetinaUNetManager(LightningModule):
         self.nndet_module.box_evaluator.reset()
         self.nndet_module.seg_evaluator.reset()
 
+    def validate_full_volume(self, batch):
+        from det3d.inference.retinaunet_nifti import nndet_predict_case
+
+        image = batch["image"][0]
+        prediction = nndet_predict_case(
+            self.net, self.nndet_plan, self.configs, image, image.device, do_seg=False, native_boxes=True
+        )
+        limit = postprocess_values(self.configs)["detections_per_img"]
+        keep = prediction["pred_scores"][0].argsort(descending=True)[:limit]
+        boxes = prediction["pred_boxes"][0][keep]
+        scores = prediction["pred_scores"][0][keep]
+        labels = prediction["pred_labels"][0][keep]
+        targets = self.nndet_target_classes(batch["bbox"], batch["label"], self.plan["fg_labels"])
+        self.nndet_module.box_evaluator.run_online_evaluation(
+            pred_boxes=to_numpy([boxes]),
+            pred_classes=to_numpy([labels]),
+            pred_scores=to_numpy([scores]),
+            gt_boxes=to_numpy([to_nndet(box) for box in batch["bbox"]]),
+            gt_classes=to_numpy(targets),
+            gt_ignore=None,
+        )
+        batch["pred"] = [nndet_pred_to_vis(
+            {"pred_boxes": [boxes], "pred_labels": [labels], "pred_scores": [scores]}
+        )]
+
     def validation_step(self, batch, batch_idx):
+        if self.configs["dataset_params"].get("valid_impl") == "full_volume":
+            self.validate_full_volume(batch)
+            return
         patch_stream = batch["validation_impl"] == "patch_stream"
         self._val_patch_stream = self._val_patch_stream or patch_stream
         losses, prediction, nb = self.step_losses(
@@ -277,15 +311,14 @@ class RetinaUNetManager(LightningModule):
         for key, value in metric_scores.items():
             self.log(f"val0_{key}", float(value), sync_dist=self.sync_dist)
 
-        seg_scores, _ = self.nndet_module.seg_evaluator.finish_online_evaluation()
-        self.nndet_module.seg_evaluator.reset()
-        for key, value in seg_scores.items():
-            self.log(f"val0_{key}", float(value), sync_dist=self.sync_dist)
-
-        if self._val_patch_stream:
-            val_metric = float(seg_scores["seg_dice"])
-        else:
-            val_metric = float(metric_scores[self.nndet_module.eval_score_key])
+        val_metric = float(metric_scores[self.nndet_module.eval_score_key])
+        if n:
+            seg_scores, _ = self.nndet_module.seg_evaluator.finish_online_evaluation()
+            self.nndet_module.seg_evaluator.reset()
+            for key, value in seg_scores.items():
+                self.log(f"val0_{key}", float(value), sync_dist=self.sync_dist)
+            if self._val_patch_stream:
+                val_metric = float(seg_scores["seg_dice"])
         self.log("val0_metric", val_metric, prog_bar=True, sync_dist=self.sync_dist)
 
     def configure_optimizers(self):

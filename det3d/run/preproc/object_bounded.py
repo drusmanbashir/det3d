@@ -6,7 +6,7 @@ from det3d.preprocessing.object_bounded import (
     ObjectBoundedDataGenerator,
     resolve_input_folder,
 )
-from fran.configs.helpers import intensity_values
+from fran.configs.helpers import parse_plan_id, intensity_values
 from fran.managers import Project
 from fran.preprocessing.plan_intensity import plan_intensity_properties
 
@@ -16,7 +16,7 @@ def main():
         description="Object-bounded detection preprocessing to images/lms/bboxes *_bboxN.json"
     )
     parser.add_argument("--project", required=True, dest="project_title")
-    parser.add_argument("--plan", required=True, type=int)
+    parser.add_argument("--plan", required=True, type=parse_plan_id)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--num-processes", type=int, default=1)

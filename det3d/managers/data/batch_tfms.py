@@ -95,13 +95,7 @@ class DataManagerDetLBDBTfms(DataManagerDetLBD, DataManagerDetSourceBTfms):
         provided_keys = kwargs["keys"] if "keys" in kwargs else None
         super().__init__(project, configs, batch_size, cache_rate, **kwargs)
         if provided_keys is None and self.is_eval_split():
-            if self._valid_impl() == "patch_stream":
-                if self.uses_lm_seg() and self.box_tracker_name == "corner":
-                    self.keys = self.keys_val_seg
-                else:
-                    self.keys = self.keys_val
-            else:
-                self.keys = self.keys_val_bbox
+            self.keys = self.validation_keys()
 
     def __repr__(self):
         n = len(self.data) if self.data else 0

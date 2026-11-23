@@ -284,7 +284,8 @@ class DataManagerDet(DataManager):
 
     def cases_from_project_split(self):
         ds_tokens = [x.strip() for x in self.plan["datasources"].split(",") if x.strip()]
-        nnz_allowed = self.dataset_params["nnz_allowed"]
+        full_volume = self.is_eval_split() and self._valid_impl() == "full_volume"
+        nnz_allowed = full_volume or self.dataset_params["nnz_allowed"]
         if self.split == "all":
             self.cases = list(
                 self.project.get_train_val_case_ids(
@@ -305,6 +306,10 @@ class DataManagerDet(DataManager):
             case_ids_on_disk.add(
                 info_from_filename(img_fn.name, full_caseid=True)["case_id"]
             )
+        if full_volume:
+            missing = set(self.cases) - case_ids_on_disk
+            if missing:
+                raise FileNotFoundError(f"Missing {len(missing)} validation volumes: {sorted(missing)[:5]}")
         self.cases = [case_id for case_id in self.cases if case_id in case_ids_on_disk]
         self.cases = self._filter_cases_by_stats_nnz(self.cases, nnz_allowed)
         assert len(self.cases) > 0, "There are no cases, aborting!"
@@ -607,11 +612,16 @@ class DataManagerDetLBD(DataManagerDetSource, DataManagerLBD):
         provided_keys = kwargs["keys"] if "keys" in kwargs else None
         super().__init__(project, configs, batch_size, cache_rate, **kwargs)
         if provided_keys is None and self.is_eval_split():
-            if self._valid_impl() == "patch_stream":
-                self.keys = self.keys_val_seg if self.uses_lm_seg() and self.box_tracker_name == "corner" else self.keys_val
-            else:
-                self.keys = self.keys_val_bbox
+            self.keys = self.validation_keys()
         self.override_batch_size_valid_split(split=self.split)
+
+    def validation_keys(self):
+        mode = self._valid_impl()
+        if mode == "bbox_anchor":
+            return self.keys_val_bbox
+        if mode == "patch_stream" and self.uses_lm_seg() and self.box_tracker_name == "corner":
+            return self.keys_val_seg
+        return self.keys_val
 
     def override_batch_size_valid_split(self, split="valid"):
         if (
@@ -661,14 +671,15 @@ class DataManagerDetLBD(DataManagerDetSource, DataManagerLBD):
                 shuffle=False,
             )
             return
-        num_workers, persistent_workers = self._num_workers()
+        full_volume = self._valid_impl() == "full_volume"
+        num_workers, persistent_workers = (int(self.dataset_params["num_workers_val"]), False) if full_volume else self._num_workers()
         pin_memory = torch.cuda.is_available() and not self.debug
         if num_workers > 0:
             persistent_workers = True
         dl_kwargs = dict(
-            batch_size=self.effective_batch_size,
+            batch_size=1 if full_volume else self.effective_batch_size,
             shuffle=False,
-            sampler=self.epoch_sampler("valid"),  # num_val_iterations_per_epoch set: that many batches
+            sampler=None if full_volume else self.epoch_sampler("valid"),
             num_workers=num_workers,
             collate_fn=self.collate_fn,
             persistent_workers=persistent_workers,
@@ -734,6 +745,10 @@ class DataManagerDetLBD(DataManagerDetSource, DataManagerLBD):
                     continue
                 row[self.lm_key] = str(lm_fn)
             data.append(row)
+        if self._valid_impl() == "full_volume":
+            missing = case_ids.difference(row["case_id"] for row in data)
+            if missing:
+                raise FileNotFoundError(f"Missing masks or box sidecars for validation: {sorted(missing)[:5]}")
         if skipped:
             print(
                 f"DataManagerDetLBD: skipped {skipped} cases "

@@ -5,6 +5,8 @@ Optionally sets ``label_org`` to 1 on matching bbox sidecars.
 from __future__ import annotations
 
 import argparse
+
+from fran.configs.helpers import parse_plan_id
 from pathlib import Path
 
 import pandas as pd
@@ -125,7 +127,7 @@ def main(args) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", default="bones")
-    parser.add_argument("--plan-id", type=int, default=1)
+    parser.add_argument("--plan-id", type=parse_plan_id, default=1)
     parser.add_argument("--lbd-folder", type=Path, default=None)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_known_args()[0]

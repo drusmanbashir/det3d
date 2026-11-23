@@ -7,11 +7,11 @@ Scope: `det3d/planning/c002.py` `det3d/transforms/box_tracker.py` `det3d/transfo
 
 ## run/preprocessing
 
-- `binarize_lbd_lms.py` — collapse LBD `lms/*.pt` to 0=bg / 1=lesion; set `label_org=1` on bbox sidecars (`--project`, `--plan-id`, `--lbd-folder`, `--dry-run`); shell `binarize_lbd_lms.sh`
+- `det3d/run/preprocessing/binarize_lbd_lms.py` — collapse LBD `lms/*.pt` to 0=bg / 1=lesion; set `label_org=1` on bbox sidecars (`--project`, named or numeric `--plan-id`, `--lbd-folder`, `--dry-run`); shell `binarize_lbd_lms.sh`
 
 ## run/preproc
 
-- `object_bounded.py` — object-bounded detection preprocessing CLI (`--project`, `--plan`, `--overwrite`, `--num-processes`, `--case-ids`, optional `--input-folder`)
+- `det3d/run/preproc/object_bounded.py` — object-bounded detection preprocessing CLI (`--project`, named or numeric `--plan`, `--overwrite`, `--num-processes`, `--case-ids`, optional `--input-folder`)
 
 Detection LBD preprocessing uses `fran/run/preproc/analyze_resample.py --pipeline det`. It saves target spacing before resampling, then fits the CT intensity statistics and BoxC002 and fills the centre ranges.
 
@@ -50,8 +50,8 @@ Detection LBD preprocessing uses `fran/run/preproc/analyze_resample.py --pipelin
 
 ## Libraries (import, not run)
 
-- Det plan file `plans/<plan_id>.pkl` (`requested` / `plan_train` / `fit`): path `FolderNames.plan_file`; written by fran `analyze_resample` (`configure_plan` spacing, `PreprocessingManager.plan_detection` intensity, BoxC002 fit, validation patch); read by `ConfigMakerDet._load_computed_plan`.
-- `det3d/planning/c002.py` — `LBDBoxC002`, nnDetection's BoxC002 on LBD crops: fixed patch kept, auto batch grows once the patch is at its cap (≤5% dataset coverage), fixed batch fits only the patch; budget = planning card's free memory minus `PLAN_GPU_BUFFER_MB` (FRAN_CONF defaults.yaml), refit when the card or buffer changes; `from_lbd` builds its input.
+- Detection plan file `plans/det3d_plan<id>.pkl`. FRAN preprocessing stores spacing, intensity and foreground labels. BoxC002 stores GPU-specific patch, batch and model at training start.
+- `det3d/planning/c002.py` — `LBDBoxC002`, nnDetection's BoxC002 on LBD crops: measures the encoder used for training, including `planner=resenc`. Stores the fit by GPU memory class.
 - `det3d/transforms/box_tracker.py` — track LBD boxes through crops and spatial augmentation. The detection workbook defaults to `hull`, which uses `hull_xyz` and checks mask occupancy. `corner` warps box corners. `remeasure` rebuilds boxes from the warped `inst` map. For missing tracker data, rerun detection LBD with `--overwrite`.
 - `det3d/transforms/intensity.py` — share CT clipping across training and inference. `intensity_norm` defaults to `scale01` and also supports `zscore_fg`. Set `intensity_properties` in the workbook or fit them during detection preprocessing.
 
@@ -74,11 +74,11 @@ Detection LBD preprocessing uses `fran/run/preproc/analyze_resample.py --pipelin
 - `data/transforms.py` — HDF5 shard/crop/case loaders (`LoadHDF5Det*`), box-centred crops (`RandCropExtendedBBoxd`, `CropDetPatchd`, `BboxCenterCropSlicesd`), `PadDetPatchd`
 - `detector_factory.py` — `resolve_detector_manager`, `build_detector_manager` (retinanet | retinaunet)
 - `retinaunet.py` — `RetinaUNetManager`: nnDetection RetinaUNetV001 built from the nested configs (the only place nnDet's flat architecture dict is made); det3d batch → nnDet targets; nnDet loss logging
-- `det_schedule.py` — `configure_detection_optimizers` (SGD + ReduceLROnPlateau from plan `scheduler_*` / `nndet` keys)
+- `det3d/managers/det_schedule.py` — SGD with step-based linear warmup and polynomial decay when the `nndet` sheet supplies `warm_iterations`. Blank selects ReduceLROnPlateau.
 
 ## run/training
 
-- `train.py` — shim → `fran/run/training/train.py` (prepends `--pipeline det` when omitted; `--pipeline det-fm` = RetinaUNet with the nnFoundationCNN encoder; `TrainerDet` / `TrainerDetTransfer`); standard: `--project lidca --plan 4 --arch retinaunet`; transfer: `--transfer true --run-name {source_run} --arch retinaunet --source-ckpt last`; also `--run-through`, `--resume-lr`, `--batch-tfms`
+- `det3d/run/training/train.py` — shim → `fran/run/training/train.py` (prepends `--pipeline det` when omitted; `--pipeline det-fm` = RetinaUNet with the nnFoundationCNN encoder; `TrainerDet` / `TrainerDetTransfer`); standard `--project lidc --plan sota --pipeline det-fm`. Smoke overrides `--num-iterations-per-epoch` and `--limit-val-batches`; transfer: `--transfer true --run-name {source_run} --arch retinaunet --source-ckpt last`; also `--run-through`, `--resume-lr`, `--batch-tfms`
 - `train_det.sh` — HPC Slurm det training (`train_retry.py --pipeline det`); defaults bones plan 1, retinanet, run-through, 500 epochs
 - `local_train_det.sh` — local det training via `train.py` shim (PYTHONPATH + bones defaults)
 - `submit_train_det.sh` — HPC submit wrapper (optional)

@@ -1,6 +1,5 @@
 from fran.configs.helpers import is_unspecified
 from fran.configs.parser import ConfigMaker
-from fran.utils.folder_names import FolderNames
 
 
 class ConfigMakerDet(ConfigMaker):
@@ -17,6 +16,25 @@ class ConfigMakerDet(ConfigMaker):
         """nnDetection validates on the training patch; a fixed workbook value is kept."""
         val = plan["val_patch_size"]
         return [int(v) for v in (patch_size if is_unspecified(val) else val)]
+
+    PLAN_OVERRIDES = {
+        "model_params": ("max_epochs",),
+        "dataset_params": ("valid_impl", "inference_overlap"),
+        "postprocess": ("detections_per_img",),
+    }
+
+    def __init__(self, project, *, include_nnfoundation=False):
+        super().__init__(project, include_nnfoundation=include_nnfoundation)
+        self.sheet_defaults = {sheet: self.configs[sheet].copy() for sheet in self.PLAN_OVERRIDES}
+
+    def setup(self, plan_train, plan_valid=None, load_computed=True, gpu_key=None):
+        super().setup(plan_train, plan_valid, load_computed=load_computed, gpu_key=gpu_key)
+        plan = self.configs["plan_train"]
+        for sheet, keys in self.PLAN_OVERRIDES.items():
+            for key in keys:
+                if key in self.plans.columns:
+                    value = plan[key]
+                    self.configs[sheet][key] = self.sheet_defaults[sheet].get(key) if value is None else value
 
     def load_configs(self, path):
         """Load the base fran sheets, then merge the det sheets over them (data_params into dataset_params)."""
