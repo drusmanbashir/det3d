@@ -103,6 +103,7 @@ def _det_plan_maker(tmp_path, row):  #AI
     full_row = {"batch_size": "auto", "model": "auto", "val_patch_size": "auto", "encoder": None, "pretrained": None} | row
     maker.plans = pd.DataFrame([full_row], index=[1])
     maker.configs = {"dataset_params": {}, "model_params": dict(MODEL_PARAMS)}
+    maker._sheet_configs = {sheet: dict(values) for sheet, values in maker.configs.items()}
     return maker
 
 
@@ -131,8 +132,8 @@ def test_detection_config_loads_without_plan_file(tmp_path):  #AI
     assert plan["model"] == "auto"
 
 
-def test_detection_resolved_plan_wins_including_an_adjusted_patch(tmp_path):  #AI
-    """Resolved values replace the sheet's, the crop identity keeps the sheet patch."""
+def test_detection_resolved_plan_keeps_fixed_workbook_patches(tmp_path):  #AI
+    """A saved fit cannot replace fixed training or validation patch dimensions."""
     maker = _det_plan_maker(tmp_path, {"mode": "lbd", "spacing": [1, 1, 2], "patch_dim0": 192, "patch_dim1": 96})
     intensity = {"mean": 1, "sd": 2, "percentile_00_5": -3, "percentile_99_5": 5}
     gpu_fit = {"patch_size": [160, 160, 96], "val_patch_size": [160, 160, 96], "batch_size": 4, "model": MODEL}
@@ -149,8 +150,8 @@ def test_detection_resolved_plan_wins_including_an_adjusted_patch(tmp_path):  #A
     assert maker.configs["plan_train"] is not maker.configs["plan_valid"]
     for split in ("train", "valid", "test"):
         plan = maker.configs[f"plan_{split}"]
-        assert plan["patch_size"] == [160, 160, 96]
-        assert plan["val_patch_size"] == [160, 160, 96]
+        assert plan["patch_size"] == [192, 192, 96]
+        assert plan["val_patch_size"] == [192, 192, 96]
         assert (plan["patch_dim0"], plan["patch_dim1"]) == (192, 96)
         assert plan["batch_size"] == 4
         assert plan["model"] == MODEL
@@ -167,8 +168,8 @@ def test_detection_reuses_saved_values_by_plan_id(tmp_path):
     path.write_bytes(pickle.dumps({"requested": {"legacy": True}, "plan_train": resolved}))
     edited = _det_plan_maker(tmp_path, row | {"spacing": [2, 2, 2], "val_patch_size": [64, 64, 64]})
     edited.setup(1)
-    for key, value in resolved.items():
-        assert edited.configs["plan_train"][key] == value
+    assert edited.configs["plan_train"]["spacing"] == resolved["spacing"]
+    assert edited.configs["plan_train"]["val_patch_size"] == [64, 64, 64]
 
 
 def test_fixed_spacing_worker_accepts_missing_legacy_stats(tmp_path, monkeypatch):  #AI
@@ -205,7 +206,7 @@ def test_detection_planning_stores_intensity_and_labels_and_leaves_the_fits(tmp_
     project = SimpleNamespace(project_folder=tmp_path, project_title="t")
     maker = SimpleNamespace(
         PIPELINE=parser.ConfigMakerDet.PIPELINE,
-        setup=lambda plan_id, load_computed=True, gpu_key=None: None,
+        setup=lambda plan_id, load_computed=True, gpu_key=None, plan_overrides=None: None,
         configs={f"plan_{key}": dict(plan) for key in ("train", "valid", "test")} | {"model_params": dict(MODEL_PARAMS)},
     )
     configs = configure_plan(project, maker, 1, False, False, pipeline="det")
@@ -224,7 +225,7 @@ def test_detection_planning_stores_intensity_and_labels_and_leaves_the_fits(tmp_
     monkeypatch.setattr(parser.ConfigMakerDet, "read_plan", lambda self, plan_id: dict(plan))
     manager = object.__new__(analyze_resample.PreprocessingManager)
     manager.project, manager.configs, manager.L = project, configs, SimpleNamespace(output_folder=tmp_path)
-    output = manager.plan_detection()
+    output = manager.plan_detection(configs["plan_train"])
     assert output == pickle.loads(pkl.read_bytes())
     plan_train = {"spacing": [1, 1, 2], "intensity_properties": intensity, "fg_labels": [2]}
     if workbook_patch != "auto":
@@ -233,13 +234,13 @@ def test_detection_planning_stores_intensity_and_labels_and_leaves_the_fits(tmp_
                           fit={"input_key": "measured boxes", "histogram_labels": [2]})
     calls = Mock(side_effect=lambda p, s: (intensity, [2]))
     monkeypatch.setattr(analyze_resample, "plan_intensity_properties", calls)
-    assert manager.plan_detection() == output
+    assert manager.plan_detection(configs["plan_train"]) == output
     calls.assert_not_called()
     pkl.write_bytes(pickle.dumps(dict(spacing_only, fits=fits)))
     before = pkl.read_bytes()
     monkeypatch.setattr(analyze_resample, "plan_intensity_properties", lambda p, s: (intensity, [3]))
     with pytest.raises(ValueError, match="ambiguous detection foreground"):
-        manager.plan_detection()
+        manager.plan_detection(configs["plan_train"])
     assert pkl.read_bytes() == before
 
 

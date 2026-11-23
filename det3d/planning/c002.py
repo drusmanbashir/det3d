@@ -244,9 +244,12 @@ def fit_plan(project, maker, plan, index, refit, *, batch_size=None):  #AI
         plan_train = {key: fitted["plan_train"][key] for key in linked.to_fit}
         return plan_train, fitted["fit"]
 
+    input_key = lbd_input_key(lbd_folder, details)
+    if "_plan_definition" in row:
+        input_key = (input_key, tuple(plan["spacing"]))
     store = FitStore(project, plan["plan_name"], maker.PIPELINE)
     entry, fitted_now = store.fit(
-        maker.gpu_fit_row(row), fit_slot, lbd_input_key(lbd_folder, details), fit, refit, index, batch_size=batch_override,
+        maker.gpu_fit_row(row), fit_slot, input_key, fit, refit, index, batch_size=batch_override,
     )
     patch = entry["plan_train"].get("patch_size", row["patch_size"])
     append_center_ranges(lbd_folder, patch, plan["prezoom_scale"], fitted_now)

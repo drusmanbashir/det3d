@@ -31,26 +31,40 @@ class ConfigMakerDet(ConfigMaker):
 
     def setup(
         self, plan_train, plan_valid=None, load_computed=True, gpu_key=None, *,
-        load_gpu_fit=True, epochs=None, batch_size=None, pretrained=None,
+        load_gpu_fit=True, epochs=None, batch_size=None, pretrained=None, plan_overrides=None,
     ):
         super().setup(
             plan_train, plan_valid, load_computed=load_computed, gpu_key=gpu_key,
             load_gpu_fit=load_gpu_fit, epochs=epochs, batch_size=batch_size, pretrained=pretrained,
+            plan_overrides=plan_overrides,
         )
         for split in ("plan_train", "plan_valid", "plan_test"):
             plan = self.configs[split]
             if not is_unspecified(plan["patch_size"]):
                 plan["val_patch_size"] = self.resolved_val_patch_size(plan, plan["patch_size"])
         plan = self.configs["plan_train"]
+        overrides = {} if plan_overrides is None else plan_overrides
         for sheet, keys in self.PLAN_OVERRIDES.items():
             for key in keys:
                 if key in self.plans.columns:
                     value = plan[key]
-                    self.configs[sheet][key] = self.sheet_defaults[sheet].get(key) if value is None else value
+                    explicit = key in overrides.get(sheet, {}) or (
+                        sheet == "dataset_params" and key in overrides.get("data_params", {})
+                    )
+                    if not explicit:
+                        self.configs[sheet][key] = self.sheet_defaults[sheet].get(key) if value is None else value
         if "finetuning" in self.configs:
             apply_finetuning(self.configs)
         data = self.configs["dataset_params"]
         if self.resolve_epochs(self.configs)["valid"] is not None and data["valid_impl"] == "patch_stream":
+            explicit_valid_impl = "valid_impl" in overrides.get("dataset_params", {}) or (
+                "valid_impl" in overrides.get("data_params", {})
+            )
+            if explicit_valid_impl:
+                raise ValueError(
+                    "dataset_params.valid_impl='patch_stream' is incompatible with validation batches; "
+                    "use 'bbox_anchor' or remove dataset_params.valid_impl"
+                )
             data["valid_impl"] = "bbox_anchor"
 
     def load_configs(self, workbook):

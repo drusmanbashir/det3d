@@ -29,6 +29,50 @@ module load miniforge
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate dl
 
+modern=0
+has_pipeline=0
+declare -A selectors=()
+args=("$@")
+while ((${#args[@]})); do
+  key="${args[0]}"
+  value=""
+  case "$key" in
+    --project|-t|--project-title|--plan|-p|--plan-num|--pipeline|--plan-file)
+      ((${#args[@]} >= 2)) || { echo "$key requires a value" >&2; exit 2; }
+      value="${args[1]}"
+      args=("${args[@]:2}")
+      ;;
+    --project=*|--project-title=*|--plan=*|--plan-num=*|--pipeline=*|--plan-file=*)
+      value="${key#*=}"
+      key="${key%%=*}"
+      args=("${args[@]:1}")
+      ;;
+    *) args=("${args[@]:1}"); continue ;;
+  esac
+  case "$key" in
+    --project|-t|--project-title) selector=project; modern=1 ;;
+    --plan|-p|--plan-num) selector=plan; modern=1 ;;
+    --plan-file) selector=plan_file; modern=1 ;;
+    --pipeline)
+      selector=pipeline; modern=1; has_pipeline=1
+      [[ "$value" == det ]] || { echo "det3d launcher requires --pipeline det" >&2; exit 2; }
+      ;;
+  esac
+  if [[ -n "${selectors[$selector]:-}" && "${selectors[$selector]}" != "$value" ]]; then
+    echo "Conflicting $selector selectors: '${selectors[$selector]}' and '$value'" >&2
+    exit 2
+  fi
+  selectors[$selector]="$value"
+done
+
+if [[ "$modern" == 1 ]]; then
+  CODE_ROOT="${HPC_CODE_ROOT:-/data/EECS-LITQ/fran_storage/code}"
+  modern_cmd=("${PYTHON_BIN:-python}" -u "${CODE_ROOT}/fran/fran/run/training/train_retry.py")
+  [[ "$has_pipeline" == 1 ]] || modern_cmd+=(--pipeline det)
+  modern_cmd+=("$@")
+  exec "${modern_cmd[@]}"
+fi
+
 PROJECT="${1:-bones}"
 PLAN_NUM="${2:-1}"
 DEVICES="${3:-0}"
@@ -56,7 +100,7 @@ BATCH_TFMS="${24:-true}"
 SNAPSHOT_FREQ="${25:-100}"
 VAL_SAMPLING="${26:-1.0}"
 TAGS="${27:-}"
-ARCH="${28:-retinanet}"
+ARCH="${28:-}"
 TRANSFER="${29:-false}"
 RESUME_LR="${30:-}"
 
@@ -73,7 +117,6 @@ cmd=(
   --profiler "$PROFILER"
   --wandb "$WANDB"
   --cache-rate "$CACHE_RATE"
-  --arch "$ARCH"
   --val-sampling "$VAL_SAMPLING"
   --bsf "$BSF"
   --batch-tfms "$BATCH_TFMS"
@@ -87,6 +130,9 @@ cmd=(
   --min-bs "$MIN_BS"
 )
 
+if [[ -n "$ARCH" ]]; then
+  cmd+=(--arch "$ARCH")
+fi
 if [[ -n "$BS" ]]; then
   cmd+=(--bs "$BS")
 fi

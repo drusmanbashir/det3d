@@ -14,6 +14,49 @@ conda activate dl
 export FRAN_CONF="${FRAN_CONF:-/s/fran_storage/conf}"
 export PYTHONPATH="/home/ub/code/fran:/home/ub/code/det3d:/home/ub/code/label_analysis:/home/ub/code/utilz:/home/ub/code/localiser${PYTHONPATH:+:${PYTHONPATH}}"
 
+modern=0
+has_pipeline=0
+declare -A selectors=()
+args=("$@")
+while ((${#args[@]})); do
+  key="${args[0]}"
+  value=""
+  case "$key" in
+    --project|-t|--project-title|--plan|-p|--plan-num|--pipeline|--plan-file)
+      ((${#args[@]} >= 2)) || { echo "$key requires a value" >&2; exit 2; }
+      value="${args[1]}"
+      args=("${args[@]:2}")
+      ;;
+    --project=*|--project-title=*|--plan=*|--plan-num=*|--pipeline=*|--plan-file=*)
+      value="${key#*=}"
+      key="${key%%=*}"
+      args=("${args[@]:1}")
+      ;;
+    *) args=("${args[@]:1}"); continue ;;
+  esac
+  case "$key" in
+    --project|-t|--project-title) selector=project; modern=1 ;;
+    --plan|-p|--plan-num) selector=plan; modern=1 ;;
+    --plan-file) selector=plan_file; modern=1 ;;
+    --pipeline)
+      selector=pipeline; modern=1; has_pipeline=1
+      [[ "$value" == det ]] || { echo "det3d launcher requires --pipeline det" >&2; exit 2; }
+      ;;
+  esac
+  if [[ -n "${selectors[$selector]:-}" && "${selectors[$selector]}" != "$value" ]]; then
+    echo "Conflicting $selector selectors: '${selectors[$selector]}' and '$value'" >&2
+    exit 2
+  fi
+  selectors[$selector]="$value"
+done
+
+if [[ "$modern" == 1 ]]; then
+  modern_argv=(python -u "${DET_TRAIN:-/home/ub/code/det3d/det3d/run/training/train.py}")
+  [[ "$has_pipeline" == 1 ]] || modern_argv+=(--pipeline det)
+  modern_argv+=("$@")
+  exec "${modern_argv[@]}"
+fi
+
 PROJECT="${1:-bones}"
 PLAN_NUM="${2:-1}"
 DEVICES="${3:-0}"
@@ -37,7 +80,7 @@ BATCH_TFMS="${20:-true}"
 SNAPSHOT_FREQ="${21:-100}"
 VAL_SAMPLING="${22:-1.0}"
 TAGS="${23:-}"
-ARCH="${24:-retinanet}"
+ARCH="${24:-}"
 TRANSFER="${25:-false}"
 RESUME_LR="${26:-}"
 
@@ -53,7 +96,6 @@ argv=(
   --profiler "${PROFILER}"
   --wandb "${WANDB}"
   --cache-rate "${CACHE_RATE}"
-  --arch "${ARCH}"
   --val-sampling "${VAL_SAMPLING}"
   --bsf "${BSF}"
   --batch-tfms "${BATCH_TFMS}"
@@ -64,6 +106,9 @@ argv=(
   --dual-ssd "${DUAL_SSD}"
 )
 
+if [[ -n "${ARCH}" ]]; then
+  argv+=(--arch "${ARCH}")
+fi
 if [[ -n "${BS}" ]]; then
   argv+=(--bs "${BS}")
 fi
