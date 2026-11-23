@@ -40,7 +40,7 @@ class RetinaUNetManager(LightningModule):
             configs["plan_train"]["encoder"] = "resenc"
         if finetuning is not None:
             if plan_encoder(configs["plan_train"]) != "resenc":
-                raise ValueError("det-fm requires a resume checkpoint with a ResEnc-L encoder")
+                raise ValueError("pretrained='nnfoundation' requires a resume checkpoint with a ResEnc-L encoder")
             configs["finetuning"] = finetuning
             apply_finetuning(configs)
         elif legacy is not None:

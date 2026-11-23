@@ -8,7 +8,6 @@ class ConfigMakerDet(ConfigMaker):
 
     CONFIG_FILENAME = "experiment_configs_det.xlsx"
     PIPELINE = "det3d"  # names the plan file, `FolderNames.plan_file`
-    FM_PIPELINE = "det-fm"
     ENCODERS = (None, "resenc")
     FINETUNING_KEYS = ("checkpoint", "initial_lr", "momentum", "nesterov", "weight_decay", "warm_iterations", "warm_lr", "poly_gamma")
     SKIP_SHEETS = frozenset({"plans", "plans_dot", "legend"})
@@ -26,17 +25,17 @@ class ConfigMakerDet(ConfigMaker):
         "postprocess": ("detections_per_img",),
     }
 
-    def __init__(self, project, *, include_nnfoundation=False):
-        super().__init__(project, include_nnfoundation=include_nnfoundation)
+    def __init__(self, project):
+        super().__init__(project)
         self.sheet_defaults = {sheet: self.configs[sheet].copy() for sheet in self.PLAN_OVERRIDES}
 
     def setup(
         self, plan_train, plan_valid=None, load_computed=True, gpu_key=None, *,
-        load_gpu_fit=True, epochs=None, batch_size=None,
+        load_gpu_fit=True, epochs=None, batch_size=None, pretrained=None,
     ):
         super().setup(
             plan_train, plan_valid, load_computed=load_computed, gpu_key=gpu_key,
-            load_gpu_fit=load_gpu_fit, epochs=epochs, batch_size=batch_size,
+            load_gpu_fit=load_gpu_fit, epochs=epochs, batch_size=batch_size, pretrained=pretrained,
         )
         for split in ("plan_train", "plan_valid", "plan_test"):
             plan = self.configs[split]

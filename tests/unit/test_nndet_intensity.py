@@ -100,7 +100,7 @@ def _det_plan_maker(tmp_path, row):  #AI
     """Supply one plans row, nested parameter sheets and a private plan-file location to setup."""
     maker = object.__new__(parser.ConfigMakerDet)
     maker.project = SimpleNamespace(project_folder=tmp_path, project_title="test")
-    full_row = {"batch_size": "auto", "model": "auto", "val_patch_size": "auto", "encoder": None} | row
+    full_row = {"batch_size": "auto", "model": "auto", "val_patch_size": "auto", "encoder": None, "pretrained": None} | row
     maker.plans = pd.DataFrame([full_row], index=[1])
     maker.configs = {"dataset_params": {}, "model_params": dict(MODEL_PARAMS)}
     return maker

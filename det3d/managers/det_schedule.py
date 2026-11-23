@@ -69,7 +69,7 @@ def configure_detection_optimizers(
         lr_scheduler = {"scheduler": scheduler, "interval": "step"}
         if "finetuning" in configs:
             print(
-                f"det-fm optimizer: initial_lr={lr:g}, warm_lr={nndet['warm_lr']}, "
+                f"pretrained=nnfoundation optimizer: initial_lr={lr:g}, warm_lr={nndet['warm_lr']}, "
                 f"warm_iterations={warm_iterations}, poly_gamma={nndet['poly_gamma']}"
             )
     return {"optimizer": optimizer, "lr_scheduler": lr_scheduler}
