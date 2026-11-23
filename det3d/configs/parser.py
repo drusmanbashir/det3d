@@ -22,7 +22,6 @@ class ConfigMakerDet(ConfigMaker):
         return [int(v) for v in (patch_size if is_unspecified(val) else val)]
 
     PLAN_OVERRIDES = {
-        "model_params": ("max_epochs",),
         "dataset_params": ("valid_impl", "inference_overlap"),
         "postprocess": ("detections_per_img",),
     }
@@ -41,6 +40,9 @@ class ConfigMakerDet(ConfigMaker):
                     self.configs[sheet][key] = self.sheet_defaults[sheet].get(key) if value is None else value
         if "finetuning" in self.configs:
             apply_finetuning(self.configs)
+        data = self.configs["dataset_params"]
+        if self.resolve_epochs(self.configs)["valid"] is not None and data["valid_impl"] == "patch_stream":
+            data["valid_impl"] = "bbox_anchor"
 
     def load_configs(self, workbook):
         """Load the base fran sheets, then merge the det sheets over them (data_params into dataset_params)."""

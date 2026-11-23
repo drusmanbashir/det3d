@@ -19,7 +19,10 @@ def main():
     parser.add_argument("--plan", required=True, type=parse_plan_id)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--debug", action="store_true")
-    parser.add_argument("--num-processes", type=int, default=1)
+    parser.add_argument(
+        "--num-processes", type=int,
+        default=ConfigMakerDet.fixed()["PREPROCESSING_DRIVER_NUM_PROCESSES"],
+    )
     parser.add_argument("--case-ids", default="", help="comma-separated case filter for smoke")
     parser.add_argument("--input-folder", default="", help="optional input data folder override")
     args = parser.parse_args()

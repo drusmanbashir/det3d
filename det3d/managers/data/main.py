@@ -22,8 +22,10 @@ from fran.transforms.detection import patch_size_manifest_key
 from det3d.transforms.gpu_det import RandAffineBoxSyncd, RandFlipBoxSyncd, ResizeWithPadOrCropBoxSyncd
 from det3d.utils.bbox_sidecar import bbox_sidecar_path, load_detection_sidecar, valid_detection_box
 from fran.utils.bbox_sidecar import extended_bbox_df_column, nbrhood_df_to_detection_records
+from fran.configs.parser import ConfigMaker
 from fran.configs.helpers import is_excel_None
 from fran.managers.data.main import (
+    DATA_MANAGER_BATCH_SIZE,
     DataManager,
     ForcedFgBatchSampler,
     ForcedFgDataset,
@@ -63,6 +65,9 @@ from det3d.managers.data.transforms import (
 )
 
 
+_FIXED = ConfigMaker.fixed()
+
+
 class DataManagerDet(DataManager):
     data_keys = ("image",)
     spatial_aug_keys = ("image",)
@@ -80,7 +85,7 @@ class DataManagerDet(DataManager):
         self,
         project,
         configs: dict,
-        batch_size=64,
+        batch_size=_FIXED["DET_BASE_DATA_MANAGER_BATCH_SIZE"],
         cache_rate=0.0,
         split="train",
         device="cuda:0",
@@ -219,16 +224,16 @@ class DataManagerDet(DataManager):
         if self.debug:
             return 0, False
         soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
-        if soft_limit < 1024:
+        if soft_limit < _FIXED["DET_MIN_OPEN_FILES_FOR_WORKERS"]:
             return 0, False
         if self.is_train_all_split():
             return super()._num_workers()
-        num_workers = min(4, max(1, len(os.sched_getaffinity(0)) - 2))
+        available_cpus = len(os.sched_getaffinity(0)) - _FIXED["DET_VALID_RESERVED_CPUS"]
+        num_workers = min(_FIXED["DET_VALID_MAX_WORKERS"], max(1, available_cpus))
         return num_workers, False
 
     def train_batching(self):  #AI
-        """Fran's nnU-Net batching: num_iterations_per_epoch set draws exactly that many batches with
-        replacement; oversample_fg set forces the last slots of every batch to foreground (ForcedFg)."""
+        """Batch the resolved case draws and force the configured share of foreground slots."""
         sampler = self.epoch_sampler("train")
         ds = self.ds
         batching = dict(batch_size=self.effective_batch_size, shuffle=sampler is None, sampler=sampler)
@@ -248,7 +253,10 @@ class DataManagerDet(DataManager):
         if self.is_train_all_split():
             ds, batching = self.train_batching()
         else:
-            ds, batching = self.ds, dict(batch_size=1, shuffle=False)
+            sampler = None
+            if "epochs" in self.configs["plan_train"]:
+                sampler = self.epoch_sampler("valid", batch_size=1)
+            ds, batching = self.ds, dict(batch_size=1, shuffle=False, sampler=sampler)
         pin_memory = torch.cuda.is_available() and not self.debug
         if num_workers > 0:
             persistent_workers = True
@@ -260,7 +268,7 @@ class DataManagerDet(DataManager):
             **batching,
         )
         if num_workers > 0:
-            dl_kwargs["prefetch_factor"] = 2
+            dl_kwargs["prefetch_factor"] = _FIXED["DET_LOADER_PREFETCH_FACTOR"]
         self.dl = DataLoader(ds, **dl_kwargs)
 
     def derive_data_folder(self, plan):
@@ -450,7 +458,7 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
         "Ld,Rtr,L2,E,Norm,F,Affine,ResizePC,BoxClip,IntensityTfms"
     )
 
-    def __init__(self, project, configs: dict, batch_size=8, cache_rate=0.0, **kwargs):
+    def __init__(self, project, configs: dict, batch_size=DATA_MANAGER_BATCH_SIZE, cache_rate=0.0, **kwargs):
         provided_keys = kwargs["keys"] if "keys" in kwargs else None
         super().__init__(project, configs, batch_size, cache_rate, **kwargs)
         if provided_keys is None and self.uses_train_keys():
@@ -612,7 +620,7 @@ class DataManagerDetLBD(DataManagerDetSource, DataManagerLBD):
             f"{len(self.data) if self.data else 0} folder={self.data_folder}"
         )
 
-    def __init__(self, project, configs: dict, batch_size=8, cache_rate=0.0, **kwargs):
+    def __init__(self, project, configs: dict, batch_size=DATA_MANAGER_BATCH_SIZE, cache_rate=0.0, **kwargs):
         provided_keys = kwargs["keys"] if "keys" in kwargs else None
         super().__init__(project, configs, batch_size, cache_rate, **kwargs)
         if provided_keys is None and self.is_eval_split():
@@ -680,17 +688,19 @@ class DataManagerDetLBD(DataManagerDetSource, DataManagerLBD):
         pin_memory = torch.cuda.is_available() and not self.debug
         if num_workers > 0:
             persistent_workers = True
+        batch_size = 1 if full_volume else self.effective_batch_size
+        sample_cases = not full_volume or "epochs" in self.configs["plan_train"]
         dl_kwargs = dict(
-            batch_size=1 if full_volume else self.effective_batch_size,
+            batch_size=batch_size,
             shuffle=False,
-            sampler=None if full_volume else self.epoch_sampler("valid"),
+            sampler=self.epoch_sampler("valid", batch_size) if sample_cases else None,
             num_workers=num_workers,
             collate_fn=self.collate_fn,
             persistent_workers=persistent_workers,
             pin_memory=pin_memory,
         )
         if num_workers > 0:
-            dl_kwargs["prefetch_factor"] = 2
+            dl_kwargs["prefetch_factor"] = _FIXED["DET_LOADER_PREFETCH_FACTOR"]
         self.dl = DataLoader(self.ds, **dl_kwargs)
 
     def create_valid_dataloader(self):

@@ -7,7 +7,11 @@ from fran.preprocessing.helpers import dusting_threshold
 from det3d.transforms.bbox_stats import AttachDetectionGTd, BBoxInfoStatsd2
 from det3d.transforms.patch_size import NbrhoodsToPatchesOBDD
 from det3d.utils.bbox_sidecar import bbox_sidecar_path, save_detection_sidecar
-from fran.preprocessing.preprocessor import CPUS_PER_ACTOR, Preprocessor
+from fran.preprocessing.preprocessor import (
+    CPUS_PER_ACTOR,
+    PREPROCESSING_NUM_PROCESSES,
+    Preprocessor,
+)
 from fran.preprocessing.rayworker_base import RayWorkerBase
 from fran.transforms.imageio import LoadTorchd
 from fran.transforms.intensitytransforms import NormaliseClipd
@@ -177,7 +181,7 @@ class ObjectBoundedDataGenerator(Preprocessor):
             "ignore_labels": plan["ignore_labels"],
         }
 
-    def should_use_ray(self, num_processes=8):
+    def should_use_ray(self, num_processes=PREPROCESSING_NUM_PROCESSES):
         return (num_processes > 1) and (not getattr(self, "debug", False))
 
     def setup(self, mean_std_mode="dataset", debug=False):
@@ -201,7 +205,7 @@ class ObjectBoundedDataGenerator(Preprocessor):
             ]
         )
 
-    def postprocess(self, overwrite=False, num_processes=8):
+    def postprocess(self, overwrite=False, num_processes=PREPROCESSING_NUM_PROCESSES):
         return
 
     def postprocess_artifacts_missing(self):

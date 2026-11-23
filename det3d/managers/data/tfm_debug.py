@@ -15,6 +15,7 @@ from det3d.managers.data.batch_tfms import (
     DataManagerDetWholeBTfms,
     DataManagerDualDetBTfms,
 )
+from fran.managers.data.main import DATA_MANAGER_BATCH_SIZE
 from det3d.managers.data.main import (
     DataManagerDetLBD,
     DataManagerDetPatch,
@@ -97,7 +98,7 @@ class DataManagerDetBTfmsTfmDebug(DataManagerDetBTfms):
 
 
 class DataManagerDetSourceBTfmsTfmDebug(DataManagerDetSourceBTfms, DataManagerDetBTfmsTfmDebug):
-    def __init__(self, project, configs: dict, batch_size=8, cache_rate=0.0, **kwargs):
+    def __init__(self, project, configs: dict, batch_size=DATA_MANAGER_BATCH_SIZE, cache_rate=0.0, **kwargs):
         tfm_keys = kwargs.pop("tfm_keys", None)
         if tfm_keys is not None:
             kwargs["keys"] = tfm_keys
@@ -107,7 +108,7 @@ class DataManagerDetSourceBTfmsTfmDebug(DataManagerDetSourceBTfms, DataManagerDe
 
 
 class DataManagerDetLBDBTfmsTfmDebug(DataManagerDetLBD, DataManagerDetSourceBTfmsTfmDebug):
-    def __init__(self, project, configs: dict, batch_size=8, cache_rate=0.0, **kwargs):
+    def __init__(self, project, configs: dict, batch_size=DATA_MANAGER_BATCH_SIZE, cache_rate=0.0, **kwargs):
         tfm_keys = kwargs.pop("tfm_keys", None)
         if tfm_keys is not None:
             kwargs["keys"] = tfm_keys
@@ -128,7 +129,7 @@ class DataManagerDetPatchBTfmsTfmDebug(DataManagerDetPatch, DataManagerDetBTfmsT
 
 
 class DataManagerDetSourceTfmDebug(DataManagerDetSource):
-    def __init__(self, project, configs: dict, batch_size=8, cache_rate=0.0, **kwargs):
+    def __init__(self, project, configs: dict, batch_size=DATA_MANAGER_BATCH_SIZE, cache_rate=0.0, **kwargs):
         tfm_keys = kwargs.pop("tfm_keys", None)
         if tfm_keys is not None:
             kwargs["keys"] = tfm_keys
@@ -138,7 +139,7 @@ class DataManagerDetSourceTfmDebug(DataManagerDetSource):
 
 
 class DataManagerDetLBDTfmDebug(DataManagerDetLBD, DataManagerDetSourceTfmDebug):
-    def __init__(self, project, configs: dict, batch_size=8, cache_rate=0.0, **kwargs):
+    def __init__(self, project, configs: dict, batch_size=DATA_MANAGER_BATCH_SIZE, cache_rate=0.0, **kwargs):
         tfm_keys = kwargs.pop("tfm_keys", None)
         if tfm_keys is not None:
             kwargs["keys"] = tfm_keys

@@ -1,5 +1,6 @@
 from typing import Optional
 
+from fran.managers.data.main import DATA_MANAGER_BATCH_SIZE
 from det3d.managers.data.main import (
     DataManagerDet,
     DataManagerDetLBD,
@@ -70,7 +71,7 @@ class DataManagerDetSourceBTfms(DataManagerDetSource, DataManagerDetBTfms):
     keys_val = "L,E,Norm,DtypeVal"
     keys_val_batch = None
 
-    def __init__(self, project, configs: dict, batch_size=8, cache_rate=0.0, **kwargs):
+    def __init__(self, project, configs: dict, batch_size=DATA_MANAGER_BATCH_SIZE, cache_rate=0.0, **kwargs):
         provided_keys = kwargs["keys"] if "keys" in kwargs else None
         super().__init__(project, configs, batch_size, cache_rate, **kwargs)
         if provided_keys is None:
@@ -91,7 +92,7 @@ class DataManagerDetWholeBTfms(DataManagerDetWhole, DataManagerDetBTfms):
 
 
 class DataManagerDetLBDBTfms(DataManagerDetLBD, DataManagerDetSourceBTfms):
-    def __init__(self, project, configs: dict, batch_size=8, cache_rate=0.0, **kwargs):
+    def __init__(self, project, configs: dict, batch_size=DATA_MANAGER_BATCH_SIZE, cache_rate=0.0, **kwargs):
         provided_keys = kwargs["keys"] if "keys" in kwargs else None
         super().__init__(project, configs, batch_size, cache_rate, **kwargs)
         if provided_keys is None and self.is_eval_split():

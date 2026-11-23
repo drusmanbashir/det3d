@@ -41,7 +41,6 @@ class TrainerDet(Trainer):
     monitor_format = ".4f"
     checkpoint_every_n_epochs = 5
     early_stopping_monitor = "val0_metric"
-    auto_max_epochs = 50  # model_params.max_epochs = auto: nnDetection v001.yaml max_num_epochs (its 10 SWA epochs are not implemented)
     debug_batch_limit = 2
     wandb_config_keys = ("dataset_params", "plan_train")
     _DET_PIPELINE_MODES = frozenset({"det", "lbd"})
@@ -126,7 +125,7 @@ class TrainerDet(Trainer):
 
         ``snapshot_freq`` is the run-through snapshot cadence; the batch-size
         finder only runs in run-through trainers. ``epochs`` None reads
-        ``model_params.max_epochs`` (``auto``: 50). Early stopping follows
+        ``plans.epochs`` (``auto``: nnDetection v001). Early stopping follows
         ``model_params.early_stopping_patience`` (``auto``: none) unless a patience is passed.
         """
         self.debug_tfm_keys = debug_tfm_keys
@@ -255,11 +254,6 @@ class TrainerDet(Trainer):
             self.D = self.init_dm()
             self.N = self.init_trainer()
 
-    def init_trainer(self):
-        self.configs["model_params"]["max_epochs"] = self.max_epochs
-        N = super().init_trainer()
-        return N
-
     def init_cbs(
         self,
         cbs,
@@ -291,7 +285,9 @@ class TrainerDet(Trainer):
             cbs += [
                 StochasticWeightAveraging(
                     swa_lrs=float(self.lr),
-                    swa_epoch_start=self.max_epochs - int(plan.get("swa_epochs", 10)),
+                    swa_epoch_start=self.max_epochs - int(
+                        plan.get("swa_epochs", ConfigMakerDet.fixed()["DET_SWA_EPOCHS"])
+                    ),
                 )
             ]
         return cbs, logger, profiler
