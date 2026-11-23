@@ -7,7 +7,7 @@ import torch
 from det3d.managers.data.collate import adjust_boxes_for_pad
 from det3d.inference.markups import save_inference_markups
 from det3d.utils.bbox_sidecar import save_inference_sidecar
-from fran.inference.base import TokenFolderLayout
+from fran.transforms.inferencetransforms import TokenFolderLayout
 from fran.transforms.inferencetransforms import MakeWritabled
 from fran.transforms.spatialtransforms import _ornt_current_to_original
 from monai.apps.detection.transforms.dictionary import (
