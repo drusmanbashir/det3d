@@ -186,16 +186,14 @@ class LBDBoxC002(BoxC002):
         return estimate
 
 
-def fit_plan(project, maker, plan, index, refit, *, batch_size=None, patch_size=None):  #AI
+def fit_plan(project, maker, plan, index, refit, *, batch_size=None):  #AI
     """det3d, at training start on GPU `index`: BoxC002 fit of the row's linked `auto` keys into the plan file; all-fixed rows get a memory estimate.
 
     lbd plans only. One fit is kept per GPU memory class (`FitStore`): a changed row or changed LBD crops and boxes stop
     the run until `refit`. A fit refuses a busy GPU.
     """
     gpu = planning_budget("det", index=index)
-    row, fit_slot, overrides = maker.gpu_fit_request(
-        plan["plan_name"], gpu["gpu_key"], batch_size=batch_size, patch_size=patch_size,
-    )
+    row, fit_slot, batch_override = maker.gpu_fit_request(plan["plan_name"], gpu["gpu_key"], batch_size=batch_size)
     linked = LinkedConfigKeys(row)
     if plan["mode"] != "lbd":
         if linked.to_fit:
@@ -210,8 +208,6 @@ def fit_plan(project, maker, plan, index, refit, *, batch_size=None, patch_size=
             plan["plan_name"], maker.PIPELINE, row["patch_size"], row["batch_size"], gpu,
             lambda patch, batch: planner.memory_estimate(patch, batch, row["model"]),
         )
-        if "patch_size" in overrides:
-            append_center_ranges(lbd_folder, row["patch_size"], plan["prezoom_scale"], False)
         return
 
     def fit():
@@ -221,7 +217,7 @@ def fit_plan(project, maker, plan, index, refit, *, batch_size=None, patch_size=
 
     store = FitStore(project, plan["plan_name"], maker.PIPELINE)
     entry, fitted_now = store.fit(
-        maker.gpu_fit_row(row), fit_slot, lbd_input_key(lbd_folder, details), fit, refit, index, overrides=overrides,
+        maker.gpu_fit_row(row), fit_slot, lbd_input_key(lbd_folder, details), fit, refit, index, batch_size=batch_override,
     )
     patch = entry["plan_train"].get("patch_size", row["patch_size"])
     append_center_ranges(lbd_folder, patch, plan["prezoom_scale"], fitted_now)

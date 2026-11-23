@@ -32,11 +32,11 @@ class ConfigMakerDet(ConfigMaker):
 
     def setup(
         self, plan_train, plan_valid=None, load_computed=True, gpu_key=None, *,
-        load_gpu_fit=True, epochs=None, batch_size=None, patch_size=None,
+        load_gpu_fit=True, epochs=None, batch_size=None,
     ):
         super().setup(
             plan_train, plan_valid, load_computed=load_computed, gpu_key=gpu_key,
-            load_gpu_fit=load_gpu_fit, epochs=epochs, batch_size=batch_size, patch_size=patch_size,
+            load_gpu_fit=load_gpu_fit, epochs=epochs, batch_size=batch_size,
         )
         for split in ("plan_train", "plan_valid", "plan_test"):
             plan = self.configs[split]
