@@ -1,66 +1,27 @@
 import torch
 from det3d.geometry.nndet_boxes import from_nndet, offset_nndet_xyxyzz_boxes
+from det3d.inference.transforms import LoadInferImaged
+from det3d.managers.retinanet import RetinaNetManager
+from det3d.managers.retinaunet import RetinaUNetManager
 from det3d.utils.tensor import plain_tensor
 from fran.inference.base import BaseInferer
 from fran.inference.cascade import img_bbox_collated
+from fran.inference.helpers import channel_first
 from fran.transforms.inferencetransforms import SqueezeListofListsd
 from fran.transforms.intensitytransforms import NormaliseClipd
-from monai.data.meta_tensor import MetaTensor
-from monai.transforms import Compose, EnsureChannelFirstd, EnsureTyped
+from monai.transforms import EnsureChannelFirstd, EnsureTyped, Orientationd, Spacingd
 from monai.transforms.post.dictionary import Invertd
 from utilz.cprint import cprint
+from utilz.stringz import ast_literal_eval
 
 
 class DetPatchInfererBase(BaseInferer):
+    """Det patch inference on localiser crops (or stored LBD crops when stored_input)."""
+
     arch_name = "base"
     stored_input = False  # True: inputs come from the preprocessed store (LBD .pt)
-
-    def bind_preprocess_transforms(self):
-        for key, value in self.preprocess_transforms_dict.items():
-            setattr(self, key, value)
-
-    def norm_dtype_transforms(self):
-        plan = self.params["configs"]["plan_train"]
-        norm = NormaliseClipd.from_plan(
-            keys=["image"], plan=plan, detection_params=self.dataset_params,
-            stored_plan=plan if self.stored_input else None,
-        )
-        dtype = EnsureTyped(keys=["image"], dtype=torch.float16)
-        return {"Norm": norm, "Dtype": dtype}
-
-    def set_preprocess_tfms_keys(self):
-        self.keys_preproc = type(self).keys_preproc
-        self.preprocess_tfms_keys = self.keys_preproc
-
-    def set_postprocess_tfms_keys(self):
-        chain = type(self).keys_postproc
-        if not self.save:
-            chain = ",".join(k for k in chain.split(",") if k != "S")
-        self.keys_postproc = chain
-        self.postprocess_tfms_keys = chain
-
-    def set_preprocess_transforms(self):
-        transform = self.tfms_from_dict(
-            self.keys_preproc, self.preprocess_transforms_dict
-        )
-        self.preprocess_compose = Compose(transform)
-
-    def set_postprocess_transforms(self):
-        self.postprocess_transforms = self.tfms_from_dict(
-            self.keys_postproc, self.postprocess_transforms_dict
-        )
-        self.postprocess_compose = Compose(self.postprocess_transforms)
-
-    def check_plan_compatibility(self):
-        pass
-
-    def prepare_data(self, data, collate_fn=img_bbox_collated):
-        super().prepare_data(data, collate_fn=collate_fn)
-
-
-class DetPatchRetinaUNet(DetPatchInfererBase):
+    model_manager = None
     keys_preproc = "L,E,S,O,Norm,Dtype"
-    keys_postproc = "Pack,SqL,InvP,InvPreBox"
 
     def __init__(
         self,
@@ -75,15 +36,7 @@ class DetPatchRetinaUNet(DetPatchInfererBase):
         debug=False,
         **kwargs,
     ):
-        cprint("Setting up RetinaUNet Det patch inference", color="red", bold=True)
-        from det3d.inference.transforms import LoadInferImaged
-        from det3d.managers.retinaunet import RetinaUNetManager
-        from fran.inference.helpers import load_params
-
-        if params is None:
-            params = load_params(run_name)
-        self.patch_overlap = patch_overlap
-        self._box_acc = []
+        cprint(f"Setting up {self.arch_name} Det patch inference", color="red", bold=True)
         super().__init__(
             run_name=run_name,
             project_title=project_title,
@@ -97,25 +50,48 @@ class DetPatchRetinaUNet(DetPatchInfererBase):
             debug=debug,
             keys_preproc=self.keys_preproc,
             keys_postproc=self.keys_postproc,
-            model_manager=RetinaUNetManager,
+            model_manager=self.model_manager,
             **kwargs,
         )
 
+    def bind_transforms(self, tfms_dict):
+        for key, value in tfms_dict.items():
+            setattr(self, key, value)
+
     def create_preprocess_transforms(self):
-        from monai.transforms import Orientationd, Spacingd
-        from utilz.stringz import ast_literal_eval
-
-        from det3d.inference.transforms import LoadInferImaged
-
+        plan = self.params["configs"]["plan_train"]
         self.preprocess_transforms_dict = {
             "L": LoadInferImaged(keys=["image"]),
             "E": EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
-            **self.norm_dtype_transforms(),
+            "S": Spacingd(keys=["image"], pixdim=ast_literal_eval(plan["spacing"])),
+            "O": Orientationd(keys=["image"], axcodes="RAS"),
+            "Norm": NormaliseClipd.from_plan(
+                keys=["image"], plan=plan, detection_params=self.dataset_params,
+                stored_plan=plan if self.stored_input else None,
+            ),
+            "Dtype": EnsureTyped(keys=["image"], dtype=torch.float16),
         }
-        spacing = ast_literal_eval(self.params["configs"]["plan_train"]["spacing"])
-        self.preprocess_transforms_dict["S"] = Spacingd(keys=["image"], pixdim=spacing)
-        self.preprocess_transforms_dict["O"] = Orientationd(keys=["image"], axcodes="RAS")
-        self.bind_preprocess_transforms()
+        self.bind_transforms(self.preprocess_transforms_dict)
+
+    def set_postprocess_tfms_keys(self):
+        self.postprocess_tfms_keys = ",".join(
+            k for k in self.keys_postproc.split(",") if self.save or k != "S"
+        )
+
+    def check_plan_compatibility(self):
+        pass
+
+    def prepare_data(self, data, collate_fn=img_bbox_collated):
+        super().prepare_data(data, collate_fn=collate_fn)
+
+    def image_on_model_device(self, batch, device):
+        return channel_first(plain_tensor(batch["image"]).float().to(device))
+
+
+class DetPatchRetinaUNet(DetPatchInfererBase):
+    arch_name = "RetinaUNet"
+    model_manager = RetinaUNetManager
+    keys_postproc = "Pack,SqL,InvP,InvPreBox"
 
     def create_postprocess_transforms(self, preprocess_transform):
         from det3d.inference.post import InvPreprocessBoxd, PackRetinaUNetPredsd
@@ -130,8 +106,7 @@ class DetPatchRetinaUNet(DetPatchInfererBase):
             ),
             "InvPreBox": InvPreprocessBoxd(),
         }
-        for key, value in self.postprocess_transforms_dict.items():
-            setattr(self, key, value)
+        self.bind_transforms(self.postprocess_transforms_dict)
 
     def setup(self):
         from det3d.inference.mirror_tta import inference_tta
@@ -327,12 +302,7 @@ class DetPatchRetinaUNet(DetPatchInfererBase):
         return stitched_seg, boxes, scores, labels
 
     def predict_inner(self, batch):
-        device = next(self.model.net.parameters()).device
-        img = plain_tensor(batch["image"]).float().to(device)
-        if img.dim() == 5:
-            img = img[0]
-        if img.dim() == 3:
-            img = img.unsqueeze(0)
+        img = self.image_on_model_device(batch, next(self.model.net.parameters()).device)
         self.model.eval()
         if self.needs_swi(img) or self.num_tta > 0:  # TTA views meet in the tile box merge
             vol = img.unsqueeze(0)
@@ -351,60 +321,9 @@ class DetPatchRetinaUNet(DetPatchInfererBase):
 
 
 class DetPatchRetinaNet(DetPatchInfererBase):
-    keys_preproc = "L,E,S,O,Norm,Dtype"
+    arch_name = "RetinaNet"
+    model_manager = RetinaNetManager
     keys_postproc = "Pack,SqL,InvPreBox"
-
-    def __init__(
-        self,
-        run_name,
-        project_title=None,
-        patch_overlap=None,
-        devices=(0,),
-        safe_mode=False,
-        save=False,
-        params=None,
-        ckpt=None,
-        debug=False,
-        **kwargs,
-    ):
-        cprint("Setting up RetinaNet Det patch inference", color="red", bold=True)
-        from det3d.managers.retinanet import RetinaNetManager
-        from fran.inference.helpers import load_params
-
-        if params is None:
-            params = load_params(run_name)
-        super().__init__(
-            run_name=run_name,
-            project_title=project_title,
-            patch_overlap=patch_overlap,
-            devices=devices,
-            safe_mode=safe_mode,
-            save=save,
-            save_channels=False,
-            params=params,
-            ckpt=ckpt,
-            debug=debug,
-            keys_preproc=self.keys_preproc,
-            keys_postproc=self.keys_postproc,
-            model_manager=RetinaNetManager,
-            **kwargs,
-        )
-
-    def create_preprocess_transforms(self):
-        from monai.transforms import Orientationd, Spacingd
-        from utilz.stringz import ast_literal_eval
-
-        from det3d.inference.transforms import LoadInferImaged
-
-        self.preprocess_transforms_dict = {
-            "L": LoadInferImaged(keys=["image"]),
-            "E": EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
-            **self.norm_dtype_transforms(),
-        }
-        spacing = ast_literal_eval(self.params["configs"]["plan_train"]["spacing"])
-        self.preprocess_transforms_dict["S"] = Spacingd(keys=["image"], pixdim=spacing)
-        self.preprocess_transforms_dict["O"] = Orientationd(keys=["image"], axcodes="RAS")
-        self.bind_preprocess_transforms()
 
     def create_postprocess_transforms(self, preprocess_transform):
         from det3d.inference.post import InvPreprocessBoxd, PackRetinaNetPredsd
@@ -414,16 +333,10 @@ class DetPatchRetinaNet(DetPatchInfererBase):
             "SqL": SqueezeListofListsd(keys=["bounding_box"]),
             "InvPreBox": InvPreprocessBoxd(),
         }
-        for key, value in self.postprocess_transforms_dict.items():
-            setattr(self, key, value)
+        self.bind_transforms(self.postprocess_transforms_dict)
 
     def predict_inner(self, batch):
-        device = next(self.model.parameters()).device
-        img = plain_tensor(batch["image"]).float().to(device)
-        if img.dim() == 5:
-            img = img[0]
-        if img.dim() == 3:
-            img = img.unsqueeze(0)
+        img = self.image_on_model_device(batch, next(self.model.parameters()).device)
         detector = self.model.detector
         detector.eval()
         val_input = img.contiguous()
@@ -441,16 +354,6 @@ class DetPatchLBD(DetPatchRetinaUNet):
     keys_preproc = "L,E,Norm,Dtype"
     stored_input = True
     keys_postproc = "Pack,SqL,A,Int,W,S"
-
-    def create_preprocess_transforms(self):
-        from det3d.inference.transforms import LoadInferImaged
-
-        self.preprocess_transforms_dict = {
-            "L": LoadInferImaged(keys=["image"]),
-            "E": EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
-            **self.norm_dtype_transforms(),
-        }
-        self.bind_preprocess_transforms()
 
     def create_postprocess_transforms(self, preprocess_transform):
         import numpy as np
@@ -473,8 +376,7 @@ class DetPatchLBD(DetPatchRetinaUNet):
                 write_seg=True,
             ),
         }
-        for key, value in self.postprocess_transforms_dict.items():
-            setattr(self, key, value)
+        self.bind_transforms(self.postprocess_transforms_dict)
 
 # %%
 # SECTION:-------------------- setup --------------------------------------------------------------------------------------

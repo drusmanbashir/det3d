@@ -1,23 +1,15 @@
 from copy import deepcopy
 
-from monai.transforms import Compose
-from monai.transforms.spatial.dictionary import ConvertBoxToPointsd, ConvertPointsToBoxesd
-import numpy as np
-import torch
-from det3d.inference.post import InvPreprocessBoxd, PackRetinaNetPredsd, PackRetinaUNetPredsd, inverse_preprocess_box
-from fran.data.dataset import FillBBoxPatchesd
+from det3d.inference.patch import DetPatchRetinaNet, DetPatchRetinaUNet
+from det3d.inference.post import BoxRd, Offd, SaveDetOutputd
+from fran.inference import helpers
 from fran.inference.cascade import CascadeInferer as FranCascadeInferer
-from fran.transforms.inferencetransforms import MakeWritabled, SqueezeListofListsd
-from fran.transforms.spatialtransforms import RestoreOriginalOrientationd
+from fran.transforms.inferencetransforms import SqueezeListofListsd
 from monai.data.meta_tensor import MetaTensor
-from monai.transforms.post.dictionary import AsDiscreted
-from monai.transforms.utility.dictionary import ApplyTransformToPointsd, CastToTyped
-
-from utilz.imageviewers import ImageMaskBboxViewer
 from utilz.fileio import load_yaml
+from utilz.imageviewers import ImageMaskBboxViewer
 
 
- 
 def _finalize_postproc_keys(postproc, postproc_safe, *, safe_mode, k_largest, save):
     chain = postproc_safe if safe_mode else postproc
     if k_largest is not None:
@@ -44,7 +36,10 @@ def decollate_image(img, batch_image):
 class DetBBoxCascadeInferer(FranCascadeInferer):
     """Localiser bbox → det patch → full-volume boxes (RetinaNet)."""
 
+    PatchInfererCls = DetPatchRetinaNet
     keys_postproc = "SqL,Off,BoxR,S"
+    keys_postproc_safe = keys_postproc  # boxes only: safe mode changes nothing
+    write_seg = False
 
     def __init__(
         self,
@@ -61,46 +56,31 @@ class DetBBoxCascadeInferer(FranCascadeInferer):
         k_largest=None,
         debug=False,
     ):
-        from fran.inference.helpers import load_params
-        from fran.utils.misc import parse_devices
-
-        assert profile in [None, "dataloading", "prediction", "all"]
-        self.run_w = run_w
-        self.run_p = run_p
-        self.localiser_labels = localiser_labels
-        self.project_title = project_title
-        self.devices = devices
-        self.safe_mode = safe_mode
-        self.patch_overlap = patch_overlap
-        self.profile = profile
-        self.save_channels = False
-        self.save = save
-        self.save_localiser = save_localiser
-        self.k_largest = k_largest
-        self.debug = debug
-        self.merge_touching_labels = None
         self.pred_run_p = None
-        self.localiser_overwrite = False
-        self.device = parse_devices(devices)
-        self.params = load_params(run_p)
-        self.P = self.setup_patch_inferer()
-        self.predictions_folder = self.P.project.predictions_folder
-        self.W = self.setup_localiser_inferer()
+        super().__init__(
+            run_w,
+            run_p,
+            localiser_labels,
+            project_title=project_title,
+            devices=devices,
+            safe_mode=safe_mode,
+            patch_overlap=patch_overlap,
+            profile=profile,
+            save_channels=False,
+            save=save,
+            save_localiser=save_localiser,
+            k_largest=k_largest,
+            debug=debug,
+            merge_touching_labels=None,
+        )
 
     @property
     def output_folder(self):
         run_name = self.pred_run_p if self.pred_run_p is not None else self.run_p
         return self.predictions_folder / run_name
 
-    def cuda_clear(self):
-        if hasattr(self.P, "model"):
-            del self.P.model
-        torch.cuda.empty_cache()
-
     def setup_patch_inferer(self):
-        from det3d.inference.patch import DetPatchRetinaNet
-
-        return DetPatchRetinaNet(
+        return self.PatchInfererCls(
             run_name=self.run_p,
             project_title=self.project_title,
             devices=self.devices,
@@ -111,20 +91,20 @@ class DetBBoxCascadeInferer(FranCascadeInferer):
             save=False,
         )
 
+    def decollate_case(self, batch):
+        return {"image": decollate_image(batch["image"], batch["image"])}
+
     def decollate_patches(self, pa, bboxes, full_metas=None):
         output = []
         for case_idx, batch in enumerate(pa[self.P.run_name]):
-            batch_img = batch["image"]
-            bb = bboxes[case_idx]
-            crop_shape = batch["crop_spatial_shape"]
             item = {
-                "image": decollate_image(batch_img, batch_img),
+                **self.decollate_case(batch),
                 "pred_box": batch["pred_box"].detach().cpu(),
                 "pred_label": batch["pred_label"].detach().cpu(),
                 "pred_score": batch["pred_score"].detach().cpu(),
-                "bounding_box": bb,
+                "bounding_box": bboxes[case_idx],
                 "source_image": batch["source_image"],
-                "crop_spatial_shape": crop_shape,
+                "crop_spatial_shape": batch["crop_spatial_shape"],
             }
             if full_metas is not None:
                 item["full_meta"] = full_metas[case_idx]
@@ -132,22 +112,20 @@ class DetBBoxCascadeInferer(FranCascadeInferer):
         return output
 
     def patch_prediction(self, data):
-        from fran.inference import helpers
-
         sources = helpers.image_paths_from_data(data)
-        crop_shapes = []
-        for dat in data:
-            crop_shapes.append(tuple(int(v) for v in dat["image"].shape[-3:]))
-        preds = FranCascadeInferer.patch_prediction(self, data)
+        crop_shapes = [tuple(int(v) for v in dat["image"].shape[-3:]) for dat in data]
+        preds = super().patch_prediction(data)
         for i, batch in enumerate(preds[self.P.run_name]):
             batch["source_image"] = sources[i]
             batch["crop_spatial_shape"] = crop_shapes[i]
         return preds
 
     def create_postprocess_transforms(self):
-        from det3d.inference.post import BoxRd, Offd, SaveDetOutputd
+        self.postprocess_transforms_dict = {}
+        self.add_box_transforms()
 
-        self.postprocess_transforms_dict = {
+    def add_box_transforms(self):
+        self.postprocess_transforms_dict.update({
             "SqL": SqueezeListofListsd(keys=["bounding_box"]),
             "Off": Offd(box_keys=["pred_box"]),
             "BoxR": BoxRd(box_key="pred_box"),
@@ -155,97 +133,34 @@ class DetBBoxCascadeInferer(FranCascadeInferer):
                 output_dir=self.output_folder,
                 run_w=self.run_w,
                 run_p=self.run_p,
-                write_seg=False,
+                write_seg=self.write_seg,
             ),
-        }
+        })
 
     def set_postprocess_tfms_keys(self):
-        cls = type(self)
-        self.keys_postproc = _finalize_postproc_keys(
-            cls.keys_postproc,
-            cls.keys_postproc,
-            safe_mode=False,
+        self.postprocess_tfms_keys = _finalize_postproc_keys(
+            self.keys_postproc,
+            self.keys_postproc_safe,
+            safe_mode=self.safe_mode,
             k_largest=self.k_largest,
             save=self.save,
         )
-        self.postprocess_tfms_keys = self.keys_postproc
-
-    def set_postprocess_transforms(self):
-        self.postprocess_transforms = self.tfms_from_dict(
-            self.keys_postproc, self.postprocess_transforms_dict
-        )
-        self.postprocess_compose = Compose(self.postprocess_transforms)
 
 
 class DetSegBBoxCascadeInferer(DetBBoxCascadeInferer):
     """Localiser bbox → RetinaUNet patch → full-volume seg + boxes."""
 
+    PatchInfererCls = DetPatchRetinaUNet
     keys_postproc = "SqL,MR,A,Int,W,F,R,Off,BoxR,S"
     keys_postproc_safe = "SqL,MR,W,F,R,Off,BoxR,S"
+    write_seg = True
 
-    def setup_patch_inferer(self):
-        from det3d.inference.patch import DetPatchRetinaUNet
-
-        return DetPatchRetinaUNet(
-            run_name=self.run_p,
-            project_title=self.project_title,
-            devices=self.devices,
-            patch_overlap=self.patch_overlap,
-            safe_mode=self.safe_mode,
-            params=self.params,
-            debug=self.debug,
-            save=False,
-        )
-
-    def decollate_patches(self, pa, bboxes, full_metas=None):
-        output = []
-        for case_idx, batch in enumerate(pa[self.P.run_name]):
-            batch_img = batch["image"]
-            bb = bboxes[case_idx]
-            crop_shape = batch["crop_spatial_shape"]
-            pred = batch["pred"].detach().cpu()
-            if pred.ndim == 5:
-                pred = pred[0]
-            if pred.ndim == 3:
-                pred = pred.unsqueeze(0)
-            item = {
-                self.run_p: pred,
-                "pred_box": batch["pred_box"].detach().cpu(),
-                "pred_label": batch["pred_label"].detach().cpu(),
-                "pred_score": batch["pred_score"].detach().cpu(),
-                "bounding_box": bb,
-                "source_image": batch["source_image"],
-                "crop_spatial_shape": crop_shape,
-            }
-            if full_metas is not None:
-                item["full_meta"] = full_metas[case_idx]
-            output.append(item)
-        return output
+    def decollate_case(self, batch):
+        return {self.run_p: helpers.channel_first(batch["pred"].detach().cpu())}
 
     def create_postprocess_transforms(self):
         FranCascadeInferer.create_postprocess_transforms(self)
-        from det3d.inference.post import BoxRd, Offd, SaveDetOutputd
-
-        self.postprocess_transforms_dict["SqL"] = SqueezeListofListsd(keys=["bounding_box"])
-        self.postprocess_transforms_dict["Off"] = Offd(box_keys=["pred_box"])
-        self.postprocess_transforms_dict["BoxR"] = BoxRd(box_key="pred_box")
-        self.postprocess_transforms_dict["S"] = SaveDetOutputd(
-            output_dir=self.output_folder,
-            run_w=self.run_w,
-            run_p=self.run_p,
-            write_seg=True,
-        )
-
-    def set_postprocess_tfms_keys(self):
-        cls = type(self)
-        self.keys_postproc = _finalize_postproc_keys(
-            cls.keys_postproc,
-            cls.keys_postproc_safe,
-            safe_mode=self.safe_mode,
-            k_largest=self.k_largest,
-            save=self.save,
-        )
-        self.postprocess_tfms_keys = self.keys_postproc
+        self.add_box_transforms()
 
 
 if __name__ == "__main__":

@@ -1,9 +1,12 @@
 from pathlib import Path
 
+import torch
+from det3d.inference.lbd_pt import load_lbd_pt_patch_data
+from det3d.inference.patch import DetPatchLBD
+from det3d.inference.post import SaveDetOutputd
+from utilz.fileio import load_json
 from utilz.helpers import chunks
 from utilz.listify import listify
-from utilz.fileio import load_json
-
 
 
 class DetLBDRunner:
@@ -21,14 +24,8 @@ class DetLBDRunner:
         pred_run_p=None,
         save=True,
     ):
-        from det3d.inference.lbd_pt import load_lbd_pt_patch_data
-        from det3d.inference.patch import DetPatchLBD
-        from fran.inference.helpers import load_params
-
         self.run_p = run_p
         self.pred_run_p = pred_run_p if pred_run_p is not None else f"{run_p}-lbd"
-        if params is None:
-            params = load_params(run_p)
         self.P = DetPatchLBD(
             run_name=run_p,
             project_title=project_title,
@@ -46,9 +43,6 @@ class DetLBDRunner:
         return self.predictions_folder / self.pred_run_p
 
     def process_sublist(self, pt_paths):
-        from det3d.inference.lbd_pt import load_lbd_pt_patch_data
-        from det3d.inference.post import SaveDetOutputd
-
         self.P.create_postprocess_transforms(None)
         self.P.postprocess_transforms_dict["S"] = SaveDetOutputd(
             output_dir=self.output_folder,
@@ -59,24 +53,18 @@ class DetLBDRunner:
         self.P.set_postprocess_tfms_keys()
         self.P.set_postprocess_transforms()
         data = load_lbd_pt_patch_data(pt_paths)
-        sources = [str(p) for p in pt_paths]
-        from fran.inference.cascade import img_bbox_collated
-
         self.P.setup()
-        self.P.prepare_data(data=data, collate_fn=img_bbox_collated)
+        self.P.prepare_data(data=data)
         outputs = []
-        for i, batch in enumerate(self.P.predict()):
-            batch["source_image"] = sources[i]
+        for source, batch in zip(pt_paths, self.P.predict()):
+            batch["source_image"] = str(source)
             bbox = batch["bounding_box"]
             while len(bbox) == 1 and not isinstance(bbox[0], slice):
                 bbox = bbox[0]
             batch["bounding_box"] = bbox
-            batch = self.P.postprocess(batch)
-            outputs.append(batch)
+            outputs.append(self.P.postprocess(batch))
         if hasattr(self.P, "model"):
             del self.P.model
-        import torch
-
         torch.cuda.empty_cache()
         return outputs
 
