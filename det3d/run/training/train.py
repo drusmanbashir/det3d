@@ -10,5 +10,5 @@ if __name__ == "__main__":
     argv = sys.argv[1:]
     if not any(a in ("--pipeline", "-pipeline") for a in argv):
         argv = ["--pipeline", "det"] + argv
-    args = parser.parse_known_args(argv)[0]
+    args = parser.parse_args(argv)
     main(args)

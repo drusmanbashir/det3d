@@ -2,6 +2,13 @@
 # Submit det training on HPC (bones defaults; override via positional args to train_det.sh).
 set -euo pipefail
 
+for arg in "$@"; do
+  if [[ "$arg" == --patch-size || "$arg" == --patch-size=* ]]; then
+    echo "Training removed --patch-size. Set patch dimensions in the workbook." >&2
+    exit 2
+  fi
+done
+
 HPC_CLI="${HPC_CLI_ROOT:-/home/ub/code/agent/agent/hpc/cli}"
 export PYTHONPATH="/home/ub/code/agent:/home/ub/code/agent/agent/hpc${PYTHONPATH:+:${PYTHONPATH}}"
 

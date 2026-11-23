@@ -29,7 +29,7 @@ These values were checked by calling `ConfigMakerDet(Project("lidca")).setup(4)`
 | `dataset_params.fold`, `batch_size`, `valid_impl` | `0`, `4`, `bbox_anchor` | Detection `data_params` sheet; training CLI can override fold and batch size. nnDetection's data loader is not used. |
 | `dataset_params.spacing` | `[0.703125, 0.703125, 1.25]` | Detection `data_params` sheet. This is a distinct value from plan 4's spacing below. |
 | `plan_train.spacing` | `(0.8, 0.8, 1.5)` | `plans_det` row 4 overrides the shared plan default. Not selected by nnDetection. |
-| `plan_train.patch_size`, `src_dims` | `[128, 128, 64]`, `[140, 140, 70]` | `patch_dim0=128` and `patch_dim1=64` become a patch size; `det3d` calculates `src_dims` from it. `--patch-size` can override the patch size. |
+| `plan_train.patch_size`, `src_dims` | `[128, 128, 64]`, `[140, 140, 70]` | The workbook values `patch_dim0=128` and `patch_dim1=64` give the training patch. `det3d` calculates `src_dims` from it. |
 | `plan_valid.val_patch_size` | `(128, 128, 64)` | `plans_det` row 4; kept separate from training patch size. |
 | `plan_train.fg_labels` | absent at `ConfigMakerDet.setup` | `det3d` later infers labels from its prepared-data manifest and adds them to the train, validation, and test plans before model creation. |
 

@@ -12,6 +12,13 @@
 
 set -euo pipefail
 
+for arg in "$@"; do
+  if [[ "$arg" == --patch-size || "$arg" == --patch-size=* ]]; then
+    echo "Training removed --patch-size. Set patch dimensions in the workbook." >&2
+    exit 2
+  fi
+done
+
 THREADS="${SLURM_CPUS_PER_TASK:-${SLURM_NTASKS:-1}}"
 export OMP_NUM_THREADS="${THREADS}"
 export OPENBLAS_NUM_THREADS="${THREADS}"

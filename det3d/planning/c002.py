@@ -11,7 +11,7 @@ from fran.architectures.nnunet import encoder_widths
 from fran.configs.defaults import plan_gpu_buffer_mb
 from fran.configs.helpers import is_unspecified
 from fran.nn_compat.fit_store import FitStore
-from fran.nn_compat.gpu_memory import check_fixed_memory, check_planning_gpu, planning_budget
+from fran.nn_compat.gpu_memory import batch_fit_error, check_fixed_memory, check_planning_gpu, planning_budget
 from fran.nn_compat.linked_config_keys import LinkedConfigKeys
 from fran.preprocessing.dataset_details_lbd import (
     append_center_ranges, details_shape, lbd_box_records, lbd_input_key, selected_lbd_details,
@@ -125,7 +125,11 @@ class LBDBoxC002(BoxC002):
             try:
                 patch = [int(value) for value in self._plan_architecture(self.spacing, median_shape, self.transpose_forward)]
             except (ValueError, RuntimeError, AssertionError, IndexError) as exc:
-                raise ValueError(f"Plan {linked.row['plan_name']}: BoxC002 cannot fit {linked.describe()}") from exc
+                detail = self._minimum_batch_detail(median_shape)
+                raise ValueError(
+                    f"Plan {linked.row['plan_name']}: BoxC002 cannot fit {linked.describe()} "
+                    f"in {self.estimator.target_mem} bytes. {detail}"
+                ) from exc
             model = self.planned_model()
         else:
             if is_unspecified(model):
@@ -139,20 +143,42 @@ class LBDBoxC002(BoxC002):
                 raise ValueError(f"Plan {linked.row['plan_name']}: {linked.describe()} requires patch divisible by {stride.tolist()}")
             batches = range(self.batch_size, 0, -1) if batch == "auto" else (batch,)
             for candidate in batches:
-                _, fits = self.estimate(patch, candidate, model)
+                required, fits = self.estimate(patch, candidate, model)
                 if fits:
                     self.batch_size = candidate
                     break
             else:
-                raise ValueError(
-                    f"Plan {linked.row['plan_name']}: BoxC002 cannot fit {linked.describe()} "
-                    f"in {self.estimator.target_mem} bytes"
+                raise batch_fit_error(
+                    f"Plan {linked.row['plan_name']} (BoxC002)", linked.describe(),
+                    patch, candidate, self.estimator.target_mem, required,
+                    lambda axes, size: self.estimate(axes, size, model)[0],
                 )
         fit = {
             "plan_train": {"patch_size": patch, "batch_size": int(self.batch_size), "model": model},
             "fit": {"class_weight": self.architecture_kwargs["class_weight"], "estimator": gpu_metadata},
         }
         return fit
+
+    def _decrease_patch_size(self, patch_size, median_shape, pooling, must_be_divisible_by):
+        previous = patch_size.copy()
+        patch = super()._decrease_patch_size(patch_size, median_shape, pooling, must_be_divisible_by)
+        if np.any(patch <= 0) or np.array_equal(previous, patch):
+            raise ValueError("BoxC002 exhausted its patch search")
+        return patch
+
+    def _minimum_batch_detail(self, median_shape):
+        """Try batch 1 for the error message after a failed automatic patch search."""
+        batch = self.batch_size
+        self.batch_size = 1
+        try:
+            patch = self._plan_architecture(self.spacing, median_shape, self.transpose_forward)
+        except (ValueError, RuntimeError, AssertionError, IndexError):
+            detail = "The patch search found no fit even at plans.batch_size=1."
+        else:
+            detail = f"The smallest batch that fits is plans.batch_size=1 with patch {[int(axis) for axis in patch]}."
+        finally:
+            self.batch_size = self.estimator.batch_size = batch
+        return detail
 
     def planned_model(self):
         anchors = self._plan_anchors(target_spacing_transposed=self.spacing, transpose_forward=self.transpose_forward)
@@ -171,7 +197,7 @@ class LBDBoxC002(BoxC002):
             conv_kernels=model["conv_kernels"], strides=model["strides"], decoder_levels=tuple(model["decoder_levels"])
         )
         self.estimator.batch_size = batch
-        estimate = self.estimator.estimate(
+        estimate, fits = self.estimator.estimate(
             min_shape=np.prod(model["strides"], axis=0),
             target_shape=patch,
             in_channels=self.architecture_kwargs["in_channels"],
@@ -183,7 +209,9 @@ class LBDBoxC002(BoxC002):
                 patch_size=patch, target_spacing_transposed=self.spacing, transpose_forward=self.transpose_forward
             ),
         )
-        return estimate
+        if np.isnan(estimate):
+            estimate = float("inf")
+        return estimate, fits
 
 
 def fit_plan(project, maker, plan, index, refit, *, batch_size=None):  #AI
@@ -207,6 +235,7 @@ def fit_plan(project, maker, plan, index, refit, *, batch_size=None):  #AI
         check_fixed_memory(
             plan["plan_name"], maker.PIPELINE, row["patch_size"], row["batch_size"], gpu,
             lambda patch, batch: planner.memory_estimate(patch, batch, row["model"]),
+            settings=linked.describe(),
         )
         return
 

@@ -4,6 +4,13 @@
 # Extra arguments go to train.py:  ./e2e.sh -e 50 --bs 2 -r my_run
 set -euo pipefail
 
+for arg in "$@"; do
+  if [[ "$arg" == --patch-size || "$arg" == --patch-size=* ]]; then
+    echo "Training removed --patch-size. Set patch dimensions in the workbook." >&2
+    exit 2
+  fi
+done
+
 PROJECT="${PROJECT:-lidc}"
 PLAN="${PLAN:-1}"
 FOLD="${FOLD:-0}"

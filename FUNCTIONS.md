@@ -80,6 +80,7 @@ Detection training and inference use FRAN's `NormaliseClipd.from_plan`. The work
 ## run/training
 
 - `det3d/run/training/train.py` delegates to FRAN's training CLI and selects `det` by default. For `--project lidc --plan sota --pipeline det-fm`, use `plans.encoder=resenc` and the detection workbook’s `finetuning` sheet. `--epochs` substitutes `auto` or a positive integer for `plans.epochs`. `--bs` / `--batch-size` substitutes `auto` or a positive integer for `plans.batch_size` before the BoxC002 fit. `--num-iterations-per-epoch` sets sampled training batches and `--limit-val-batches` caps smoke validation. Transfer uses `--transfer true --run-name {source_run} --arch retinaunet --source-ckpt last`.
+  Set training patch dimensions in `plans.patch_dim0` and `plans.patch_dim1`, and validation dimensions in `plans.val_patch_size`. BoxC002 keeps fixed batch sizes and fits the automatic dimensions.
 - `train_det.sh` runs HPC Slurm det training through `train_retry.py --pipeline det`. Defaults are bones plan 1, RetinaNet and run-through. The optional fourth and fifth positional arguments supply `--bs` and `--epochs`. Omission uses the workbook.
 - `local_train_det.sh` runs the local detection CLI. The optional fourth and fifth positional arguments supply `--bs` and `--epochs`. Omission uses the workbook.
 - `submit_train_det.sh` submits det training to HPC. Usage is `submit_train_det.sh [project] [plan] [arch] [epochs] [batch_size]`.

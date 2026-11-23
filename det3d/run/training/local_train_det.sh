@@ -2,6 +2,13 @@
 # Local det training (train.py shim prepends --pipeline det).
 set -euo pipefail
 
+for arg in "$@"; do
+  if [[ "$arg" == --patch-size || "$arg" == --patch-size=* ]]; then
+    echo "Training removed --patch-size. Set patch dimensions in the workbook." >&2
+    exit 2
+  fi
+done
+
 source "${HOME}/mambaforge/etc/profile.d/conda.sh"
 conda activate dl
 export FRAN_CONF="${FRAN_CONF:-/s/fran_storage/conf}"
