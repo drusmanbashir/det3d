@@ -17,9 +17,9 @@ from monai.transforms.post.dictionary import Invertd
 from det3d.extra.infer_debug.fixtures._case import InferFixtureCase
 from det3d.geometry.lmg import voxel_start_size_to_xyzxyz
 from det3d.inference.post import BoxRd, InvPreprocessBoxd, Offd, PackRetinaUNetPredsd
-from det3d.transforms.intensity import det_intensity_transform
 from fran.data.dataset import FillBBoxPatchesd
 from fran.transforms.inferencetransforms import MakeWritabled, RenameDictKeys, SqueezeListofListsd
+from fran.transforms.intensitytransforms import NormaliseClipd
 from fran.transforms.spatialtransforms import RestoreOriginalOrientationd
 from label_analysis.geometry_pt import LabelMapGeometryPT
 from utilz.stringz import ast_literal_eval
@@ -37,7 +37,9 @@ def build_patch_preprocess(params):
             EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
             Spacingd(keys=["image"], pixdim=spacing),
             Orientationd(keys=["image"], axcodes="RAS"),
-            det_intensity_transform(configs["dataset_params"], plan),
+            NormaliseClipd.from_plan(
+                keys=["image"], plan=plan, detection_params=configs["dataset_params"],
+            ),
             EnsureTyped(keys=["image"], dtype=torch.float16),
         ]
     )

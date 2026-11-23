@@ -10,8 +10,8 @@ from det3d.utils.bbox_sidecar import bbox_sidecar_path, save_detection_sidecar
 from fran.preprocessing.preprocessor import CPUS_PER_ACTOR, Preprocessor
 from fran.preprocessing.rayworker_base import RayWorkerBase
 from fran.transforms.imageio import LoadTorchd
+from fran.transforms.intensitytransforms import NormaliseClipd
 from fran.utils.folder_names import FolderNames
-from monai.transforms import ScaleIntensityRanged
 from monai.transforms.utility.dictionary import EnsureChannelFirstd, ToDeviced
 from utilz.stringz import strip_extension
 from utilz.fileio import maybe_makedirs
@@ -75,15 +75,8 @@ class _OBJWorker(RayWorkerBase):
             dusting_threshold=dusting_threshold(plan),
             ignore_labels=self.ignore_labels,
         )
-        stats = plan["intensity_properties"]
-        clip = [stats["percentile_00_5"], stats["percentile_99_5"]]
-        self.Int = ScaleIntensityRanged(
-            keys=[self.image_key],
-            a_min=float(clip[0]),
-            a_max=float(clip[1]),
-            b_min=0.0,
-            b_max=1.0,
-            clip=True,
+        self.Int = NormaliseClipd.from_plan(
+            keys=[self.image_key], plan=plan, mode="scale01",
         )
         self.transforms_dict["Stats"] = self.Stats
         self.transforms_dict["N2P"] = self.N2P

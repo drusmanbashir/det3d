@@ -1,5 +1,5 @@
 # FUNCTIONS.md
-Scope: `det3d/planning/c002.py` `det3d/transforms/box_tracker.py` `det3d/transforms/intensity.py` `det3d/run/e2e.sh`
+Scope: `det3d/planning/c002.py` `det3d/transforms/box_tracker.py` `det3d/run/e2e.sh`
 
 ## run
 
@@ -53,7 +53,8 @@ Detection LBD preprocessing uses `fran/run/preproc/analyze_resample.py --pipelin
 - Detection plan file `plans/det3d_plan<id>.pkl`. FRAN preprocessing stores spacing, intensity and foreground labels. BoxC002 stores GPU-specific patch, batch and model at training start.
 - `det3d/planning/c002.py` — `LBDBoxC002`, nnDetection's BoxC002 on LBD crops: measures the encoder used for training, according to `plans.encoder`. Stores the fit by GPU memory class.
 - `det3d/transforms/box_tracker.py` — track LBD boxes through crops and spatial augmentation. The detection workbook defaults to `hull`, which uses `hull_xyz` and checks mask occupancy. `corner` warps box corners. `remeasure` rebuilds boxes from the warped `inst` map. For missing tracker data, rerun detection LBD with `--overwrite`.
-- `det3d/transforms/intensity.py` — share CT clipping across training and inference. `intensity_norm` defaults to `scale01` and also supports `zscore_fg`. Set `intensity_properties` in the workbook or fit them during detection preprocessing.
+
+Detection training and inference use FRAN's `NormaliseClipd.from_plan`. The workbook's `intensity_norm` defaults to `scale01` and also accepts `zscore_fg`. Set `intensity_properties` in the workbook or fit them during detection preprocessing.
 
 ## det/detection
 

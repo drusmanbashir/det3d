@@ -59,20 +59,22 @@ def test_plan_histogram_uses_selected_cases_and_composed_foreground(tmp_path):  
 
 def test_zscore_clips_before_standardizing():  #AI
     """Apply the computed clip, mean, and SD in nnDetection order."""
-    from det3d.transforms.intensity import det_intensity_transform
+    from fran.transforms.intensitytransforms import NormaliseClipd
 
     plan = {"intensity_properties": {
         "mean": 1.1, "sd": 1.7, "percentile_00_5": -3.4, "percentile_99_5": 4.8,
     }}
     image = torch.tensor([-15, -3, 1, 3, 18], dtype=torch.float16)
-    transform = det_intensity_transform({"intensity_norm": "zscore_fg"}, plan)
+    transform = NormaliseClipd.from_plan(
+        ["image"], plan, detection_params={"intensity_norm": "zscore_fg"},
+    )
     expected = (image.float().clamp(-3.4, 4.8) - 1.1) / 1.7
     assert torch.equal(transform({"image": image})["image"], expected)
 
 
 def test_scale01_keeps_main_arithmetic_for_identical_bounds():  #AI
     """Scale with the same MONAI transform as existing detectors."""
-    from det3d.transforms.intensity import det_intensity_transform
+    from fran.transforms.intensitytransforms import NormaliseClipd
 
     bounds = [-973.0, 429.0]
     image = torch.linspace(-1024.0, 450.0, 51)
@@ -80,7 +82,7 @@ def test_scale01_keeps_main_arithmetic_for_identical_bounds():  #AI
         "mean": -525.0, "sd": 197.0,
         "percentile_00_5": bounds[0], "percentile_99_5": bounds[1],
     }}
-    new = det_intensity_transform({"intensity_norm": "scale01"}, plan)
+    new = NormaliseClipd.from_plan(["image"], plan, detection_params={"intensity_norm": "scale01"})
     old = ScaleIntensityRanged(keys=["image"], a_min=bounds[0], a_max=bounds[1],
                                b_min=0.0, b_max=1.0, clip=True)
     assert torch.equal(new({"image": image})["image"], old({"image": image})["image"])

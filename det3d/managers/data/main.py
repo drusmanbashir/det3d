@@ -20,7 +20,6 @@ from fran.preprocessing.hdf5_shards import find_hdf5_shard_folder
 from det3d.transforms.box_tracker import BOX_TRACKERS
 from fran.transforms.detection import patch_size_manifest_key
 from det3d.transforms.gpu_det import RandAffineBoxSyncd, RandFlipBoxSyncd, ResizeWithPadOrCropBoxSyncd
-from det3d.transforms.intensity import stored_intensity_transform
 from det3d.utils.bbox_sidecar import bbox_sidecar_path, load_detection_sidecar, valid_detection_box
 from fran.utils.bbox_sidecar import extended_bbox_df_column, nbrhood_df_to_detection_records
 from fran.configs.helpers import is_excel_None
@@ -39,7 +38,7 @@ from fran.run.preproc.archive_preprocessed import ensure_rapid_data_folder
 from fran.transforms.imageio import TorchReader
 from monai.data import DataLoader, Dataset
 from torch.utils.data import RandomSampler
-from fran.transforms.intensitytransforms import RandRandGaussianNoised
+from fran.transforms.intensitytransforms import NormaliseClipd, RandRandGaussianNoised
 from monai.transforms import (
     Compose,
     EnsureChannelFirstd,
@@ -162,7 +161,12 @@ class DataManagerDet(DataManager):
 
     def _intensity_transform(self, keys):  #AI
         """Build detection normalization from the intensity properties for this split."""
-        transform = stored_intensity_transform(self.dataset_params, self.plan, keys=keys)
+        transform = NormaliseClipd.from_plan(
+            keys=keys,
+            plan=self.plan,
+            stored_plan=self.plan,
+            detection_params=self.dataset_params,
+        )
         return transform
 
     def _valid_impl(self):

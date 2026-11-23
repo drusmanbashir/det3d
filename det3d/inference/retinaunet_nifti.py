@@ -11,11 +11,11 @@ from det3d.detection.postprocess import postprocess_values
 from det3d.inference.lbd_pt import load_lbd_pt
 from det3d.architectures.create_detector import inference_overlap
 from det3d.inference.mirror_tta import inference_tta
-from det3d.transforms.intensity import stored_intensity_transform
 from det3d.geometry.nndet_boxes import from_nndet
 from det3d.utils.tensor import plain_tensor, to_numpy
 from fran.data.dataregistry import DS
 from fran.managers import Project
+from fran.transforms.intensitytransforms import NormaliseClipd
 from fran.utils.folder_names import FolderNames
 from utilz.fileio import save_json
 
@@ -210,7 +210,10 @@ def run_lidc2_seg_infer(
     project = Project(project_title)
     manager = load_retinaunet_manager(ckpt_path, device)
     plan = manager.plan
-    normalize = stored_intensity_transform(manager.configs["dataset_params"], plan)
+    normalize = NormaliseClipd.from_plan(
+        keys=["image"], plan=plan, stored_plan=plan,
+        detection_params=manager.configs["dataset_params"],
+    )
     spacing = spacing_from_plan(plan)
 
     manifest = []

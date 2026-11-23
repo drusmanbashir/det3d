@@ -1,10 +1,10 @@
 import torch
 from det3d.geometry.nndet_boxes import from_nndet, offset_nndet_xyxyzz_boxes
-from det3d.transforms.intensity import det_intensity_transform, stored_intensity_transform
 from det3d.utils.tensor import plain_tensor
 from fran.inference.base import BaseInferer
 from fran.inference.cascade import img_bbox_collated
 from fran.transforms.inferencetransforms import SqueezeListofListsd
+from fran.transforms.intensitytransforms import NormaliseClipd
 from monai.data.meta_tensor import MetaTensor
 from monai.transforms import Compose, EnsureChannelFirstd, EnsureTyped
 from monai.transforms.post.dictionary import Invertd
@@ -20,8 +20,11 @@ class DetPatchInfererBase(BaseInferer):
             setattr(self, key, value)
 
     def norm_dtype_transforms(self):
-        build = stored_intensity_transform if self.stored_input else det_intensity_transform
-        norm = build(self.dataset_params, self.params["configs"]["plan_train"])
+        plan = self.params["configs"]["plan_train"]
+        norm = NormaliseClipd.from_plan(
+            keys=["image"], plan=plan, detection_params=self.dataset_params,
+            stored_plan=plan if self.stored_input else None,
+        )
         dtype = EnsureTyped(keys=["image"], dtype=torch.float16)
         return {"Norm": norm, "Dtype": dtype}
 

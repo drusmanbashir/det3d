@@ -11,7 +11,7 @@ from fran.data.dataset import FillBBoxPatchesd
 from fran.transforms.inferencetransforms import SqueezeListofListsd
 from fran.transforms.spatialtransforms import RestoreOriginalOrientationd, ResizeToMetaSpatialShaped
 from monai.config import KeysCollection
-from monai.transforms import EnsureChannelFirstd, EnsureTyped, ScaleIntensityRanged
+from monai.transforms import EnsureChannelFirstd, EnsureTyped
 from monai.transforms.spatial.dictionary import ConvertBoxToPointsd, ConvertPointsToBoxesd, Orientationd, Spacingd
 from monai.transforms.utility.dictionary import ApplyTransformToPointsd, CastToTyped
 from monai.data.meta_tensor import MetaTensor
