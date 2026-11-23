@@ -79,10 +79,10 @@ Detection training and inference use FRAN's `NormaliseClipd.from_plan`. The work
 
 ## run/training
 
-- `det3d/run/training/train.py` — shim → `fran/run/training/train.py` (prepends `--pipeline det` when omitted; `--pipeline det-fm` requires `plans.encoder=resenc` and uses the detection workbook’s `finetuning` sheet; `TrainerDet` / `TrainerDetTransfer`); standard `--project lidc --plan sota --pipeline det-fm`. Epoch overrides are `--epochs` and `--num-iterations-per-epoch`; validation smoke override is `--limit-val-batches`. Transfer: `--transfer true --run-name {source_run} --arch retinaunet --source-ckpt last`; also `--run-through`, `--resume-lr`, `--batch-tfms`.
-- `train_det.sh` — HPC Slurm det training (`train_retry.py --pipeline det`); defaults bones plan 1, retinanet, run-through, 500 epochs
-- `local_train_det.sh` — local det training via `train.py` shim (PYTHONPATH + bones defaults)
-- `submit_train_det.sh` — HPC submit wrapper (optional)
+- `det3d/run/training/train.py` delegates to FRAN's training CLI and selects `det` by default. For `--project lidc --plan sota --pipeline det-fm`, use `plans.encoder=resenc` and the detection workbook’s `finetuning` sheet. `--epochs` substitutes `auto` or a positive integer for `plans.epochs`. `--num-iterations-per-epoch` sets sampled training batches and `--limit-val-batches` caps smoke validation. Transfer uses `--transfer true --run-name {source_run} --arch retinaunet --source-ckpt last`.
+- `train_det.sh` runs HPC Slurm det training through `train_retry.py --pipeline det`. Defaults are bones plan 1, RetinaNet and run-through. The optional fifth positional argument supplies `--epochs`.
+- `local_train_det.sh` runs the local detection CLI. The optional fifth positional argument supplies `--epochs`.
+- `submit_train_det.sh` submits det training to HPC. Usage is `submit_train_det.sh [project] [plan] [arch] [epochs]`.
 ## det3d/inference
 
 - `post.py` — `PackRetinaNetPredsd`, `PackRetinaUNetPredsd`, `InvPreprocessBoxd`, `Offd`, `BoxRd`, `SaveDetOutputd`

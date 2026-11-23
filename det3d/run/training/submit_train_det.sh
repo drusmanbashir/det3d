@@ -8,6 +8,7 @@ export PYTHONPATH="/home/ub/code/agent:/home/ub/code/agent/agent/hpc${PYTHONPATH
 PROJECT="${1:-bones}"
 PLAN_NUM="${2:-1}"
 ARCH="${3:-retinanet}"
+EPOCHS="${4:-}"
 
 argv=(
   "${HPC_CLI}/hpc_submit_poll_fetch.sh"
@@ -16,7 +17,7 @@ argv=(
   "${PLAN_NUM}"
   0
   4
-  500
+  "${EPOCHS}"
   0
   false
   false

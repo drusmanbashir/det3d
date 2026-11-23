@@ -11,7 +11,7 @@ PROJECT="${1:-bones}"
 PLAN_NUM="${2:-1}"
 DEVICES="${3:-0}"
 BS="${4:-4}"
-EPOCHS="${5:-500}"
+EPOCHS="${5:-}"
 FOLD="${6:-0}"
 COMPILED="${7:-false}"
 PROFILER="${8:-false}"
@@ -43,7 +43,6 @@ argv=(
   --devices "${DEVICES}"
   --bs "${BS}"
   --fold "${FOLD}"
-  --epochs "${EPOCHS}"
   --compiled "${COMPILED}"
   --profiler "${PROFILER}"
   --wandb "${WANDB}"
@@ -59,6 +58,9 @@ argv=(
   --dual-ssd "${DUAL_SSD}"
 )
 
+if [[ -n "${EPOCHS}" ]]; then
+  argv+=(--epochs "${EPOCHS}")
+fi
 if [[ -n "${LR}" ]]; then
   argv+=(--learning-rate "${LR}")
 fi

@@ -26,7 +26,7 @@ PROJECT="${1:-bones}"
 PLAN_NUM="${2:-1}"
 DEVICES="${3:-0}"
 BS="${4:-4}"
-EPOCHS="${5:-500}"
+EPOCHS="${5:-}"
 FOLD="${6:-0}"
 COMPILED="${7:-false}"
 PROFILER="${8:-false}"
@@ -63,7 +63,6 @@ cmd=(
   --devices "$DEVICES"
   --bs "$BS"
   --fold "$FOLD"
-  --epochs "$EPOCHS"
   --compiled "$COMPILED"
   --profiler "$PROFILER"
   --wandb "$WANDB"
@@ -82,6 +81,9 @@ cmd=(
   --min-bs "$MIN_BS"
 )
 
+if [[ -n "$EPOCHS" ]]; then
+  cmd+=(--epochs "$EPOCHS")
+fi
 if [[ -n "$LR" ]]; then
   cmd+=(--learning-rate "$LR")
 fi

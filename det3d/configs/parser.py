@@ -30,8 +30,14 @@ class ConfigMakerDet(ConfigMaker):
         super().__init__(project, include_nnfoundation=include_nnfoundation)
         self.sheet_defaults = {sheet: self.configs[sheet].copy() for sheet in self.PLAN_OVERRIDES}
 
-    def setup(self, plan_train, plan_valid=None, load_computed=True, gpu_key=None, *, load_gpu_fit=True):
-        super().setup(plan_train, plan_valid, load_computed=load_computed, gpu_key=gpu_key, load_gpu_fit=load_gpu_fit)
+    def setup(
+        self, plan_train, plan_valid=None, load_computed=True, gpu_key=None, *,
+        load_gpu_fit=True, epochs=None,
+    ):
+        super().setup(
+            plan_train, plan_valid, load_computed=load_computed, gpu_key=gpu_key,
+            load_gpu_fit=load_gpu_fit, epochs=epochs,
+        )
         plan = self.configs["plan_train"]
         for sheet, keys in self.PLAN_OVERRIDES.items():
             for key in keys:
