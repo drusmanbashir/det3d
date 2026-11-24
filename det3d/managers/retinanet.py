@@ -7,10 +7,10 @@ from det3d.architectures.create_detector import create_detector_from_conf, infer
 from det3d.evaluation.coco import compute_coco_metrics
 from det3d.managers.det_schedule import configure_detection_optimizers
 from fran.managers.project import Project
-from lightning.pytorch import LightningModule
+from fran.managers.unet import LossLoggingModule
 
 
-class RetinaNetManager(LightningModule):
+class RetinaNetManager(LossLoggingModule):
     def __init__(self, project_title, configs, lr=None, sync_dist=False):
         super().__init__()
         self.sync_dist = sync_dist
@@ -125,9 +125,8 @@ class RetinaNetManager(LightningModule):
         cls_loss = outputs[self.detector.cls_key]
         box_loss = outputs[self.detector.box_reg_key]
         loss = self.w_cls * cls_loss + self.w_reg * box_loss
-        self.log("train0_loss", loss, prog_bar=True, sync_dist=self.sync_dist)
-        self.log("train0_cls_loss", cls_loss, sync_dist=self.sync_dist)
-        self.log("train0_box_reg_loss", box_loss, sync_dist=self.sync_dist)
+        d = {"loss": loss, "cls_loss": cls_loss, "box_reg_loss": box_loss}
+        self.log_losses(d, "train0", batch_size=batch["image"].shape[0])
         self.maybe_store_grid_preds(batch)
         return loss
 

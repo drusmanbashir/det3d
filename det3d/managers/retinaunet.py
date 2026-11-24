@@ -10,7 +10,7 @@ from fran.architectures.nnunet import encoder_widths
 from fran.configs.helpers import plan_encoder
 from fran.configs.workbook import apply_finetuning
 from fran.managers.project import Project
-from lightning.pytorch import LightningModule
+from fran.managers.unet import LossLoggingModule
 from nndet.evaluator.seg import SegmentationEvaluator
 
 from det3d.detection.postprocess import postprocess_values
@@ -20,7 +20,7 @@ from det3d.utils.tensor import to_numpy
 
 
 # %%
-class RetinaUNetManager(LightningModule):
+class RetinaUNetManager(LossLoggingModule):
     """nnDetection RetinaUNetV001 on det3d DataManager batches."""
 
     NNDET_LOSS_LOG_NAMES = {
@@ -54,8 +54,6 @@ class RetinaUNetManager(LightningModule):
         self.lr = float(lr if lr is not None else self.model_params["lr"])
         self.class_names = [self.model_params["class_name"]]
         self.nndet_module, self.nndet_plan = self.build_nndet_module(self.configs)
-        self.val_loss_sums = {}
-        self.val_loss_count = 0
         self._val_patch_stream = False
 
     @property
@@ -205,20 +203,6 @@ class RetinaUNetManager(LightningModule):
         nb["target_seg"] = nb["target_seg"].to(device)
         return nb
 
-    def log_step_losses(self, losses, prefix):  #AI
-        """Log the summed and per-term nnDetection losses; return the sum."""
-        total = sum(losses.values())
-        self.log(f"{prefix}_loss", total, prog_bar=(prefix == "train0"), on_step=True, on_epoch=True, sync_dist=self.sync_dist)
-        for key, val in losses.items():
-            self.log(
-                f"{prefix}_{self.NNDET_LOSS_LOG_NAMES.get(key, key)}",
-                val,
-                on_step=(prefix == "train0"),
-                on_epoch=True,
-                sync_dist=self.sync_dist,
-            )
-        return total
-
     def step_losses(self, batch, batch_idx, evaluation=False):
         nb = self.det3d_batch_to_nndet(batch, self.plan["fg_labels"])
         nb = self.fast_nndet_batch_to_device(nb, batch["image"].device)
@@ -236,15 +220,15 @@ class RetinaUNetManager(LightningModule):
 
     def training_step(self, batch, batch_idx):
         store_preds = getattr(self.trainer, "store_preds", False)
-        losses, prediction, _ = self.step_losses(batch, batch_idx, evaluation=store_preds)
+        losses, prediction, nb = self.step_losses(batch, batch_idx, evaluation=store_preds)
         if store_preds:
             batch["pred"] = batch_pred_to_vis_list(prediction)
-        total = self.log_step_losses(losses, "train0")
+        total = sum(losses.values())
+        d = {"loss": total, **{self.NNDET_LOSS_LOG_NAMES.get(k, k): v for k, v in losses.items()}}
+        self.log_losses(d, "train0", batch_size=nb["data"].shape[0])
         return total
 
     def on_validation_epoch_start(self):
-        self.val_loss_sums = {}
-        self.val_loss_count = 0
         self._val_patch_stream = False
         self.nndet_module.box_evaluator.reset()
         self.nndet_module.seg_evaluator.reset()
@@ -290,15 +274,9 @@ class RetinaUNetManager(LightningModule):
                     "pred_seg"
                 ]
             }
-        for key, val in losses.items():
-            log_key = self.NNDET_LOSS_LOG_NAMES.get(key, key)
-            self.val_loss_sums[log_key] = self.val_loss_sums.get(log_key, 0.0) + float(
-                val.detach()
-            )
-        self.val_loss_sums["loss"] = self.val_loss_sums.get("loss", 0.0) + float(
-            sum(losses.values()).detach()
-        )
-        self.val_loss_count += 1
+        total = sum(losses.values())
+        d = {"loss": total, **{self.NNDET_LOSS_LOG_NAMES.get(k, k): v for k, v in losses.items()}}
+        self.log_losses(d, "val0", batch_size=nb["data"].shape[0])
         if not patch_stream:
             self.nndet_module.box_evaluator.run_online_evaluation(
                 pred_boxes=to_numpy(prediction["pred_boxes"]),
@@ -315,16 +293,13 @@ class RetinaUNetManager(LightningModule):
         )
 
     def on_validation_epoch_end(self):
-        n = self.val_loss_count
-        for log_key, total in self.val_loss_sums.items():
-            self.log(f"val0_{log_key}", total / n, sync_dist=self.sync_dist)
         metric_scores, _ = self.nndet_module.box_evaluator.finish_online_evaluation()
         self.nndet_module.box_evaluator.reset()
         for key, value in metric_scores.items():
             self.log(f"val0_{key}", float(value), sync_dist=self.sync_dist)
 
         val_metric = float(metric_scores[self.nndet_module.eval_score_key])
-        if n:
+        if self.configs["dataset_params"].get("valid_impl") != "full_volume":
             seg_scores, _ = self.nndet_module.seg_evaluator.finish_online_evaluation()
             self.nndet_module.seg_evaluator.reset()
             for key, value in seg_scores.items():
