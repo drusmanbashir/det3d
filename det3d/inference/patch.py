@@ -54,10 +54,6 @@ class DetPatchInfererBase(BaseInferer):
             **kwargs,
         )
 
-    def bind_transforms(self, tfms_dict):
-        for key, value in tfms_dict.items():
-            setattr(self, key, value)
-
     def create_preprocess_transforms(self):
         plan = self.params["configs"]["plan_train"]
         self.preprocess_transforms_dict = {
@@ -75,7 +71,7 @@ class DetPatchInfererBase(BaseInferer):
 
     def set_postprocess_tfms_keys(self):
         self.postprocess_tfms_keys = ",".join(
-            k for k in self.keys_postproc.split(",") if self.save or k != "S"
+            k for k in self.keys_postproc.split(",") if self.save or k != "Sav"
         )
 
     def check_plan_compatibility(self):
@@ -353,7 +349,7 @@ class DetPatchLBD(DetPatchRetinaUNet):
 
     keys_preproc = "L,E,Norm,Dtype"
     stored_input = True
-    keys_postproc = "Pack,SqL,A,Int,W,S"
+    keys_postproc = "Pack,SqL,A,Int,W,Sav"
 
     def create_postprocess_transforms(self, preprocess_transform):
         import numpy as np
@@ -369,7 +365,7 @@ class DetPatchLBD(DetPatchRetinaUNet):
             "A": AsDiscreted(keys=["pred"], argmax=True),
             "Int": CastToTyped(keys=["pred"], dtype=np.uint8),
             "W": MakeWritabled(keys=["pred"]),
-            "S": SaveDetOutputd(
+            "Sav": SaveDetOutputd(
                 output_dir=self.output_folder,
                 run_w="",
                 run_p=self.run_name,

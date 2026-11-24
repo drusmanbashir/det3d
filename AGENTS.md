@@ -12,3 +12,7 @@ integration work that invvoles both nnunet and nndetection: fran resues some nnu
 - conda env: `dl`
 - CLI toolbox: [FUNCTIONS.md](FUNCTIONS.md); global index [~/code/agent/CATALOG.md](../agent/CATALOG.md)
 - **Inference alignment debug:** see [det3d/extra/infer_debug/README.md](det3d/extra/infer_debug/README.md); rule `.cursor/rules/infer-debug-suite.mdc`
+
+## Pending work
+
+- At the start of the next det3d session, tell the user the [Retina U-Net label-flow report](specs/retinaunet-label-flow.md) is ready for review. The pending work is to build one loss-ready segmentation target after box tracking, reuse it for W&B, and decide whether to remove crop-only labels during preprocessing for future plans.

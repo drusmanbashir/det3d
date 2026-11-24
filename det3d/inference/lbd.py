@@ -44,7 +44,7 @@ class DetLBDRunner:
 
     def process_sublist(self, pt_paths):
         self.P.create_postprocess_transforms(None)
-        self.P.postprocess_transforms_dict["S"] = SaveDetOutputd(
+        self.P.postprocess_transforms_dict["Sav"] = SaveDetOutputd(
             output_dir=self.output_folder,
             run_w="",
             run_p=self.run_p,
@@ -155,7 +155,7 @@ if __name__ == "__main__":
     tfms = R.P.postprocess_transforms_dict
     dici = dict(batch)
     for key in R.P.keys_postproc.split(","):
-        if key == "S":
+        if key == "Sav":
             continue
         dici = tfms[key](dici)
         print(

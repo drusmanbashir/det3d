@@ -18,7 +18,7 @@ def _finalize_postproc_keys(postproc, postproc_safe, *, safe_mode, k_largest, sa
             parts.insert(parts.index("F"), "K")
             chain = ",".join(parts)
     if not save:
-        chain = ",".join(k for k in chain.split(",") if k != "S")
+        chain = ",".join(k for k in chain.split(",") if k != "Sav")
     return chain
 
 
@@ -37,7 +37,7 @@ class DetBBoxCascadeInferer(FranCascadeInferer):
     """Localiser bbox → det patch → full-volume boxes (RetinaNet)."""
 
     PatchInfererCls = DetPatchRetinaNet
-    keys_postproc = "SqL,Off,BoxR,S"
+    keys_postproc = "SqL,Off,BoxR,Sav"
     keys_postproc_safe = keys_postproc  # boxes only: safe mode changes nothing
     write_seg = False
 
@@ -129,7 +129,7 @@ class DetBBoxCascadeInferer(FranCascadeInferer):
             "SqL": SqueezeListofListsd(keys=["bounding_box"]),
             "Off": Offd(box_keys=["pred_box"]),
             "BoxR": BoxRd(box_key="pred_box"),
-            "S": SaveDetOutputd(
+            "Sav": SaveDetOutputd(
                 output_dir=self.output_folder,
                 run_w=self.run_w,
                 run_p=self.run_p,
@@ -151,8 +151,8 @@ class DetSegBBoxCascadeInferer(DetBBoxCascadeInferer):
     """Localiser bbox → RetinaUNet patch → full-volume seg + boxes."""
 
     PatchInfererCls = DetPatchRetinaUNet
-    keys_postproc = "SqL,MR,A,Int,W,F,R,Off,BoxR,S"
-    keys_postproc_safe = "SqL,MR,W,F,R,Off,BoxR,S"
+    keys_postproc = "SqL,MR,A,Int,W,F,R,Off,BoxR,Sav"
+    keys_postproc_safe = "SqL,MR,W,F,R,Off,BoxR,Sav"
     write_seg = True
 
     def decollate_case(self, batch):
@@ -312,7 +312,7 @@ if __name__ == "__main__":
     ImageMaskBboxViewer(dici["pred"][0], dici["pred"][0], bbo2)
     pred = dici["pred"][0]
 
-    S2 = tfms["S"]
+    S2 = tfms["Sav"]
     dici = S2(dici)
 # %%
 # %%
@@ -387,7 +387,7 @@ if __name__ == "__main__":
     tfms = En.postprocess_transforms_dict
     keys = En.keys_postproc.split(",")
     for key in keys:
-        if key == "S":
+        if key == "Sav":
             continue
         dici = tfms[key](dici)
         fg = int(dici["pred"].sum()) if "pred" in dici else None
