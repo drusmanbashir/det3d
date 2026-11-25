@@ -1,5 +1,16 @@
+import hashlib
+import json
+import subprocess
+from collections import Counter
+from functools import cached_property
+from pathlib import Path
+from tempfile import NamedTemporaryFile, TemporaryDirectory
+from types import SimpleNamespace
+
+import nibabel as nib
+import numpy as np
 import torch
-from det3d.geometry.nndet_boxes import from_nndet, offset_nndet_xyxyzz_boxes
+from det3d.geometry.nndet_boxes import from_nndet, offset_nndet_xyxyzz_boxes, to_nndet
 from det3d.inference.transforms import LoadInferImaged
 from det3d.managers.retinanet import RetinaNetManager
 from det3d.managers.retinaunet import RetinaUNetManager
@@ -9,8 +20,9 @@ from fran.inference.cascade import img_bbox_collated
 from fran.inference.helpers import channel_first
 from fran.transforms.inferencetransforms import SqueezeListofListsd
 from fran.transforms.intensitytransforms import NormaliseClipd
-from monai.transforms import EnsureChannelFirstd, EnsureTyped, Orientationd, Spacingd
+from monai.transforms import EnsureChannelFirstd, EnsureTyped, Orientationd, Spacingd, SpatialPadd
 from monai.transforms.post.dictionary import Invertd
+from tqdm import tqdm
 from utilz.cprint import cprint
 from utilz.stringz import ast_literal_eval
 
@@ -34,8 +46,10 @@ class DetPatchInfererBase(BaseInferer):
         params=None,
         ckpt=None,
         debug=False,
+        save_states=None,
         **kwargs,
     ):
+        self.save_states = save_states
         cprint(f"Setting up {self.arch_name} Det patch inference", color="red", bold=True)
         super().__init__(
             run_name=run_name,
@@ -85,6 +99,7 @@ class DetPatchInfererBase(BaseInferer):
 
 
 class DetPatchRetinaUNet(DetPatchInfererBase):
+    save_states = None
     arch_name = "RetinaUNet"
     model_manager = RetinaUNetManager
     keys_postproc = "Pack,SqL,InvP,InvPreBox"
@@ -247,19 +262,36 @@ class DetPatchRetinaUNet(DetPatchInfererBase):
                 )
         return seg
 
-    def make_tta_ensembler(self, spatial):
-        """nnDetection's BoxEnsemblerSelective, one model slot per mirror view (as
-        Predictor.predict_tiles names them). model_* come from the postprocess sheet (as
-        filter_boxes); ensemble_* stay at nnDetection's defaults."""
+    @staticmethod
+    def case_properties(batch):
+        """Keep native ITK geometry and both centre-coordinate RAS affines for grid replay."""
+        image = batch["image"]
+        meta = getattr(image, "meta", {})
+        case_id = batch.get("case_id", meta.get("case_id"))
+        if case_id is None and "filename_or_obj" in meta:
+            case_id = Path(meta["filename_or_obj"]).name.removesuffix(".gz").removesuffix(".nii").removesuffix(".pt")
+        props = dict(case_id=case_id, original_size_of_raw_data=None, itk_origin=None,
+                     itk_spacing=None, itk_direction=None)
+        if "original_affine" in meta and "spatial_shape" in meta:
+            native = np.asarray(meta["original_affine"]).reshape(4, 4)
+            itk = np.diag([-1, -1, 1, 1]) @ native
+            spacing = np.linalg.norm(itk[:3, :3], axis=0)
+            props.update(original_size_of_raw_data=tuple(np.asarray(meta["spatial_shape"]).ravel()[::-1]),
+                         itk_origin=tuple(itk[:3, 3]), itk_spacing=tuple(spacing),
+                         itk_direction=tuple((itk[:3, :3] / spacing).ravel()),
+                         native_affine=native, model_affine=np.asarray(image.affine).reshape(4, 4))
+        return props
+
+    def make_tta_ensembler(self, spatial, properties=None):
+        """Build one upstream model slot per view, using every effective merge parameter."""
         import nndet.compat  # noqa: F401
         from nndet.inference.ensembler.detection import BoxEnsemblerSelective
 
         parameters = BoxEnsemblerSelective.get_default_parameters()
-        params = self.inference_params()
-        for key in ("model_score_thresh", "model_topk", "model_detections_per_image",
-                    "remove_small_boxes", "model_iou", "model_nms_fn"):
-            parameters[key] = params[key]
-        ensembler = BoxEnsemblerSelective(properties={"shape": spatial}, parameters=parameters)
+        parameters.update(self.inference_params())
+        if properties is None:
+            properties = self.case_properties({"image": None})
+        ensembler = BoxEnsemblerSelective(properties=dict(properties, shape=spatial), parameters=parameters)
         for t in range(len(self._tta_view_names())):
             ensembler.add_model(name=f"model0_t{t}", model_weight=1.0)
         return ensembler
@@ -272,38 +304,52 @@ class DetPatchRetinaUNet(DetPatchInfererBase):
     def merge_tta_views(self, ensembler):
         """Per view: topk -> clip -> small boxes -> weighted NMS; then WBC across views
         (BoxEnsembler.process_model / process_ensemble)."""
-        names = list(ensembler.model_results.keys())
-        boxes, probs, labels, weights = [], [], [], []
-        for name in names:
-            b, p, l, w = ensembler.process_model(name)
-            boxes.append(b)
-            probs.append(p)
-            labels.append(l)
-            weights.append(w)
-        boxes, probs, labels = ensembler.process_ensemble(
-            boxes=boxes, probs=probs, labels=labels, weights=weights
-        )
-        return from_nndet(boxes), probs, labels.long()
+        pred = ensembler.get_case_result(restore=False)
+        return from_nndet(pred["pred_boxes"]), pred["pred_scores"], pred["pred_labels"].long()
 
-    def run_swi(self, img):
+    def save_ensembler_state(self, ensembler):
+        from nndet.inference.ensembler.detection import BoxEnsembler
+
+        properties = ensembler.properties
+        case_id = properties["case_id"]
+        if not case_id or "model_affine" not in properties:
+            raise ValueError(f"save_states={self.save_states}, case_id={case_id!r}, geometry keys={sorted(properties)}")
+        folder = Path(self.save_states)
+        folder.mkdir(parents=True, exist_ok=True)
+        # The selective writer truncates and reorders tied scores. Its parent saves the full slot.
+        with TemporaryDirectory(dir=folder) as temp:
+            BoxEnsembler.save_state(ensembler, Path(temp), case_id)
+            name = f"{case_id}_{ensembler.ID}.pt"
+            (Path(temp) / name).replace(folder / name)
+
+    def run_swi(self, img, properties=None):
         self._box_acc = []
         spatial = tuple(int(v) for v in img.shape[-3:])
         if self.num_tta > 0:
-            self._ensembler = self.make_tta_ensembler(spatial)
+            if properties is None:
+                properties = self.case_properties({"image": img})
+            self._ensembler = self.make_tta_ensembler(spatial, properties)
+        elif self.save_states is not None:
+            raise ValueError(f"save_states={self.save_states} requires mirror slots, num_tta={self.num_tta}")
         stitched_seg = self.inferer(inputs=img, network=self.swi_predictor)
         if self.num_tta > 0:
+            if self.save_states is not None:
+                self.save_ensembler_state(self._ensembler)
             boxes, scores, labels = self.merge_tta_views(self._ensembler)
         else:
             boxes, scores, labels = self.merge_tile_boxes(self._box_acc, spatial)
         return stitched_seg, boxes, scores, labels
 
+    def detection_limit(self):
+        return self.model.plan.get("detections_per_img")
+
     def predict_inner(self, batch):
         img = self.image_on_model_device(batch, next(self.model.net.parameters()).device)
         self.model.eval()
-        if self.needs_swi(img) or self.num_tta > 0:  # TTA views meet in the tile box merge
+        if self.needs_swi(img) or self.num_tta > 0 or self.save_states is not None:  # TTA views meet in the tile box merge
             vol = img.unsqueeze(0)
-            seg, boxes, scores, labels = self.run_swi(vol)
-            limit = self.model.plan.get("detections_per_img")
+            seg, boxes, scores, labels = self.run_swi(vol, self.case_properties(batch) if self.num_tta > 0 else None)
+            limit = self.detection_limit()
             if limit is not None:
                 keep = scores.argsort(descending=True)[:int(limit)]
                 boxes, scores, labels = boxes[keep], scores[keep], labels[keep]
@@ -314,6 +360,192 @@ class DetPatchRetinaUNet(DetPatchInfererBase):
             return batch
         batch["raw_pred"] = self.forward_tile(img)
         return batch
+
+
+class NNDetInferer(DetPatchRetinaUNet):
+    """Whole-scan Retina U-Net with nnDetection tile settings and replayable view slots."""
+
+    keys_preproc = DetPatchRetinaUNet.keys_preproc + ",Pad"
+    target_metric = "mAP_IoU_0.10_0.50_0.05_MaxDet_100"
+
+    def __init__(
+        self, run_name, project_title=None, devices=(0,), safe_mode=False, save=False,
+        params=None, ckpt=None, debug=False, bs=8, patch_overlap=0.5, mirror_views=8,
+        tile_score_thresh=0.0, tile_nms_thresh=0.6, topk_candidates=10000,
+        tile_min_box=0.01, detections_per_img=100, model_topk=1000,
+        model_iou=0.1, model_score_thresh=0.0, save_states=None,
+    ):
+        """mirror_views accepts 1 (identity), 4 (two axes), or 8 (three axes)."""
+        if mirror_views not in (1, 4, 8):
+            raise ValueError(f"mirror_views={mirror_views}, expected 1, 4 or 8")
+        super().__init__(run_name, project_title=project_title, devices=devices, safe_mode=safe_mode,
+                         save=save, params=params, ckpt=ckpt, debug=debug, bs=bs,
+                         patch_overlap=patch_overlap, save_states=save_states)
+        self.source_checkpoint = Path(self.ckpt).resolve()
+        self.mirror_views = mirror_views
+        self.tile_settings = dict(score_thresh=tile_score_thresh, nms_thresh=tile_nms_thresh,
+                                  topk_candidates=topk_candidates, remove_small_boxes=tile_min_box,
+                                  detections_per_img=detections_per_img)
+        self.merge_settings = dict(model_topk=model_topk, model_iou=model_iou,
+                                   model_score_thresh=model_score_thresh)
+
+    def create_preprocess_transforms(self):
+        super().create_preprocess_transforms()
+        self.Pad = SpatialPadd(keys=["image"], spatial_size=self.plan["patch_size"])
+        self.preprocess_transforms_dict["Pad"] = self.Pad
+
+    def setup(self):
+        super().setup()
+        self.num_tta = self.mirror_views
+        for key, value in self.tile_settings.items():
+            setattr(self.model.net, key, value)
+
+    def detection_limit(self):
+        return self.model.net.detections_per_img
+
+    def inference_params(self):
+        from nndet.inference.ensembler.detection import BoxEnsemblerSelective
+
+        params = super().inference_params()
+        params.update(BoxEnsemblerSelective.get_default_parameters())
+        params.update(self.merge_settings)
+        return params
+
+    @staticmethod
+    def transform_box(box, centre_transform):
+        """Transform all eight exclusive XYZXYZ voxel-edge corners between two grids."""
+        from det3d.inference.post import _box_corners, apply_affine_row_points, box_from_corner_points
+
+        corners = _box_corners(box).numpy() - 0.5
+        points = apply_affine_row_points(corners, centre_transform) + 0.5
+        return box_from_corner_points(points)
+
+    def prepare_case(self, case_id, image_path):
+        """Use the native NIfTI header and MONAI's traced, padded model grid."""
+        native = nib.load(image_path)
+        batch = self.preprocess_compose({"image": image_path, "case_id": case_id})
+        image = batch["image"].unsqueeze(0)
+        image.meta["original_affine"] = native.affine
+        image.meta["spatial_shape"] = native.shape
+        batch["image"] = image
+        return batch
+
+    @staticmethod
+    def write_ground_truth(case_id, records, properties, label_map, gt_dir):
+        """Native exclusive XYZXYZ edges to model-grid xyxyzz with minima padded by one, unclipped."""
+        if properties["case_id"] != case_id:
+            raise ValueError(f'{case_id}: properties.case_id={properties["case_id"]}')
+        transform = np.linalg.solve(properties["model_affine"], properties["native_affine"])
+        boxes, classes = [], []
+        for record in records:
+            label = record["label"]
+            if label not in label_map:
+                raise ValueError(f"{case_id}: label={label}, label_map={label_map}")
+            boxes.append(NNDetInferer.transform_box(record["bbox_xyzxyz"], transform))
+            classes.append(label_map[label])
+        boxes = to_nndet(torch.as_tensor(np.asarray(boxes), dtype=torch.float32))
+        folder = Path(gt_dir)
+        folder.mkdir(parents=True, exist_ok=True)
+        with NamedTemporaryFile(dir=folder, delete=False) as temp:
+            np.savez(temp, boxes=boxes.numpy(), classes=np.asarray(classes, dtype=int))
+        Path(temp.name).replace(folder / f"{case_id}_boxes_gt.npz")
+
+    @torch.inference_mode()
+    def collect_states(self, cases, pred_dir, gt_dir, reference_dir, label_map):
+        """Collect states and GT for a mapping of case IDs to image paths after setup()."""
+        previous = self.save_states
+        self.save_states = pred_dir
+        try:
+            for case_id, path in tqdm(cases.items(), unit="scan"):
+                batch = self.prepare_case(case_id, path)
+                records = json.loads((Path(reference_dir) / f"{case_id}.json").read_text())["boxes"]
+                self.write_ground_truth(case_id, records, self.case_properties(batch), label_map, gt_dir)
+                self.predict_inner(batch)
+        finally:
+            self.save_states = previous
+        self.check_cohort(cases, pred_dir, gt_dir)
+
+    @staticmethod
+    def check_cohort(case_ids, pred_dir, gt_dir):
+        from nndet.inference.ensembler.detection import BoxEnsemblerSelective
+
+        counts = Counter(iter(case_ids))
+        expected = set(counts)
+        states = set(BoxEnsemblerSelective.get_case_ids(pred_dir))
+        gt = {p.name.removesuffix("_boxes_gt.npz") for p in Path(gt_dir).glob("*_boxes_gt.npz")}
+        duplicates = sorted(key for key, count in counts.items() if count != 1)
+        if not expected or duplicates or states != expected or gt != expected:
+            raise ValueError(f"cohort={len(expected)}, duplicates={duplicates}, "
+                             f"states missing={sorted(expected-states)}, extra={sorted(states-expected)}, "
+                             f"GT missing={sorted(expected-gt)}, extra={sorted(gt-expected)}")
+
+    @cached_property
+    def checkpoint_sha256(self):
+        digest = hashlib.sha256()
+        with self.source_checkpoint.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1 << 20), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def winners_path(self, mode):
+        """mode accepts 'whole-scan' or 'cascade', each with a separate winners file."""
+        if mode not in ("whole-scan", "cascade"):
+            raise ValueError(f"mode={mode!r}, expected 'whole-scan' or 'cascade'")
+        return self.source_checkpoint.parent / f"inference_plan_{self.checkpoint_sha256}_{mode}.json"
+
+    def sweep(self, case_ids, pred_dir, gt_dir, label_map, mode="whole-scan"):
+        """Score the upstream sweep on the exact cohort. mode accepts 'whole-scan' or 'cascade'."""
+        from nndet.inference.ensembler.detection import BoxEnsemblerSelective
+        from nndet.inference.sweeper import BoxSweeper
+
+        path = self.winners_path(mode)
+        case_ids = list(case_ids)
+        self.check_cohort(case_ids, pred_dir, gt_dir)
+        classes = [str(label) for label in self.plan["fg_labels"]]
+        if set(label_map.values()) != set(range(len(classes))):
+            raise ValueError(f"label_map={label_map}, fg_labels={self.plan['fg_labels']}")
+        # BoxSweeper asks its state reader for the starting parameters as well as the grid.
+        # Keep constructor overrides (e.g. model_topk) during every candidate evaluation.
+        _, grid = BoxEnsemblerSelective.sweep_parameters()
+        reader = SimpleNamespace(get_case_ids=BoxEnsemblerSelective.get_case_ids,
+                                 from_checkpoint=BoxEnsemblerSelective.from_checkpoint,
+                                 sweep_parameters=lambda: (self.inference_params(), grid))
+        sweeper = BoxSweeper(classes, pred_dir, gt_dir, self.target_metric, reader)
+        state = sweeper.run_postprocessing_sweep()
+        score = float(sweeper._evaluate_value(state)[self.target_metric])
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=Path(__file__).parent, text=True).strip()
+        epoch = torch.load(self.source_checkpoint, map_location="cpu", weights_only=False)["epoch"]
+        record = dict(checkpoint_sha256=self.checkpoint_sha256, mode=mode, epoch=epoch,
+                      det3d_commit=commit, case_ids=sorted(case_ids), case_count=len(case_ids),
+                      label_map=label_map, metric=self.target_metric, score=score,
+                      parameters={k: v.__name__ if callable(v) else v for k, v in state.items()})
+        with NamedTemporaryFile("w", dir=path.parent, delete=False) as temp:
+            json.dump(record, temp, indent=2, allow_nan=False)
+            temp.write("\n")
+        Path(temp.name).replace(path)
+        return record
+
+    def load_winners(self, mode="whole-scan"):
+        """Apply scored winners to subsequent merges. mode accepts 'whole-scan' or 'cascade'."""
+        from nndet.inference.ensembler.detection import BoxEnsemblerSelective
+
+        path = self.winners_path(mode)
+        record = json.loads(path.read_text())
+        for key, expected in (("checkpoint_sha256", self.checkpoint_sha256), ("mode", mode)):
+            if record[key] != expected:
+                raise ValueError(f"{path}: {key}={record[key]!r}, expected {expected!r}")
+        defaults, grid = BoxEnsemblerSelective.sweep_parameters()
+        params = record["parameters"].copy()
+        if params.keys() != defaults.keys():
+            raise ValueError(f"{path}: parameters={sorted(params)}, expected {sorted(defaults)}")
+        for key, value in defaults.items():
+            if callable(value):
+                choices = {fn.__name__: fn for fn in grid.get(key, [value])}
+                if params[key] not in choices:
+                    raise ValueError(f"{path}: {key}={params[key]!r}, expected {sorted(choices)}")
+                params[key] = choices[params[key]]
+        self.merge_settings.update(params)
+        return record
 
 
 class DetPatchRetinaNet(DetPatchInfererBase):
