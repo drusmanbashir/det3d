@@ -343,16 +343,20 @@ class DetPatchRetinaUNet(DetPatchInfererBase):
     def detection_limit(self):
         return self.model.plan.get("detections_per_img")
 
+    @staticmethod
+    def limit_detections(boxes, scores, labels, limit):
+        if limit is not None:
+            keep = scores.argsort(descending=True)[:int(limit)]
+            boxes, scores, labels = boxes[keep], scores[keep], labels[keep]
+        return boxes, scores, labels
+
     def predict_inner(self, batch):
         img = self.image_on_model_device(batch, next(self.model.net.parameters()).device)
         self.model.eval()
         if self.needs_swi(img) or self.num_tta > 0 or self.save_states is not None:  # TTA views meet in the tile box merge
             vol = img.unsqueeze(0)
             seg, boxes, scores, labels = self.run_swi(vol, self.case_properties(batch) if self.num_tta > 0 else None)
-            limit = self.detection_limit()
-            if limit is not None:
-                keep = scores.argsort(descending=True)[:int(limit)]
-                boxes, scores, labels = boxes[keep], scores[keep], labels[keep]
+            boxes, scores, labels = self.limit_detections(boxes, scores, labels, self.detection_limit())
             batch["stitched_seg"] = seg
             batch["merged_boxes"] = boxes
             batch["merged_scores"] = scores
@@ -367,6 +371,7 @@ class NNDetInferer(DetPatchRetinaUNet):
 
     keys_preproc = DetPatchRetinaUNet.keys_preproc + ",Pad"
     target_metric = "mAP_IoU_0.10_0.50_0.05_MaxDet_100"
+    replay_only = False
 
     def __init__(
         self, run_name, project_title=None, devices=(0,), safe_mode=False, save=False,
@@ -420,6 +425,64 @@ class NNDetInferer(DetPatchRetinaUNet):
         points = apply_affine_row_points(corners, centre_transform) + 0.5
         return box_from_corner_points(points)
 
+    @classmethod
+    def for_replay(cls, checkpoint, settings):
+        """Open a CPU-only replay from the checkpoint plan and the live export settings."""
+        checkpoint = Path(checkpoint).resolve()
+        if Path(settings["checkpoint"]).resolve() != checkpoint:
+            raise ValueError(f"settings checkpoint={settings['checkpoint']!r}, requested={checkpoint}")
+        config = torch.load(checkpoint, map_location="cpu", weights_only=False, mmap=True)["hyper_parameters"]["configs"]
+        inferer = cls.__new__(cls)
+        inferer.replay_only = True
+        inferer.source_checkpoint = checkpoint
+        inferer.plan = config["plan_train"]
+        inferer.tile_settings = dict(score_thresh=settings["score_threshold"],
+                                     detections_per_img=settings["max_detections"])
+        inferer.merge_settings = {}
+        return inferer
+
+    @classmethod
+    def native_box_records(cls, raw_boxes, scores, classes, properties, labels, score_thresh, limit):
+        """Export model-grid XYZXYZ boxes to the clipped native voxel grid in score order."""
+        scores = scores.float().cpu().numpy()
+        classes = classes.long().cpu().numpy()
+        raw_boxes = raw_boxes.float().cpu()
+        order = np.argsort(-scores, kind="stable")
+        transform = np.linalg.solve(properties["native_affine"], properties["model_affine"])
+        boxes = []
+        for index in order[scores[order] > score_thresh]:
+            native = cls.transform_box(raw_boxes[index], transform)
+            native = np.clip(native.reshape(2, 3), 0, properties["original_size_of_raw_data"][::-1]).reshape(6)
+            if np.all(native[3:] > native[:3]):
+                boxes.append(dict(bbox_xyzxyz=native.tolist(), label=int(labels[classes[index]]),
+                                  score=float(scores[index])))
+                if len(boxes) == limit:
+                    break
+        return boxes
+
+    @torch.inference_mode()
+    def replay_case(self, state_path, view_count):
+        """Replay the first view_count slots (1, 4 or 8) to live-format native box records."""
+        import nndet.compat  # noqa: F401
+        from nndet.inference.ensembler.detection import BoxEnsemblerSelective
+
+        if view_count not in (1, 4, 8):
+            raise ValueError(f"view_count={view_count}, expected 1, 4 or 8")
+        path = Path(state_path)
+        case = path.name.removesuffix(f"_{BoxEnsemblerSelective.ID}.pt")
+        state = BoxEnsemblerSelective.from_checkpoint(path.parent, case, device="cpu")
+        names = [f"model0_t{i}" for i in range(view_count)]
+        if state.properties["case_id"] != case or not set(names).issubset(state.model_results):
+            raise ValueError(f"{path}: case_id={state.properties['case_id']}, "
+                             f"slots={list(state.model_results)}, required={names}")
+        state.update_parameters(**self.merge_settings)
+        pred = state.get_case_result(restore=False, names=names)
+        limit = self.tile_settings["detections_per_img"]
+        boxes, scores, labels = self.limit_detections(from_nndet(pred["pred_boxes"]), pred["pred_scores"],
+                                                      pred["pred_labels"], limit)
+        return self.native_box_records(boxes, scores, labels, state.properties, self.plan["fg_labels"],
+                                       self.tile_settings["score_thresh"], limit)
+
     def prepare_case(self, case_id, image_path):
         """Use the native NIfTI header and MONAI's traced, padded model grid."""
         native = nib.load(image_path)
@@ -466,7 +529,7 @@ class NNDetInferer(DetPatchRetinaUNet):
         self.check_cohort(cases, pred_dir, gt_dir)
 
     @staticmethod
-    def check_cohort(case_ids, pred_dir, gt_dir):
+    def check_cohort(case_ids, pred_dir, gt_dir, allow_subset=False):
         from nndet.inference.ensembler.detection import BoxEnsemblerSelective
 
         counts = Counter(iter(case_ids))
@@ -474,7 +537,8 @@ class NNDetInferer(DetPatchRetinaUNet):
         states = set(BoxEnsemblerSelective.get_case_ids(pred_dir))
         gt = {p.name.removesuffix("_boxes_gt.npz") for p in Path(gt_dir).glob("*_boxes_gt.npz")}
         duplicates = sorted(key for key, count in counts.items() if count != 1)
-        if not expected or duplicates or states != expected or gt != expected:
+        if not expected or duplicates or expected-states or expected-gt or (
+                not allow_subset and (states != expected or gt != expected)):
             raise ValueError(f"cohort={len(expected)}, duplicates={duplicates}, "
                              f"states missing={sorted(expected-states)}, extra={sorted(states-expected)}, "
                              f"GT missing={sorted(expected-gt)}, extra={sorted(gt-expected)}")
@@ -487,34 +551,48 @@ class NNDetInferer(DetPatchRetinaUNet):
                 digest.update(chunk)
         return digest.hexdigest()
 
-    def winners_path(self, mode):
+    def winners_path(self, mode, case_ids=None, winners_dir=None):
         """mode accepts 'whole-scan' or 'cascade', each with a separate winners file."""
         if mode not in ("whole-scan", "cascade"):
             raise ValueError(f"mode={mode!r}, expected 'whole-scan' or 'cascade'")
-        return self.source_checkpoint.parent / f"inference_plan_{self.checkpoint_sha256}_{mode}.json"
+        suffix = ""
+        if case_ids is not None:
+            cohort = json.dumps(sorted(case_ids), separators=(",", ":")).encode()
+            suffix = "_" + hashlib.sha256(cohort).hexdigest()
+        folder = self.source_checkpoint.parent if winners_dir is None else Path(winners_dir)
+        return folder / f"inference_plan_{self.checkpoint_sha256}_{mode}{suffix}.json"
 
-    def sweep(self, case_ids, pred_dir, gt_dir, label_map, mode="whole-scan"):
-        """Score the upstream sweep on the exact cohort. mode accepts 'whole-scan' or 'cascade'."""
+    def sweep(self, case_ids, pred_dir, gt_dir, label_map, mode="whole-scan", winners_dir=None, subset=False):
+        """Tune a full cohort or an explicit subset. mode accepts 'whole-scan' or 'cascade'."""
         from nndet.inference.ensembler.detection import BoxEnsemblerSelective
         from nndet.inference.sweeper import BoxSweeper
 
-        path = self.winners_path(mode)
-        case_ids = list(case_ids)
-        self.check_cohort(case_ids, pred_dir, gt_dir)
+        case_ids = sorted(case_ids)
+        path = self.winners_path(mode, case_ids if subset else None, winners_dir)
+        self.check_cohort(case_ids, pred_dir, gt_dir, allow_subset=subset)
+        if not subset and path.exists():
+            previous = json.loads(path.read_text())["case_ids"]
+            if sorted(previous) != case_ids:
+                raise ValueError(f"{path}: existing full winner case_ids={previous}, requested={case_ids}")
         classes = [str(label) for label in self.plan["fg_labels"]]
         if set(label_map.values()) != set(range(len(classes))):
             raise ValueError(f"label_map={label_map}, fg_labels={self.plan['fg_labels']}")
         # BoxSweeper asks its state reader for the starting parameters as well as the grid.
         # Keep constructor overrides (e.g. model_topk) during every candidate evaluation.
         _, grid = BoxEnsemblerSelective.sweep_parameters()
-        reader = SimpleNamespace(get_case_ids=BoxEnsemblerSelective.get_case_ids,
+        if self.replay_only:
+            initial = BoxEnsemblerSelective.from_checkpoint(pred_dir, case_ids[0], device="cpu").parameters.copy()
+            initial.update(self.merge_settings)
+        else:
+            initial = self.inference_params()
+        reader = SimpleNamespace(get_case_ids=lambda _: case_ids,
                                  from_checkpoint=BoxEnsemblerSelective.from_checkpoint,
-                                 sweep_parameters=lambda: (self.inference_params(), grid))
+                                 sweep_parameters=lambda: (initial.copy(), grid))
         sweeper = BoxSweeper(classes, pred_dir, gt_dir, self.target_metric, reader)
         state = sweeper.run_postprocessing_sweep()
         score = float(sweeper._evaluate_value(state)[self.target_metric])
         commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=Path(__file__).parent, text=True).strip()
-        epoch = torch.load(self.source_checkpoint, map_location="cpu", weights_only=False)["epoch"]
+        epoch = torch.load(self.source_checkpoint, map_location="cpu", weights_only=False, mmap=True)["epoch"]
         record = dict(checkpoint_sha256=self.checkpoint_sha256, mode=mode, epoch=epoch,
                       det3d_commit=commit, case_ids=sorted(case_ids), case_count=len(case_ids),
                       label_map=label_map, metric=self.target_metric, score=score,
@@ -525,12 +603,14 @@ class NNDetInferer(DetPatchRetinaUNet):
         Path(temp.name).replace(path)
         return record
 
-    def load_winners(self, mode="whole-scan"):
+    def load_winners(self, mode="whole-scan", case_ids=None, winners_dir=None):
         """Apply scored winners to subsequent merges. mode accepts 'whole-scan' or 'cascade'."""
         from nndet.inference.ensembler.detection import BoxEnsemblerSelective
 
-        path = self.winners_path(mode)
+        path = self.winners_path(mode, case_ids, winners_dir)
         record = json.loads(path.read_text())
+        if case_ids is not None and sorted(case_ids) != record["case_ids"]:
+            raise ValueError(f"{path}: case_ids={record['case_ids']}, expected={sorted(case_ids)}")
         for key, expected in (("checkpoint_sha256", self.checkpoint_sha256), ("mode", mode)):
             if record[key] != expected:
                 raise ValueError(f"{path}: {key}={record[key]!r}, expected {expected!r}")
