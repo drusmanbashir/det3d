@@ -129,9 +129,6 @@ class TrainerDet(Trainer):
         ``model_params.early_stopping_patience`` (``auto``: none) unless a patience is passed.
         """
         self.debug_tfm_keys = debug_tfm_keys
-        self.permanent_checkpoint_every_n_epochs = int(
-            permanent_checkpoint_every_n_epochs
-        )
         super().setup(
             batch_size=batch_size,
             train_indices=train_indices,
@@ -156,6 +153,7 @@ class TrainerDet(Trainer):
             wandb_grid_epoch_freq=wandb_grid_epoch_freq,
             batch_tfms=batch_tfms,
             case_id_recorder_freq=snapshot_freq,
+            permanent_checkpoint_every_n_epochs=permanent_checkpoint_every_n_epochs,
         )
         self.D.prepare_data()
         self.D.setup(stage="fit")
