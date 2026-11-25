@@ -45,7 +45,6 @@ class DataManagerDetBTfms(DataManagerDet):
                 intensity_tfms=self.transforms_dict["IntensityTfms"],
                 affine3d=self.configs["affine3d"],
                 patch_size=self.plan["patch_size"],
-                flip_prob=self.flip["prob"],
                 tracker=self.box_tracker,
                 inst_key="inst" if self.box_tracker_name == "remeasure" else None,
             ),

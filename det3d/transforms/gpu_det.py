@@ -1,12 +1,12 @@
 from det3d.managers.data.collate import attach_targets
 from det3d.transforms.box_tracker import CornerTracker, voxel_map
-from monai.transforms.transform import MapTransform
+from monai.transforms.transform import MapTransform, Randomizable
 import torch
 from monai.data import MetaTensor
 from monai.transforms import Compose
 from monai.transforms.croppad.array import Crop
 from monai.transforms.croppad.dictionary import ResizeWithPadOrCropd
-from monai.transforms.spatial.dictionary import RandAffined, RandAxisFlipd
+from monai.transforms.spatial.dictionary import Flipd, RandAffined, RandAxisFlipd
 from monai.utils import fall_back_tuple
 
 
@@ -119,6 +119,24 @@ class RandFlipBoxSyncd(MapTransform):
         ref = d[self.ref_key]
         return self.tracker.warp(d, voxel_map(a0, ref.meta["affine"], ref.device))
 
+
+
+class RandMirrorBoxSyncd(Randomizable, MapTransform):
+    def __init__(self, spatial_keys, tracker):
+        super().__init__(spatial_keys)
+        self.tracker = tracker
+
+    def __call__(self, data):
+        # nnDetection's MirrorTransform independently mirrors each spatial axis with probability 0.5.
+        axes = tuple(axis for axis in range(3) if self.R.rand() < 0.5)
+        if not axes:
+            return data
+        ref_key = self.keys[0]
+        before = data[ref_key].affine
+        d = Flipd(keys=self.keys, spatial_axis=axes)(data)
+        d = SyncMetaAffined(keys=self.keys)(d)
+        ref = d[ref_key]
+        return self.tracker.warp(d, voxel_map(before, ref.affine, ref.device))
 
 
 class DetToDeviced(MapTransform):
@@ -302,7 +320,6 @@ def build_train_gpu_tail_compose(
     intensity_tfms,
     affine3d,
     patch_size,
-    flip_prob,
     spatial_prob=1.0,
     tracker=None,
     inst_key=None,
@@ -321,15 +338,9 @@ def build_train_gpu_tail_compose(
         affine_mode.append("nearest")
     if tracker is None:
         tracker = CornerTracker(box_key, label_key, image_key)
-    flip_p = float(flip_prob)
     return Compose(
         [
-            RandFlipBoxSyncd(
-                spatial_keys=spatial_keys,
-                box_key=box_key,
-                prob=flip_p,
-                tracker=tracker,
-            ),
+            RandMirrorBoxSyncd(spatial_keys, tracker),
             RandAffineBoxSyncd(
                 spatial_keys=spatial_keys,
                 box_key=box_key,
