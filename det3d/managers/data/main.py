@@ -19,6 +19,8 @@ from det3d.managers.data.valid_patch_stream import PatchStreamDatasetDet, patch_
 from fran.preprocessing.hdf5_shards import find_hdf5_shard_folder
 from det3d.transforms.box_tracker import BOX_TRACKERS
 from fran.transforms.detection import patch_size_manifest_key
+from monai.transforms import RandScaleIntensityFixedMeand
+from fran.transforms.spatialtransforms import affine_draw_kwargs
 from det3d.transforms.gpu_det import RandAffineBoxSyncd, RandMirrorBoxSyncd, ResizeWithPadOrCropBoxSyncd
 from det3d.utils.bbox_sidecar import bbox_sidecar_path, load_detection_sidecar, valid_detection_box
 from fran.utils.bbox_sidecar import extended_bbox_df_column, nbrhood_df_to_detection_records
@@ -182,6 +184,14 @@ class DataManagerDet(DataManager):
             raise ValueError(f"Unknown box_tracker {name!r}. Choose from {tuple(BOX_TRACKERS)}")
         self.box_tracker_name = name
         self.box_tracker = BOX_TRACKERS[name](self.box_key, self.label_key, self.image_key)
+
+    def _contrast_transform(self):
+        if "p_rotate" not in self.configs["affine3d"]:
+            return super()._contrast_transform()
+        return RandScaleIntensityFixedMeand(
+            self.image_key, factors=[v - 1 for v in self.contrast["value"]],
+            preserve_range=True, prob=self.contrast["prob"],
+        )
 
     def augment(self):
         """det3d's own `augment` row (det workbook data_params, merged over FRAN's dataset_params).
@@ -514,7 +524,7 @@ class DataManagerDet(DataManager):
 
 class DataManagerDetSource(DataManagerDet, DataManagerSource):
     keys_tr = (
-        "Ld,Rtr,L2,E,Norm,Mir,Affine,ResizePC,BoxClip,IntensityTfms"
+        "Ld,Rtr,L2,E,Norm,Affine,ResizePC,IntensityTfms,Mir,BoxClip"
     )
 
     def __init__(self, project, configs: dict, batch_size=DATA_MANAGER_BATCH_SIZE, cache_rate=0.0, **kwargs):
@@ -585,9 +595,7 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
             spatial_keys=spatial_aug_keys,
             box_key=bk,
             mode=affine_modes,
-            prob=affine3d["p"],
-            rotate_range=affine3d["rotate_range"],
-            scale_range=affine3d["scale_range"],
+            **affine_draw_kwargs(affine3d),
             tracker=self.box_tracker,
         )
         self.ResizePC = ResizeWithPadOrCropBoxSyncd(

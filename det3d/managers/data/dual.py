@@ -108,7 +108,7 @@ if __name__ == "__main__":
     conf["plan_train"]["patch_size"]=[128,128,64]
     conf["model_params"]["arch"] = "retinanet"
     conf["model_params"]["arch"] = "retinaunet"
-    conf["affine3d"]["p"]=1.0
+    conf["affine3d"]["p_rotate"] = conf["affine3d"]["p_scale"] = 1.0
     conf["affine3d"]["translate_factor"]=0.3
     conf["affine3d"]["shear"]=0.5
     

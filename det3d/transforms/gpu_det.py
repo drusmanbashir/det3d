@@ -1,13 +1,12 @@
 from det3d.managers.data.collate import attach_targets
 from det3d.transforms.box_tracker import CornerTracker, voxel_map
-from fran.transforms.spatialtransforms import RandMirrord
+from fran.transforms.spatialtransforms import IndependentRandAffined, RandMirrord, affine_draw_kwargs
 from monai.transforms.transform import MapTransform
 import torch
 from monai.data import MetaTensor
 from monai.transforms import Compose
 from monai.transforms.croppad.array import Crop
 from monai.transforms.croppad.dictionary import ResizeWithPadOrCropd
-from monai.transforms.spatial.dictionary import RandAffined
 from monai.utils import fall_back_tuple
 
 
@@ -71,19 +70,24 @@ class RandAffineBoxSyncd(MapTransform):
         spatial_keys,
         box_key,
         mode,
-        prob,
-        rotate_range,
-        scale_range,
+        prob=None,
+        rotate_range=None,
+        scale_range=None,
         tracker=None,
+        *,
+        p_rotate=None,
+        p_scale=None,
     ):
         super().__init__(spatial_keys)
         self.box_key = box_key
         self.ref_key = spatial_keys[0]
         self.tracker = tracker if tracker is not None else CornerTracker(box_key, image_key=self.ref_key)
-        self.rand_affine = RandAffined(
+        self.rand_affine = IndependentRandAffined(
             keys=spatial_keys,
             mode=mode,
             prob=prob,
+            p_rotate=p_rotate,
+            p_scale=p_scale,
             rotate_range=rotate_range,
             scale_range=scale_range,
             padding_mode="zeros",
@@ -325,14 +329,11 @@ def build_train_gpu_tail_compose(
         tracker = CornerTracker(box_key, label_key, image_key)
     return Compose(
         [
-            mirror,
             RandAffineBoxSyncd(
                 spatial_keys=spatial_keys,
                 box_key=box_key,
                 mode=affine_mode,
-                prob=float(affine3d["p"]) * p,
-                rotate_range=affine3d["rotate_range"],
-                scale_range=affine3d["scale_range"],
+                **affine_draw_kwargs(affine3d, p),
                 tracker=tracker,
             ),
             ResizeWithPadOrCropBoxSyncd(
@@ -343,7 +344,8 @@ def build_train_gpu_tail_compose(
                 lazy=False,
                 tracker=tracker,
             ),
-            tracker,
             *intensity_tfms,
+            mirror,
+            tracker,
         ]
     )
