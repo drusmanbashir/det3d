@@ -29,6 +29,7 @@ from fran.managers.data.main import (
     DataManager,
     ForcedFgBatchSampler,
     ForcedFgDataset,
+    ForegroundCropDataset,
     DataManagerLBD,
     DataManagerPatch,
     DataManagerRBD,
@@ -52,7 +53,7 @@ from utilz.stringz import info_from_filename
 from utilz.fileio import load_json
 from det3d.managers.data.transforms import (
     LoadHDF5DetShardExtendedBBoxd,
-    RandCropExtendedBBoxd,
+    RandCropInstanceBoxd,
     CropDetPatchd,
     BboxCenterCropSlicesd,
     PadDetPatchd,
@@ -64,32 +65,41 @@ from det3d.managers.data.transforms import (
 _FIXED = ConfigMaker.fixed()
 
 
-class DetectionCropDataset(ForcedFgDataset):
-    """Keep random crops on the drawn scan and draw a positive scan for its forced crops if needed."""
+class DetectionCropDataset(ForegroundCropDataset):
+    """Use the detector's target boxes to find cases eligible for forced crops."""
 
     def __init__(self, ds, crop, box_key):
-        super().__init__(ds)
-        self.crop = crop
-        self.positive = [i for i, row in enumerate(ds.data) if len(row[box_key])]
-        self.box_key = box_key
+        positive = [i for i, row in enumerate(ds.data) if len(row[box_key])]
+        super().__init__(ds, crop, positive)
+
+
+class InstanceCropDataset(DetectionCropDataset):
+    """One independent draw per forced patch, using the fold's training target rows."""
+
+    def __init__(self, ds, crop, box_key, label_key, excluded_labels):
+        super().__init__(ds, crop, box_key)
+        self.instances = [
+            (i, lesion_id)
+            for i, row in enumerate(ds.data)
+            for lesion_id, label in enumerate(row[label_key].tolist(), start=1)
+            if label not in excluded_labels
+        ]
 
     def __getitem__(self, key):
-        if self.crop.oversample_fg is None:
-            index = key
-            p = self.crop.pos / (self.crop.pos + self.crop.neg)
-            n_forced = int((torch.rand(self.crop.num_samples) < p).sum())
-        else:
-            index, n_forced = key
-        n_random = self.crop.num_samples - n_forced
-        row = self.ds.data[index]
-        if not n_forced or len(row[self.box_key]):
-            return self.ds.transform(dict(row, crop_counts=(n_random, n_forced)))
-        if not self.positive:
-            raise ValueError("A foreground crop was requested but no training case has a detection box")
-        draw = torch.randint(len(self.positive), ()).item()
-        positive = self.ds.data[self.positive[draw]]
-        patches = self.ds.transform(dict(row, crop_counts=(n_random, 0))) if n_random else []
-        return patches + self.ds.transform(dict(positive, crop_counts=(0, n_forced)))
+        index, n_random, n_forced = self._case_slots(key)
+        patches = []
+        if n_random:
+            row = dict(self.ds.data[index], crop_counts=(n_random, 0), lesion_id=0)
+            patches.extend(self.ds.transform(row))
+        if not n_forced:
+            return patches
+        if not self.instances:
+            raise ValueError("Forced foreground requested but this training fold has no eligible detection boxes")
+        for draw in torch.randint(len(self.instances), (n_forced,)).tolist():
+            case_index, lesion_id = self.instances[draw]
+            row = dict(self.ds.data[case_index], lesion_id=lesion_id)
+            patches.extend(self.ds.transform(row))
+        return patches
 
 
 class DataManagerDet(DataManager):
@@ -284,7 +294,10 @@ class DataManagerDet(DataManager):
                 self.oversample_fg(),
             )
             batching = dict(batch_sampler=batch_sampler)
-        if self.dataset_params["nnz_allowed"] and "Rtr" in self.keys:
+        if "Rtr" in self.keys and self.dataset_params.get("instance_sampling", False):
+            excluded = set(self.plan["fg_indices_exclude"]).union(self.plan["ignore_labels"])
+            ds = InstanceCropDataset(self.ds, self.Rtr, self.box_key, self.label_key, excluded)
+        elif self.dataset_params["nnz_allowed"] and "Rtr" in self.keys:
             ds = DetectionCropDataset(self.ds, self.Rtr, self.box_key)
         return ds, batching
 
@@ -337,7 +350,7 @@ class DataManagerDet(DataManager):
     def cases_from_project_split(self):
         ds_tokens = [x.strip() for x in self.plan["datasources"].split(",") if x.strip()]
         full_volume = self.is_eval_split() and self._valid_impl() == "full_volume"
-        nnz_allowed = full_volume or self.dataset_params["nnz_allowed"]
+        nnz_allowed = self.is_eval_split() or self.dataset_params["nnz_allowed"]
         if self.split == "all":
             self.cases = list(
                 self.project.get_train_val_case_ids(
@@ -388,8 +401,9 @@ class DataManagerDet(DataManager):
     def _load_bbox_sidecar(self, bbox_fn):
         bbox_fn = Path(bbox_fn)
         if bbox_fn.suffix == ".csv":
-            ext_col = self._bbox_sidecar_ext_col()
-            columns = ["label_org", "bbox_xyzxyz", "cent", ext_col]
+            columns = ["label_org", "bbox_xyzxyz", "cent"]
+            if not (self.is_train_all_split() and self.dataset_params.get("instance_sampling", False)):
+                columns.append(self._bbox_sidecar_ext_col())
             if self.box_tracker_name == "hull":
                 columns.append("hull_xyz")
                 df = pd.read_csv(bbox_fn, usecols=lambda key: key in columns)
@@ -482,7 +496,7 @@ class DataManagerDet(DataManager):
 
     def _shard_cases_from_project_split(self):
         ds_tokens = [x.strip() for x in self.plan["datasources"].split(",") if x.strip()]
-        nnz_allowed = self.dataset_params["nnz_allowed"]
+        nnz_allowed = self.is_eval_split() or self.dataset_params["nnz_allowed"]
         train_cases, valid_cases = self.project.get_train_val_case_ids(
             self.dataset_params["fold"],
             ds_tokens,
@@ -530,7 +544,12 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
         return data
 
     def create_transforms(self):
-        super().create_transforms()
+        # FRAN's LBD implementation builds a second crop from patch-specific centre ranges.
+        # Detection uses the common image transforms and installs its own crop below.
+        if self.dataset_params.get("instance_sampling", False):
+            DataManager.create_transforms(self)
+        else:
+            super().create_transforms()
         ik, bk, lk = self.image_key, self.box_key, self.label_key
         spatial_aug_keys = self._training_spatial_keys()
         affine_modes = ["bilinear" if k == ik else "nearest" for k in spatial_aug_keys]
@@ -538,16 +557,10 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
         patch_size = self._patch_size()
         scale = float(self.dataset_params["prezoom_scale"])
         patch_size_prezoom = tuple(int(v * scale) for v in patch_size)
-        data_manifest = load_json(self.data_folder / "manifest.json")
-        manifest_patch_sizes = [
-            tuple(int(v) for v in ps)
-            for ps in data_manifest["extended_bboxes_patch_sizes"]
-        ]
-        if patch_size_prezoom not in manifest_patch_sizes:
-            raise ValueError(
-                f"patch_size_prezoom {patch_size_prezoom} not in manifest "
-                f"extended_bboxes_patch_sizes {manifest_patch_sizes}"
-            )
+        if not self.dataset_params.get("instance_sampling", False):
+            manifest = load_json(self.data_folder / "manifest.json")
+            if list(patch_size_prezoom) not in manifest["extended_bboxes_patch_sizes"]:
+                raise ValueError(f"{patch_size_prezoom} missing from extended_bboxes_patch_sizes in {self.data_folder}")
         affine3d = self.configs["affine3d"]
 
         self.Ld = LoadHDF5DetShardExtendedBBoxd(
@@ -557,7 +570,7 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
             patch_size=patch_size_prezoom,
             box_key=bk,
         )
-        self.Rtr = RandCropExtendedBBoxd(
+        self.Rtr = RandCropInstanceBoxd(
             keys=[ik],
             roi_size=patch_size_prezoom,
             num_samples=int(plan["samples_per_file"]),

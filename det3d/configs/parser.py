@@ -60,6 +60,7 @@ class ConfigMakerDet(ConfigMaker):
         if "finetuning" in self.configs:
             apply_finetuning(self.configs)
         data = self.configs["dataset_params"]
+        data["instance_sampling"] = True  # Persist the sampling rule in fresh detection checkpoints.
         if self.resolve_epochs(self.configs)["valid"] is not None and data["valid_impl"] == "patch_stream":
             explicit_valid_impl = "valid_impl" in overrides.get("dataset_params", {}) or (
                 "valid_impl" in overrides.get("data_params", {})

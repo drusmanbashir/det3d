@@ -242,7 +242,7 @@ def lbd_det_collate_train(batch):
     if dfs:
         dici["df"] = dfs
     dici.update(_collate_tracker_inputs(_flatten_dict_samples(batch)))
-    return dici
+    return attach_targets(dici)
 
 def lbd_det_collate_val(batch):
     '''

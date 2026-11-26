@@ -10,7 +10,7 @@ from det3d.transforms.box_tracker import CornerTracker
 from fran.transforms.detection import patch_size_manifest_key
 from fran.managers.data.valid_patch_stream import _pad_tensor_to_patch_size
 from fran.utils.bbox_sidecar import extended_bbox_df_column
-from fran.managers.data.main import RandCropExtendedBBoxd  # noqa: F401  det Rtr; oversample_fg slots as fran's D2
+from fran.managers.data.main import RandCropExtendedBBoxd
 from fran.preprocessing.helpers import import_h5py
 from monai.data import MetaTensor
 from monai.transforms import MapTransform
@@ -67,17 +67,57 @@ class LoadHDF5DetShardExtendedBBoxd(MapTransform):
         with h5py.File(shard_path, "r") as h5f:
             case_grp = h5f[case_path]
             src_dims = tuple(int(v) for v in case_grp["image"].shape)
-        col = extended_bbox_df_column(self.patch_size_key)
-        raw = d["df"][col]
-        center_boxes = [
-            literal_eval(v) if isinstance(v, str) else v for v in raw
-        ]
+        center_boxes = []
+        if "lesion_id" not in d:
+            col = extended_bbox_df_column(self.patch_size_key)
+            center_boxes = [literal_eval(v) if isinstance(v, str) else v for v in d["df"][col]]
         d["hdf5_shard_path"] = str(shard_path)
         d["hdf5_case_path"] = case_path
         # Volume bounds for RandCrop (Rtr runs before L2 loads pixels). Per-case HDF5 dataset shape, not plan or manifest tag.
         d["src_dims"] = src_dims
         d["extended_center_boxes"] = np.asarray(center_boxes, dtype=np.int64)
         return d
+
+
+def _overlapping_lesion_box(data, boxes, start, end, inst=None):
+    """Require at least one voxel of the selected box in the unpadded source region."""
+    lesion = data["lesion_id"]
+    if 1 <= lesion <= len(boxes):
+        lo, hi = np.asarray(boxes[lesion - 1], dtype=np.int64).reshape(2, 3)
+        overlaps = (np.minimum(hi, end) > np.maximum(lo, start)).all()
+        if inst is not None and (lo >= start).all() and (hi <= end).all():
+            # Only a fully covered tight box guarantees an instance voxel.
+            region = tuple(slice(a, b) for a, b in zip(lo - start, hi - start))
+            overlaps = (inst[region] == lesion).any()
+        if overlaps:
+            return lo, hi
+    raise ValueError(f"Case {data['case_id']} lesion {lesion}: no overlap before augmentation")
+
+
+class RandCropInstanceBoxd(RandCropExtendedBBoxd):
+    """nnDetection Fast foreground crop in det3d's exclusive xyzxyz coordinates."""
+
+    def __call__(self, data):
+        lesion_id = data.get("lesion_id", 0)
+        if not lesion_id:
+            return super().__call__(data)
+        d = dict(data)
+        dims = np.asarray(d.pop(self.src_dims_key))
+        d.pop(self.extended_boxes_key)
+        lo, hi = _overlapping_lesion_box(d, d["bbox"], 0, dims)
+        size = np.asarray(self.roi_size)
+        # nnDetection's padded minimum + 1 is the det3d inclusive minimum.
+        start = self.R.randint(lo, hi) - size // 2
+        end = start + size
+        d.update(crop_start=tuple(start), crop_end=tuple(end),
+                 crop_slices=tuple(slice(a, b) for a, b in zip(np.maximum(0, start), np.minimum(dims, end))),
+                 crop_pad=tuple(zip(np.maximum(0, -start), np.maximum(0, end - dims))),
+                 sample_is_fg=True, sampled_flat_index=-1)
+        # All three trackers filter the sidecar rows with the same indices as their targets.
+        df = d["df"].assign(forced_lesion=np.arange(len(d["df"])) == lesion_id - 1)
+        df.attrs["forced_lesion"] = (d["case_id"], lesion_id)
+        d["df"] = df
+        return [d]
 
 
 class CropDetPatchd(MapTransform):
@@ -226,6 +266,13 @@ class LoadHDF5DetCropd(MapTransform):
             if "inst" in self.keys:
                 d["inst_labels"] = _read_instance_labels(case_grp)
             bbox = np.asarray(case_grp[self.box_key][:], dtype=np.float32)
+        if d.get("lesion_id", 0):
+            start = [s.start for s in crop_slices]
+            end = [s.stop for s in crop_slices]
+            _overlapping_lesion_box(d, bbox, start, end, loaded.get("inst"))
+            pad = d.pop("crop_pad")
+            if any(left or right for left, right in pad):
+                loaded = {key: np.pad(arr, pad) for key, arr in loaded.items()}
         meta = {
             "filename_or_obj": f"{shard_path}:{case_path}",
             "case_id": d["case_id"],

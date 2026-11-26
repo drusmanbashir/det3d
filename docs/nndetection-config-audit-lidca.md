@@ -130,7 +130,8 @@ The remaining detection spreadsheet fields also stay under `det3d` control:
 |---|---|
 | `model_params.class_name` | Used by the outer manager for display names; nnDetection's evaluator internally names classes `class0`, etc. |
 | `data_params.validation_fraction`, `seed`, `num_workers_train`, `num_workers_val` | Data split/loader settings; no nnDetection `augment_cfg` or loader is created. |
-| `plans_det.mode`, `samples_per_file`, `expand_by`, `fg_indices_exclude`, `remapping_source`, `remapping_lbd_rbd`, `remapping_train`, `nnz_allowed`, `ignore_labels_cc`, `dusting_mm`, `gt_box_mode` | Preprocessing/label/box plan fields; none is passed to nnDetection's planner. |
+| `plans_det.mode`, `samples_per_file`, `expand_by`, `fg_indices_exclude`, `remapping_source`, `remapping_lbd_rbd`, `remapping_train`, `ignore_labels_cc`, `dusting_mm`, `gt_box_mode` | Preprocessing/label/box plan fields; none is passed to nnDetection's planner. |
+| `data_params.nnz_allowed` | Includes preprocessed cases with empty detection targets in fresh training runs. |
 | `plans_det.notes` | Spreadsheet note only. |
 | Fran base workbook `transform_factors`, `affine3d`, `resnet`, and other `model_params` keys | Remain in the merged configuration where applicable; the nnDetection bridge does not read these sheets to configure `RetinaUNetV001`. |
 

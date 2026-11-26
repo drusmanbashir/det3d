@@ -20,9 +20,9 @@ flowchart TB
   subgraph DT["det3d"]
     direction TB
     d1["Six sequential folds at project creation<br/>F/managers/project.py<br/>Project._create_folds"]
-    d2["Case list, drop cases with no boxes<br/>D/managers/data/main.py<br/>_shard_cases_from_project_split"]
-    d3["Read case shape and valid centre boxes<br/>D/managers/data/main.py<br/>LoadHDF5DetShardExtendedBBoxd"]
-    d4["Pick centre: lesion 0.75, background 0.25<br/>D/managers/data/main.py<br/>RandCropExtendedBBoxd"]
+    d2["Training fold, including empty cases when admitted<br/>D/managers/data/main.py<br/>_shard_cases_from_project_split"]
+    d3["Index eligible target rows across training cases<br/>D/managers/data/main.py<br/>InstanceCropDataset"]
+    d4["Random slots use the case draw, forced slots draw a lesion<br/>D/managers/data/transforms.py<br/>RandCropInstanceBoxd"]
     d5["Read the crop from HDF5, shift boxes<br/>D/managers/data/main.py<br/>LoadHDF5DetCropd"]
     d6["Clip and rescale to 0-1<br/>D/managers/data/main.py<br/>DataManagerDetSource.create_transforms, Norm step"]
     d7["Mirror, affine, boxes warped by corners, on GPU<br/>D/transforms/gpu_det.py<br/>RandMirrorBoxSyncd, RandAffineBoxSyncd"]
@@ -49,21 +49,21 @@ flowchart TB
 
 **Rationale.** nnDetection fixes the schedule at 60 epochs of 2500 mini-batches (Baumgartner 2021, [nnDetection](https://arxiv.org/abs/2106.00817), Fig. 1); no reason is stated for these numbers. For nnU-Net, "Based on experience and as a trade-off between runtime and reward, all networks are trained for 1000 epochs with one epoch being defined as iteration over 250 minibatches" (Isensee 2021, [nnU-Net](https://arxiv.org/abs/1904.08128), Methods, Training schedule). The nnU-Net author states "The whole concept of epoch is kind of obsolete in patch based training" and "You can never guarantee the network sees all of the training data because of the way the patches are sampled (randomly)" (Isensee, [issue 61](https://github.com/MIC-DKFZ/nnUNet/issues/61)).
 
-**det3d today.** Every training case is visited once per epoch with one crop: 589 cases on fold 0 at batch 4, about 148 iterations. At 500–600 epochs that is 74,000–89,000 iterations.
+**det3d.** A fixed iteration budget draws cases with replacement. A full-pass epoch shuffles the case indices once. Both use the same forced-slot rule on the resulting batch, including a shorter final batch.
 
 **Home.** The training `DataLoader` built in `DataManagerDetSource` (`D/managers/data/main.py`).
 
 ## 4.3 Patch sampling
 
-**nnDetection.** Batch of four: two elements at a random position, two forced to contain a lesion. For a forced element one lesion is drawn uniformly from all lesions in the training split, so scans with many lesions are sampled more often. The patch is placed at a random offset such that the whole lesion box lies inside it; the lesion is not centred. A lesion larger than the patch gets a patch centred on a random point inside it.
+**nnDetection.** With a batch of four and 50% foreground sampling, two patches use random locations. Each of the other two draws a lesion uniformly from the training split, so scans with more lesions contribute more forced patches. `DataLoader3DFast.get_fg_crop` centres the patch on a uniformly drawn integer point inside the tight box for lesions of every size.
 
 **Rationale.** In nnU-Net, "Oversampling is implemented to ensure robust handling of class imbalances", with 33.3% of patches guaranteed to contain a foreground class (Isensee 2021, [nnU-Net](https://arxiv.org/abs/1904.08128), Methods, Training schedule). Rare classes "could end up being ignored because they are underrepresented during training", and the oversampling is limited so that the network also sees the variability of the background (Isensee 2021, [nnU-Net](https://arxiv.org/abs/1904.08128), Supplement B.1). nnDetection forces half of each batch to contain at least one object (Baumgartner 2021, [nnDetection](https://arxiv.org/abs/2106.00817), Fig. 1); the nnU-Net reasons are inherited, and no separate reason is stated for the 1:1 ratio or the placement of the lesion inside the patch.
 
-**det3d today.** Each crop is lesion-directed with probability 0.75 (`fgbg_ratio = 3`), independently per crop. The case is fixed by the epoch (each case once), then one of its boxes is drawn uniformly. The centre is drawn inside a precomputed "extended" box that guarantees the patch overlaps the lesion by at least one voxel, not that it contains it. Background crops reject centres that fall in any extended box (64 attempts).
+**det3d.** H09 applies to fresh source, LBD and RBD training. The final slots of each batch draw independently from a flat list of eligible training lesions, with replacement. The list uses remapped, size-filtered target rows and respects the plan's ignored and foreground-excluded labels. LIDC SOTA forces two of four slots. Random slots retain the uniform case draw and random location. A blank fraction uses the existing per-patch probability from `fgbg_ratio`.
 
-**Home.** `RandCropExtendedBBoxd` in `D/managers/data/main.py`; the centre ranges come from `ExtendedBBoxesByPatchSizesd` in stage B (`F/transforms/detection.py`).
+**Placement.** H09 uses the same integer draw on each axis, from the lower edge of the det3d box up to, and excluding, its upper edge. Boxes larger than the patch are eligible. At scan edges the crop keeps its origin and pads outside the scan. Before augmentation, the selected row's box must overlap the unpadded crop by at least one voxel. A fully covered box in an instance map must contain its row ID. A partial crop can intersect an empty corner of a valid box. Missing overlap raises with the case ID and one-based lesion row. After augmentation, the tracker clips a surviving chosen box and drops it if it fails the tracker's usual retention rules. Either outcome can continue training. Historical detection checkpoints keep case-first sampling. [Setting and resume behaviour](../../../fran/fran/docs/oversample_fg.md)
 
-**Issues in det3d code.** D2 in [issues.md](issues.md).
+**Implementation.** `InstanceCropDataset` in `D/managers/data/main.py` and `RandCropInstanceBoxd` in `D/managers/data/transforms.py`.
 
 ## 4.4 Oversized patch
 
@@ -73,7 +73,7 @@ flowchart TB
 
 **det3d today.** The crop is read at final size and the affine is applied to it, so rotated or shrunk samples are filled at the borders. A `prezoom_scale` mechanism (`patch_size_prezoom`, extended-box columns at 1.1, 1.2, 1.4 times the patch) exists and is set to 1.0.
 
-**Home.** `prezoom_scale` in dataset parameters, consumed by `RandCropExtendedBBoxd` and `ResizeWithPadOrCropBoxSyncd`.
+**Home.** `prezoom_scale` in dataset parameters, consumed by the training crop and `ResizeWithPadOrCropBoxSyncd`.
 
 **Issues in det3d code.** A6 in [issues.md](issues.md).
 
