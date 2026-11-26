@@ -42,7 +42,7 @@ Exists: **Yes** same method · **Partly** same idea, simpler or not wired · **D
 | 5.2 | Training | Losses: BCE + GIoU + foreground segmentation, all weight 1 | Same on `retinaunet`; sheet loss cells are not read on that path | Yes | [5 § 5.2](integration/5-training.md#52-losses) |
 | 5.3 | Training | SGD with Nesterov; no weight decay on normalisation layers | Nesterov, separate weight-decay groups on `sota` | Yes | [5 § 5.3](integration/5-training.md#53-optimiser) |
 | 5.4 | Training | Linear warm-up 4,000 iterations, then poly decay per iteration, 125,000 iterations | Same step schedulers on `sota`, with the decay horizon ending at the tail | Yes | [5 § 5.4](integration/5-training.md#54-learning-rate-schedule) |
-| 5.5 | Training | Cyclic rate and epoch-start weight averaging | `plans.swa_tail_fraction=auto` gives exactly 10 of 60 epochs | Partly | [5 § 5.5](integration/5-training.md#55-weight-averaging) |
+| 5.5 | Training | Cyclic rate and epoch-start weight averaging | `auto` averages 10 of 60 epochs from scratch, zero of 50 with nnFoundation | Partly | [5 § 5.5](integration/5-training.md#55-weight-averaging) |
 | 5.6 | Training | Final checkpoint is the model used everywhere | Averaged last for inference, raw best and permanent snapshots | Partly | [5 § 5.6](integration/5-training.md#56-checkpoint-choice) |
 | 5.7 | Training | Five fold runs | One fold per run, no multi-fold runner | No | [5 § 5.7](integration/5-training.md#57-folds) |
 | 6.1 | Inference | Tiling at 50% overlap, symmetric grid | MONAI sliding window at 20–25% overlap, only when the crop exceeds the patch | Partly | [6 § 6.1](integration/6-inference.md#61-tiling) |

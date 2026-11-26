@@ -24,7 +24,7 @@ These values were checked by calling `ConfigMakerDet(Project("lidca")).setup(4)`
 |---|---|---|
 | `model_params.arch` | `retinanet` | Detection sheet `model_params`; `--arch retinaunet` overrides it before manager selection. No nnDetection code runs on the default `retinanet` path. |
 | `model_params.lr` | `0.01` | Inherited from Fran's base workbook; CLI `--lr` can change the training LR. |
-| `model_params.max_epochs` | absent | Training setup inserts CLI `--epochs` (default 600); nnDetection's YAML default 50 is overwritten in the internal module. |
+| `model_params.max_epochs` | absent | The outer trainer resolves `plans.epochs`. A numeric CLI override selects full passes. |
 | `dataset_params.datasources` | `lidc` | Detection `data_params` sheet; these are `det3d` data inputs. |
 | `dataset_params.fold`, `batch_size`, `valid_impl` | `0`, `4`, `bbox_anchor` | Detection `data_params` sheet; training CLI can override fold and batch size. nnDetection's data loader is not used. |
 | `dataset_params.spacing` | `[0.703125, 0.703125, 1.25]` | Detection `data_params` sheet. This is a distinct value from plan 4's spacing below. |
@@ -94,20 +94,20 @@ The saved nnDetection lung pickle instead contains `target_spacing=[2.0,0.703125
 
 ## What the nnDetection `trainer_cfg` YAML contributes
 
-The entire `trainer_cfg` dictionary is copied into the nested nnDetection module, but `RetinaUNetManager.configure_optimizers()` uses `det3d`'s own SGD plus `ReduceLROnPlateau`. The nested module's nnDetection warmup/poly scheduler and its `configure_optimizers()` are not the optimizer hook used by the outer trainer. These values should therefore not be mistaken for the effective training policy.
+The nested nnDetection module receives `trainer_cfg`. The outer trainer calls `RetinaUNetManager.configure_optimizers()`, which uses the workbook settings in `configure_detection_optimizers`. Fine-tuning warm-up and polynomial decay step on every optimiser update.
 
 | nnDetection `trainer_cfg` keys | Value in nested module | Effective `det3d` training source |
 |---|---|---|
 | `gpus`, `accelerator`, `precision`, `amp_backend`, `amp_level` | `1`, `null`, `16`, `native`, `O1` | Outer Fran/`det3d` Lightning trainer chooses devices and precision. |
 | `deterministic`, `benchmark` | `false`, `false` | Static nnDetection defaults. The bridge checks `model_params`, so it does not apply the `nndet` sheet values to this copy. The outer trainer separately reads `plan_train.deterministic` and `plan_train.benchmark`; both become `false` from the sheet's blank values. |
 | `monitor_key`, `monitor_mode` | nnDetection mAP key, `max` | `det3d` scheduler reads `plan_train.scheduler_monitor` (`train0_loss` for plan 4), `scheduler_mode=min`, `scheduler_patience=30`, and `scheduler_frequency=2`. |
-| `max_num_epochs` | CLI epochs; default 600 | Outer trainer also uses CLI epochs. The YAML value `50` is replaced. |
+| `max_num_epochs` | `50` from v001 | The outer trainer resolves `plans.epochs`. Auto uses 60 epochs from scratch or 50 with nnFoundation. |
 | `num_train_batches_per_epoch`, `num_val_batches_per_epoch` | `2500`, `100` | Static nnDetection values stored in the nested module; `det3d` data loaders control iteration. |
 | `initial_lr` | `model_params.lr=0.01` from Fran base workbook | Outer manager uses its `lr`, which can be changed by CLI `--lr`. |
 | `sgd_momentum` | `model_params.momentum=0.9` from Fran base workbook | Outer manager reads `plan_train.momentum=0.9` (overlaid by `nndet` sheet). |
 | `weight_decay` | `model_params.weight_decay=0` from Fran base workbook | Outer manager reads `plan_train.weight_decay=3e-5` (overlaid by `nndet` sheet). **The copies differ.** |
 | `sgd_nesterov` | `true` from nnDetection YAML | Outer manager reads `plan_train.nesterov=None` and converts it to `false`. **The copies differ.** |
-| `warm_iterations`, `warm_lr`, `poly_gamma`, `swa_epochs` | `4000`, `1e-6`, `0.9`, `10` | Nested nnDetection scheduler/SWA defaults; the outer manager uses `ReduceLROnPlateau`, so these do not select its schedule. |
+| `warm_iterations`, `warm_lr`, `poly_gamma`, `swa_epochs` | `4000`, `1e-6`, `0.9`, `10` | The outer manager uses the workbook’s warm-up settings and `plans.swa_tail_fraction`. Pretrained SGD on auto resolves 4,000 warm-up steps and zero averaged epochs. |
 
 ## Spreadsheet keys that can be misread as active nnDetection settings
 
