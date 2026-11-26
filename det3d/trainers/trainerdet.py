@@ -95,31 +95,13 @@ class TrainerDet(Trainer):
 
     def setup(
         self,
-        batch_size=None,
-        train_indices=None,
-        val_indices=None,
-        val_sampling: float = 1.0,
-        logging_freq=25,
-        lr=None,
-        devices=1,
-        compiled=None,
-        wandb=True,
-        profiler=False,
-        debug: bool = False,
+        *,
         debug_tfm_keys: str | None = None,
         val_every_n_epochs: int = 5,
-        cbs=[],
-        tags=[],
-        description="",
-        epochs=None,
         batchsize_finder=False,
-        override_dm_checkpoint=False,
-        early_stopping=True,
-        early_stopping_patience=None,
-        wandb_grid_epoch_freq: int = 5,
-        permanent_checkpoint_every_n_epochs: int = 100,
         batch_tfms: bool = True,
         snapshot_freq: int = 1000,
+        **kwargs,
     ):
         """Detection defaults over ``Trainer.setup``.
 
@@ -127,33 +109,15 @@ class TrainerDet(Trainer):
         finder only runs in run-through trainers. ``epochs`` None reads
         ``plans.epochs`` (``auto``: nnDetection v001). Early stopping follows
         ``model_params.early_stopping_patience`` (``auto``: none) unless a patience is passed.
+        The remaining arguments and their defaults are inherited from ``Trainer.setup``.
         """
         self.debug_tfm_keys = debug_tfm_keys
         super().setup(
-            batch_size=batch_size,
-            train_indices=train_indices,
-            val_indices=val_indices,
-            val_sampling=val_sampling,
-            logging_freq=logging_freq,
-            lr=lr,
-            devices=devices,
-            compiled=compiled,
-            wandb=wandb,
-            profiler=profiler,
-            debug=debug,
             val_every_n_epochs=int(val_every_n_epochs),
-            cbs=cbs,
-            tags=tags,
-            description=description,
-            epochs=epochs,
             batchsize_finder=batchsize_finder and self.run_through,
-            override_dm_checkpoint=override_dm_checkpoint,
-            early_stopping=early_stopping,
-            early_stopping_patience=early_stopping_patience,
-            wandb_grid_epoch_freq=wandb_grid_epoch_freq,
             batch_tfms=batch_tfms,
             case_id_recorder_freq=snapshot_freq,
-            permanent_checkpoint_every_n_epochs=permanent_checkpoint_every_n_epochs,
+            **kwargs,
         )
         self.D.prepare_data()
         self.D.setup(stage="fit")
