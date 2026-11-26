@@ -1,5 +1,6 @@
 from det3d.managers.data.collate import attach_targets
 from det3d.transforms.box_tracker import CornerTracker, voxel_map
+from fran.transforms.spatialtransforms import RandMirrord
 from monai.transforms.transform import MapTransform
 import torch
 from monai.data import MetaTensor
@@ -119,6 +120,30 @@ class RandFlipBoxSyncd(MapTransform):
         ref = d[self.ref_key]
         return self.tracker.warp(d, voxel_map(a0, ref.meta["affine"], ref.device))
 
+
+
+class RandMirrorBoxSyncd(RandMirrord):
+    """Mirror spatial_keys (reference image first) and update box_key in the mirrored voxel grid.
+
+    prob (0 to 1) applies independently to each axis in axes (a subset of 0, 1, 2, or empty).
+    tracker defaults to CornerTracker; lazy=True queues the image flip and updates the tracker immediately.
+    """
+
+    def __init__(self, spatial_keys, box_key, prob=0.5, axes=(0, 1, 2), tracker=None, lazy=False):
+        super().__init__(spatial_keys, prob, axes, lazy=lazy)
+        self.ref_key = self.keys[0]
+        self.tracker = tracker if tracker is not None else CornerTracker(box_key, image_key=self.ref_key)
+
+    def __call__(self, data, lazy=None):
+        lazy = self.lazy if lazy is None else lazy
+        d = super().__call__(data, lazy=lazy)
+        if not self.selected_axes:
+            return d
+        before = data[self.ref_key].peek_pending_affine()
+        if not lazy:
+            d = SyncMetaAffined(keys=self.keys)(d)
+        ref = d[self.ref_key]
+        return self.tracker.warp(d, voxel_map(before, ref.peek_pending_affine(), ref.device))
 
 
 class DetToDeviced(MapTransform):
