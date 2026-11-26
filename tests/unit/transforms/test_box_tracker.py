@@ -6,16 +6,18 @@ import pandas as pd
 import pytest
 import torch
 from monai.data import MetaTensor
-from monai.transforms import RandAffined, RandAxisFlipd, ResizeWithPadOrCropd
+from monai.transforms import RandAffined, Flipd, ResizeWithPadOrCropd
 
 import det3d.managers.data  # noqa: F401
 from det3d.transforms.gpu_det import (
     RandAffineBoxSyncd,
-    RandFlipBoxSyncd,
+    RandMirrorBoxSyncd,
     ResizeWithPadOrCropBoxSyncd,
 )
 
 ROTATION = [(0.35, 0.35)] * 3
+# Single axes used when the reference float bits were recorded.
+BASELINE_AXIS = {0: 1, 1: 0, 5: 1, 11: 0}
 BASELINE = {
     0: [[1077238372, 1091566849, 1090739246, 1098891584, 1100809108, 1101599634],
         [1071387828, 1101551592, 0, 1096350944, 1104674816, 1086961180]],
@@ -66,19 +68,17 @@ def run_tracker(name, lm, seed, shape):  #AI
         item[key] = MetaTensor(lm)
         item["hull_xyz"] = tracker.compute(lm, rows)
     keys = ["image", key]
-    flip = RandFlipBoxSyncd(keys, "bbox", 1, tracker=tracker)
+    flip = RandMirrorBoxSyncd(keys, "bbox", 1, axes=(2,), tracker=tracker)
     affine = RandAffineBoxSyncd(keys, "bbox", ["bilinear", "nearest"], 1, ROTATION, None, tracker=tracker)
     resize = ResizeWithPadOrCropBoxSyncd(keys, "bbox", "label", shape, tracker=tracker)
-    flip.rand_flip.set_random_state(seed)
     affine.rand_affine.set_random_state(seed)
     return tracker.finalize(resize(affine(flip(item))))
 
 
 def reference(lm, seed, shape):  #AI
     """Warp the semantic voxels using MONAI alone."""
-    f = RandAxisFlipd("lm", 1)
+    f = Flipd("lm", spatial_axis=2)
     a = RandAffined("lm", prob=1, rotate_range=ROTATION, mode="nearest", padding_mode="zeros")
-    f.set_random_state(seed)
     a.set_random_state(seed)
     warped = a(f({"lm": MetaTensor(lm)}))
     cropped = ResizeWithPadOrCropd("lm", shape)(warped)
@@ -126,10 +126,9 @@ def test_corner_same_float_bits_as_main(seed):  #AI
     item = {"image": MetaTensor(torch.zeros(1, 32, 32, 32)),
             "bbox": torch.tensor([[10., 11., 12., 17., 20., 23.], [0., 1., 2., 7., 9., 10.]]),
             "label": torch.tensor([2, 4])}
-    f = RandFlipBoxSyncd(["image"], "bbox", 1, tracker=tracker)
+    f = RandMirrorBoxSyncd(["image"], "bbox", 1, axes=(BASELINE_AXIS[seed],), tracker=tracker)
     a = RandAffineBoxSyncd(["image"], "bbox", ["bilinear"], 1, [0.4] * 3, [0.15] * 3, tracker=tracker)
     r = ResizeWithPadOrCropBoxSyncd(["image"], "bbox", "label", (25, 27, 29), tracker=tracker)
-    f.rand_flip.set_random_state(seed)
     a.rand_affine.set_random_state(seed)
     out = tracker.finalize(r(a(f(item))))
     assert out["bbox"].view(torch.int32).tolist() == BASELINE[seed]

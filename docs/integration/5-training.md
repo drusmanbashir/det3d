@@ -26,8 +26,8 @@ flowchart TB
     d2["Build nnDetection model from sheet values<br/>D/managers/helpers/nndet_retinaunet.py<br/>build_nndet_retinaunet_module"]
     d3["Convert batch to nnDetection format<br/>D/managers/helpers/nndet_retinaunet.py<br/>det3d_batch_to_nndet"]
     d4["Match, sample, losses: nnDetection code<br/>N/nndet/core/retina.py<br/>BaseRetinaNet.train_step"]
-    d5["SGD, ReduceLROnPlateau on train loss<br/>D/managers/det_schedule.py<br/>configure_detection_optimizers"]
-    d6["Precision bf16, clip 1.0, checkpoints<br/>D/trainers/trainerdet.py<br/>TrainerDet.setup, init_cbs"]
+    d5["SGD or fine-tuning AdamW, warm-up, polynomial decay and optional cyclic tail<br/>D/managers/det_schedule.py<br/>configure_detection_optimizers"]
+    d6["Configured precision, gradient clipping and checkpoints<br/>D/trainers/trainerdet.py<br/>TrainerDet.setup, init_cbs"]
     d1 --> d2 --> d3 --> d4 --> d5 --> d6
   end
 ```
@@ -62,7 +62,7 @@ flowchart TB
 
 **Rationale.** No stated rationale found in the nnDetection paper, its supplement or repository for its optimiser settings. The method whose recipe nnDetection follows reports that "stochastic gradient descent with a high initial learning rate (0.01) and a large nesterov momentum (0.99) empirically provided the best results" (Isensee 2020, [Automated design of deep learning methods](https://arxiv.org/abs/1904.08128), Supplementary Information B); nnDetection uses momentum 0.9 (Baumgartner 2021, [nnDetection](https://arxiv.org/abs/2106.00817), Fig. 1). No stated rationale found for the weight-decay value or for excluding normalisation parameters.
 
-**det3d today.** SGD, 0.01, momentum 0.9, weight decay 3e-5 on every parameter, Nesterov off (the sheet cell is blank). Gradient clipping at 1.0 on `retinaunet`, absent upstream.
+**det3d today.** From scratch, `sota` uses Nesterov SGD with momentum 0.9 and workbook gradient clipping. With `pretrained=nnfoundation`, the detection fine-tuning sheet selects Nesterov SGD at 0.01 with gradient clipping off. Setting `finetuning.optimizer` to `adamw` selects the DETR + ResEnc recipe at 3e-4. Both optimizers exclude normalization parameters from weight decay.
 
 **Home.** `configure_detection_optimizers` in `D/managers/det_schedule.py`.
 
@@ -70,21 +70,21 @@ flowchart TB
 
 ## 5.4 Learning-rate schedule
 
-**nnDetection.** Stepped every iteration. The rate rises linearly from 1e-6 to 0.01 over the first 4,000 iterations, then decays as `0.01 × (1 − progress)^0.9` to almost zero at iteration 125,000. The schedule depends on the fixed epoch length of 4.2.
+**nnDetection.** Stepped every iteration. The rate rises linearly from 1e-6 to 0.01 over the first 4,000 iterations, then decays as `0.01 × (1 − progress)^0.9` with a horizon of 125,000 iterations. The callback swaps schedulers at the boundary described in §5.5. The schedule depends on the fixed epoch length of 4.2.
 
 **Rationale.** nnDetection lists the 4,000-iteration linear warm-up, the poly schedule and 2,500 batches per epoch without a reason (Baumgartner 2021, [nnDetection](https://arxiv.org/abs/2106.00817), Fig. 1). nnU-Net, which nnDetection follows, defines an epoch as 250 training iterations and reports that "shorter trainings than this default empirically result in diminished segmentation performance", with a poly learning rate that is "an almost linear decrease to 0" (Isensee 2020, [Automated design of deep learning methods](https://arxiv.org/abs/1904.08128), Supplementary Information B). The nnDetection maintainer states that "training time should remain independent of the dataset size since the same number of batches/samples is sampled in each epoch" ([issue 208](https://github.com/MIC-DKFZ/nnDetection/issues/208)). No stated rationale found for the warm-up length.
 
-**det3d today.** `ReduceLROnPlateau` watching the training loss, patience 30 checks at one check per two epochs, factor 0.1. No warm-up. nnDetection's schedule object is built inside the nested module but is not the one the trainer uses. `D/transforms/warmup_scheduler.py` exists with no caller.
+**det3d today.** From scratch with `plans.swa_tail_fraction=auto`, the outer manager uses nnDetection’s `LinearWarmupPolyLR` over the pre-tail optimizer steps and `CycleLinear` for the tail. Zero selects full-run decay. The nnFoundation recipe warms up over 3.2% of total optimizer steps (4% with AdamW), then uses nnDetection’s per-step polynomial decay with exponent 0.9.
 
 **Home.** `configure_detection_optimizers` in `D/managers/det_schedule.py`. Needs 4.2 (a known total iteration count).
 
 ## 5.5 Weight averaging
 
-**nnDetection.** After the 50 scheduled epochs it trains 10 more with a rate that cycles once per epoch between 1e-5 and 1e-3, and averages the weights taken at the start of each of those epochs. Whether the saved final checkpoint holds the averaged weights could not be confirmed from the code against the pinned Lightning version.
+**nnDetection.** v001 configures 50 + 10 epochs. Lightning 1.4.2 interprets start epoch 50 as one-based, so the callback actually averages the starts of epochs 50 through 60. Each epoch’s rate rises from 1e-5 toward 1e-3 and resets. The end-of-training hooks transfer the average before saving `model_last`. [Lightning SWA](https://raw.githubusercontent.com/Lightning-AI/pytorch-lightning/1.4.2/pytorch_lightning/callbacks/stochastic_weight_avg.py) · [Checkpoint hooks](https://raw.githubusercontent.com/Lightning-AI/pytorch-lightning/1.4.2/pytorch_lightning/callbacks/model_checkpoint.py)
 
 **Rationale.** nnDetection takes a weight snapshot after each epoch for Stochastic Weight Averaging and gives no reason of its own (Baumgartner 2021, [nnDetection](https://arxiv.org/abs/2106.00817), Fig. 1). The SWA authors report that "averaging of multiple points along the trajectory of SGD, with a cyclical or constant learning rate, leads to better generalization than conventional training" and finds "much flatter solutions than SGD" (Izmailov 2018, [Stochastic Weight Averaging](https://arxiv.org/abs/1803.05407), Abstract). Independent evidence: SWA over 12 extra epochs with cyclical rates improved several detectors (Mask R-CNN, Faster R-CNN, RetinaNet, FCOS, YOLOv3, VFNet) by about 1.0 AP on COCO (Zhang 2020, [SWA Object Detection](https://arxiv.org/abs/2012.12645), Introduction).
 
-**det3d today.** `TrainerDet` adds Lightning's `StochasticWeightAveraging` when `plan["use_swa"]` is true. No sheet has that key, so it is off.
+**det3d today.** Blank or `auto` disables averaging for nnFoundation fine-tuning. From scratch it selects one sixth of total epochs and aligns the transition to validation. A positive explicit fraction up to 1 must give a validation-aligned transition, and 0 disables averaging. The 60-epoch from-scratch recipe averages ten epoch-start parameter sets with the current normalization buffers.
 
 **Home.** Shared callback list in fran `Trainer.init_cbs` (`fran/trainers/trainer.py`); `TrainerDet.init_cbs` (`D/trainers/trainerdet.py`) adds SWA.
 
@@ -96,7 +96,7 @@ flowchart TB
 
 **Rationale.** No stated rationale found in the nnDetection paper, its supplement or repository.
 
-**det3d today.** `TrainerDet`: top two by `val0_metric` every 5 epochs, plus last, plus a snapshot every 100 epochs. `TrainerDetRT` (the launchers' default): no validation, checkpoints by lowest training loss. Inference takes one checkpoint by run id.
+**det3d today.** `TrainerDet`: top two by `val0_metric` every 5 epochs, plus permanent snapshots at the resolved quarter-run interval by default. With an enabled tail, best and permanent checkpoints retain the raw model, and `last.ckpt` contains averaged inference weights and separate raw resume weights. `TrainerDetRT` (the launchers' default): no validation, checkpoints by lowest training loss. Inference takes one checkpoint by run id.
 
 **Home.** fran `Trainer.init_cbs`, with the monitor and cadence set by `TrainerDet` / `TrainerDetRT` class attributes; checkpoint lookup `checkpoint_from_model_id` used by `D/run/inference/infer_det.py`.
 

@@ -255,7 +255,12 @@ def test_detection_base_builds_transforms_without_legacy_intensity_keys():  #AI
     }}
     manager.dataset_params = {"intensity_norm": "zscore_fg", "prezoom_scale": 1.0, "fgbg_ratio": 1.0, "augment": "monai"}
     manager.configs = {"affine3d": {"p": 0.0, "rotate_range": 0.0, "scale_range": 0.0}}
-    manager.flip = dict(prob=0.0)
+    from det3d.transforms.box_tracker import CornerTracker
+
+    manager.configs["model_params"] = {"arch": "retinanet"}
+    manager.box_tracker_name = "corner"
+    manager.box_tracker = CornerTracker()
+    manager.mirror = dict(prob=0.0, value=(0, 1, 2))
     manager.scale = dict(prob=0.0, value=0.1)
     manager.noise = dict(prob=0.0, value=[0.0, 0.1])
     manager.shift = dict(prob=0.0, value=0.1)

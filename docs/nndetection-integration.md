@@ -40,10 +40,10 @@ Exists: **Yes** same method · **Partly** same idea, simpler or not wired · **D
 | 4.7 | Data loading | Validation on 100 random patches, half without a forced lesion | One lesion-centred patch per positive case | Different | [4 § 4.7](integration/4-data-loading.md#47-validation-patches) |
 | 5.1 | Training | Anchor matching (ATSS) and hard-negative sampling | Same classes; sampler numbers typed in the sheet | Yes | [5 § 5.1](integration/5-training.md#51-matching-and-sampling) |
 | 5.2 | Training | Losses: BCE + GIoU + foreground segmentation, all weight 1 | Same on `retinaunet`; sheet loss cells are not read on that path | Yes | [5 § 5.2](integration/5-training.md#52-losses) |
-| 5.3 | Training | SGD with Nesterov; no weight decay on normalisation layers | SGD, Nesterov off, one parameter group | Partly | [5 § 5.3](integration/5-training.md#53-optimiser) |
-| 5.4 | Training | Linear warm-up 4,000 iterations, then poly decay per iteration, 125,000 iterations | `ReduceLROnPlateau` on training loss | No | [5 § 5.4](integration/5-training.md#54-learning-rate-schedule) |
-| 5.5 | Training | Ten extra epochs with cyclic rate and weight averaging | Switch exists (`use_swa`), off, no sheet cell | Partly | [5 § 5.5](integration/5-training.md#55-weight-averaging) |
-| 5.6 | Training | Final checkpoint is the model used everywhere | Best-by-metric checkpoints; training-loss checkpoints in run-through mode | Different | [5 § 5.6](integration/5-training.md#56-checkpoint-choice) |
+| 5.3 | Training | SGD with Nesterov; no weight decay on normalisation layers | Nesterov, separate weight-decay groups on `sota` | Yes | [5 § 5.3](integration/5-training.md#53-optimiser) |
+| 5.4 | Training | Linear warm-up 4,000 iterations, then poly decay per iteration, 125,000 iterations | Same step schedulers on `sota`, with the decay horizon ending at the tail | Yes | [5 § 5.4](integration/5-training.md#54-learning-rate-schedule) |
+| 5.5 | Training | Cyclic rate and epoch-start weight averaging | `plans.swa_tail_fraction=auto` gives exactly 10 of 60 epochs | Partly | [5 § 5.5](integration/5-training.md#55-weight-averaging) |
+| 5.6 | Training | Final checkpoint is the model used everywhere | Averaged last for inference, raw best and permanent snapshots | Partly | [5 § 5.6](integration/5-training.md#56-checkpoint-choice) |
 | 5.7 | Training | Five fold runs | One fold per run, no multi-fold runner | No | [5 § 5.7](integration/5-training.md#57-folds) |
 | 6.1 | Inference | Tiling at 50% overlap, symmetric grid | MONAI sliding window at 20–25% overlap, only when the crop exceeds the patch | Partly | [6 § 6.1](integration/6-inference.md#61-tiling) |
 | 6.2 | Inference | Eight mirrored variants per patch | None (placeholder file) | No | [6 § 6.2](integration/6-inference.md#62-test-time-mirroring) |

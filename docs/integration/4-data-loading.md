@@ -25,7 +25,7 @@ flowchart TB
     d4["Pick centre: lesion 0.75, background 0.25<br/>D/managers/data/main.py<br/>RandCropExtendedBBoxd"]
     d5["Read the crop from HDF5, shift boxes<br/>D/managers/data/main.py<br/>LoadHDF5DetCropd"]
     d6["Clip and rescale to 0-1<br/>D/managers/data/main.py<br/>DataManagerDetSource.create_transforms, Norm step"]
-    d7["Flip, affine, boxes warped by corners, on GPU<br/>D/transforms/gpu_det.py<br/>RandFlipBoxSyncd, RandAffineBoxSyncd"]
+    d7["Mirror, affine, boxes warped by corners, on GPU<br/>D/transforms/gpu_det.py<br/>RandMirrorBoxSyncd, RandAffineBoxSyncd"]
     d8["Pad or crop, clip boxes, intensity transforms<br/>D/transforms/gpu_det.py<br/>build_train_gpu_tail_compose"]
     d1 --> d2 --> d3 --> d4 --> d5 --> d6 --> d7 --> d8
   end
@@ -84,7 +84,7 @@ flowchart TB
 | Rotation | p 0.2, ±30° on each axis | inside affine: p 0.3, about ±11°, ±11°, ±9° |
 | Scaling | p 0.2, one factor 0.7–1.4 | inside affine: ±15% per axis |
 | Elastic | off | none |
-| Mirror | each of three axes, p 0.5 | one random axis, p 0.1 |
+| Mirror | each of three axes, p 0.5 | each configured axis independently (workbook axes 0, 1, 2, p 0.5) |
 | Gaussian noise | p 0.1 | p 0.1 |
 | Gaussian blur | p 0.2, sigma 0.5–1.0 | p 0.15, sigma 0.5–1.0 |
 | Brightness (multiplicative) | p 0.15, 0.75–1.25 | scale intensity p 0.1 |

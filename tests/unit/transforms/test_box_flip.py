@@ -1,7 +1,7 @@
 """Flips must move exclusive box edges by N - x (edges), not the voxel-centre rule N - 1 - x.
 
 Defect (Fable box audit, operator review 2026-11-18): flipped boxes landed one voxel low in training
-(RandFlipBoxSyncd) and when inference restored LPS/LAS orientation (InvPreprocessBoxd, BoxRd).
+(RandMirrorBoxSyncd) and when inference restored LPS/LAS orientation (InvPreprocessBoxd, BoxRd).
 Reference is always the extent of the flipped voxels, never product box maths.
 MUTATION: drop the 0.5 shift in box_tracker._warp_edges, or restore `sh[i] - 1.0 - coords[:, i]` in post.py.
 CONTROL: the unflipped RAS cases stay exact under that mutation.
@@ -15,7 +15,7 @@ from monai.transforms import Compose, Orientationd, Spacingd
 
 import det3d.managers.data  # noqa: F401  (import before gpu_det avoids a circular import)
 from det3d.inference.post import BoxRd, InvPreprocessBoxd
-from det3d.transforms.gpu_det import RandFlipBoxSyncd
+from det3d.transforms.gpu_det import RandMirrorBoxSyncd
 
 SHAPE = (40, 48, 32)
 OBJECT = (slice(10, 16), slice(20, 29), slice(5, 9))
@@ -39,8 +39,8 @@ def test_rand_flip_box_matches_flipped_voxels():  #AI
             "lm": MetaTensor(cube.clone()),
             "bbox": torch.tensor([[10.0, 10, 10, 20, 20, 20]]),
         }
-        flip = RandFlipBoxSyncd(["image", "lm"], "bbox", prob=1.0)
-        flip.rand_flip.set_random_state(seed)
+        flip = RandMirrorBoxSyncd(["image", "lm"], "bbox", prob=0.5)
+        flip.set_random_state(seed)
         out = flip(data)
         want = voxel_box(out["lm"][0].numpy())
         flipped_axes.update(np.flatnonzero(want[:3] != 10).tolist())

@@ -19,7 +19,7 @@ from det3d.managers.data.valid_patch_stream import PatchStreamDatasetDet, patch_
 from fran.preprocessing.hdf5_shards import find_hdf5_shard_folder
 from det3d.transforms.box_tracker import BOX_TRACKERS
 from fran.transforms.detection import patch_size_manifest_key
-from det3d.transforms.gpu_det import RandAffineBoxSyncd, RandFlipBoxSyncd, ResizeWithPadOrCropBoxSyncd
+from det3d.transforms.gpu_det import RandAffineBoxSyncd, RandMirrorBoxSyncd, ResizeWithPadOrCropBoxSyncd
 from det3d.utils.bbox_sidecar import bbox_sidecar_path, load_detection_sidecar, valid_detection_box
 from fran.utils.bbox_sidecar import extended_bbox_df_column, nbrhood_df_to_detection_records
 from fran.configs.parser import ConfigMaker
@@ -40,16 +40,12 @@ from fran.run.preproc.archive_preprocessed import ensure_rapid_data_folder
 from fran.transforms.imageio import TorchReader
 from monai.data import DataLoader, Dataset
 from torch.utils.data import RandomSampler
-from fran.transforms.intensitytransforms import NormaliseClipd, RandRandGaussianNoised
+from fran.transforms.intensitytransforms import NormaliseClipd
 from monai.transforms import (
     Compose,
     EnsureChannelFirstd,
     EnsureTyped,
     LoadImaged,
-    RandAdjustContrastd,
-    RandGaussianSmoothd,
-    RandScaleIntensityd,
-    RandShiftIntensityd,
 )
 from fran.utils.folder_names import FolderNames
 from utilz.stringz import info_from_filename
@@ -66,6 +62,34 @@ from det3d.managers.data.transforms import (
 
 
 _FIXED = ConfigMaker.fixed()
+
+
+class DetectionCropDataset(ForcedFgDataset):
+    """Keep random crops on the drawn scan and draw a positive scan for its forced crops if needed."""
+
+    def __init__(self, ds, crop, box_key):
+        super().__init__(ds)
+        self.crop = crop
+        self.positive = [i for i, row in enumerate(ds.data) if len(row[box_key])]
+        self.box_key = box_key
+
+    def __getitem__(self, key):
+        if self.crop.oversample_fg is None:
+            index = key
+            p = self.crop.pos / (self.crop.pos + self.crop.neg)
+            n_forced = int((torch.rand(self.crop.num_samples) < p).sum())
+        else:
+            index, n_forced = key
+        n_random = self.crop.num_samples - n_forced
+        row = self.ds.data[index]
+        if not n_forced or len(row[self.box_key]):
+            return self.ds.transform(dict(row, crop_counts=(n_random, n_forced)))
+        if not self.positive:
+            raise ValueError("A foreground crop was requested but no training case has a detection box")
+        draw = torch.randint(len(self.positive), ()).item()
+        positive = self.ds.data[self.positive[draw]]
+        patches = self.ds.transform(dict(row, crop_counts=(n_random, 0))) if n_random else []
+        return patches + self.ds.transform(dict(positive, crop_counts=(0, n_forced)))
 
 
 class DataManagerDet(DataManager):
@@ -160,6 +184,20 @@ class DataManagerDet(DataManager):
             )
         return augment
 
+    def _training_spatial_keys(self):
+        keys = [self.image_key]
+        if self.uses_tracker_lm():
+            keys.append(self.lm_key)
+        if self.box_tracker_name == "remeasure":
+            keys.append("inst")
+        return keys
+
+    def _create_mirror(self):
+        return RandMirrorBoxSyncd(
+            self._training_spatial_keys(), self.box_key, prob=self.mirror["prob"],
+            axes=self.mirror_axes, tracker=self.box_tracker,
+        )
+
     def uses_tracker_lm(self):  #AI
         """Load the semantic map for RetinaUNet or hull filtering."""
         return self.uses_lm_seg() or self.box_tracker_name == "hull"
@@ -246,6 +284,8 @@ class DataManagerDet(DataManager):
                 self.oversample_fg(),
             )
             batching = dict(batch_sampler=batch_sampler)
+        if self.dataset_params["nnz_allowed"] and "Rtr" in self.keys:
+            ds = DetectionCropDataset(self.ds, self.Rtr, self.box_key)
         return ds, batching
 
     def create_dataloader(self):
@@ -318,12 +358,13 @@ class DataManagerDet(DataManager):
             case_ids_on_disk.add(
                 info_from_filename(img_fn.name, full_caseid=True)["case_id"]
             )
-        if full_volume:
+        include_empty = full_volume or (self.is_train_all_split() and nnz_allowed)
+        if include_empty:
             missing = set(self.cases) - case_ids_on_disk
             if missing:
-                raise FileNotFoundError(f"Missing {len(missing)} validation volumes: {sorted(missing)[:5]}")
+                raise FileNotFoundError(f"Missing {len(missing)} {self.split} volumes: {sorted(missing)[:5]}")
         self.cases = [case_id for case_id in self.cases if case_id in case_ids_on_disk]
-        self.cases = self._filter_cases_by_stats_nnz(self.cases, nnz_allowed)
+        self.cases = self._filter_cases_by_stats_nnz(self.cases, include_empty)
         assert len(self.cases) > 0, "There are no cases, aborting!"
 
     def _filter_cases_by_stats_nnz(self, cases, nnz_allowed):
@@ -413,6 +454,8 @@ class DataManagerDet(DataManager):
                     continue
                 bbox_fn = bbox_sidecar_path(bboxes_dir, case_id)
                 if not bbox_fn.is_file():
+                    if self.is_train_all_split() and self.dataset_params["nnz_allowed"]:
+                        raise FileNotFoundError(bbox_fn)
                     skipped += 1
                     continue
                 box_t, label_t, instances, df = self._load_bbox_sidecar(bbox_fn)
@@ -446,16 +489,18 @@ class DataManagerDet(DataManager):
             nnz_allowed=nnz_allowed,
         )
         self.cases = train_cases if self.is_train_split() else valid_cases
-        self.cases = [
-            case_id for case_id in self.cases if case_id in self._case_ids_on_disk()
-        ]
-        self.cases = self._filter_cases_by_stats_nnz(self.cases, nnz_allowed)
+        on_disk = self._case_ids_on_disk()
+        include_empty = self.is_train_all_split() and nnz_allowed
+        if include_empty and (missing := set(self.cases) - on_disk):
+            raise FileNotFoundError(f"Missing {len(missing)} training cases in {self.hdf5_manifest_fn}: {sorted(missing)[:5]}")
+        self.cases = [case_id for case_id in self.cases if case_id in on_disk]
+        self.cases = self._filter_cases_by_stats_nnz(self.cases, include_empty)
         assert len(self.cases) > 0, "There are no cases, aborting!"
 
 
 class DataManagerDetSource(DataManagerDet, DataManagerSource):
     keys_tr = (
-        "Ld,Rtr,L2,E,Norm,F,Affine,ResizePC,BoxClip,IntensityTfms"
+        "Ld,Rtr,L2,E,Norm,Mir,Affine,ResizePC,BoxClip,IntensityTfms"
     )
 
     def __init__(self, project, configs: dict, batch_size=DATA_MANAGER_BATCH_SIZE, cache_rate=0.0, **kwargs):
@@ -486,18 +531,8 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
 
     def create_transforms(self):
         super().create_transforms()
-        ik, bk, lk, lmk = (
-            self.image_key,
-            self.box_key,
-            self.label_key,
-            self.lm_key,
-        )
-        load_keys = [ik]
-        if self.uses_tracker_lm():
-            load_keys.append(lmk)
-        if self.box_tracker_name == "remeasure":
-            load_keys.append("inst")
-        spatial_aug_keys = load_keys
+        ik, bk, lk = self.image_key, self.box_key, self.label_key
+        spatial_aug_keys = self._training_spatial_keys()
         affine_modes = ["bilinear" if k == ik else "nearest" for k in spatial_aug_keys]
         plan = self.plan
         patch_size = self._patch_size()
@@ -515,8 +550,6 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
             )
         affine3d = self.configs["affine3d"]
 
-        flip_prob = float(self.flip["prob"])
-
         self.Ld = LoadHDF5DetShardExtendedBBoxd(
             keys=["case_id"],
             manifest_fn=str(self.hdf5_manifest_fn),
@@ -533,14 +566,8 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
             oversample_fg=self.oversample_fg(),
             src_dims_key="src_dims",
         )
-        self.L2 = LoadHDF5DetCropd(keys=load_keys, box_key=bk, tracker=self.box_tracker)
-        self.E = EnsureChannelFirstd(keys=load_keys)
-        self.F = RandFlipBoxSyncd(
-            spatial_keys=spatial_aug_keys,
-            box_key=bk,
-            prob=flip_prob,
-            tracker=self.box_tracker,
-        )
+        self.L2 = LoadHDF5DetCropd(keys=spatial_aug_keys, box_key=bk, tracker=self.box_tracker)
+        self.E = EnsureChannelFirstd(keys=spatial_aug_keys)
         self.Affine = RandAffineBoxSyncd(
             spatial_keys=spatial_aug_keys,
             box_key=bk,
@@ -567,33 +594,10 @@ class DataManagerDetSource(DataManagerDet, DataManagerSource):
         self.transforms_dict["Norm"] = self.Norm
         # LBD crops are padded on disk only to PATCH_MIN, which the patch planned after LBD can exceed.
         # End-pad short patches before collate and pass full-size patches through unchanged.
-        self.transforms_dict["PadPatch"] = PadDetPatchd(keys=load_keys, patch_size=patch_size_prezoom)
-        self.transforms_dict["F"] = self.F
+        self.transforms_dict["PadPatch"] = PadDetPatchd(keys=spatial_aug_keys, patch_size=patch_size_prezoom)
         self.transforms_dict["Affine"] = self.Affine
         self.transforms_dict["ResizePC"] = self.ResizePC
         self.transforms_dict["BoxClip"] = self.BoxClip
-        self.transforms_dict["IntensityTfms"] = [
-            RandScaleIntensityd(
-                keys=[ik], factors=self.scale["value"], prob=self.scale["prob"]
-            ),
-            RandRandGaussianNoised(
-                keys=[ik], std_limits=self.noise["value"], prob=self.noise["prob"]
-            ),
-            RandShiftIntensityd(
-                keys=[ik], offsets=self.shift["value"], prob=self.shift["prob"]
-            ),
-            RandAdjustContrastd(
-                keys=[ik], gamma=self.contrast["value"], prob=self.contrast["prob"]
-            ),
-            RandGaussianSmoothd(
-                keys=[ik],
-                prob=0.15,
-                sigma_x=(0.5, 1.0),
-                sigma_y=(0.5, 1.0),
-                sigma_z=(0.5, 1.0),
-            ),
-            RandAdjustContrastd(keys=[ik], prob=0.15, gamma=(0.7, 1.5)),
-        ]
         if type(self.Ld) is not LoadHDF5DetShardExtendedBBoxd:
             raise RuntimeError(
                 f"det shard train must use LoadHDF5DetShardExtendedBBoxd, got {type(self.Ld)}"

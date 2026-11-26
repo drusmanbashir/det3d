@@ -9,7 +9,9 @@ class ConfigMakerDet(ConfigMaker):
     CONFIG_FILENAME = "experiment_configs_det.xlsx"
     PIPELINE = "det3d"  # names the plan file, `FolderNames.plan_file`
     ENCODERS = (None, "resenc")
-    FINETUNING_KEYS = ("checkpoint", "initial_lr", "momentum", "nesterov", "weight_decay", "warm_iterations", "warm_lr", "poly_gamma")
+    FINETUNING_KEYS = (
+        "checkpoint", "optimizer", "initial_lr", "weight_decay", "warmup_fraction", "warm_lr", "poly_gamma",
+    )
     SKIP_SHEETS = frozenset({"plans", "plans_dot", "legend"})
     FIT_KEYS = ("spacing", "fg_labels", "intensity_properties")
     GPU_FIT_KEYS = ("patch_size", "batch_size", "model")
@@ -44,6 +46,8 @@ class ConfigMakerDet(ConfigMaker):
                 plan["val_patch_size"] = self.resolved_val_patch_size(plan, plan["patch_size"])
         plan = self.configs["plan_train"]
         overrides = {} if plan_overrides is None else plan_overrides
+        if "swa_tail_fraction" in overrides.get("plans", {}):
+            plan["swa_tail_fraction"] = overrides["plans"]["swa_tail_fraction"]
         for sheet, keys in self.PLAN_OVERRIDES.items():
             for key in keys:
                 if key in self.plans.columns:

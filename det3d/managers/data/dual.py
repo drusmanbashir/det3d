@@ -182,13 +182,8 @@ if __name__ == "__main__":
     E = tfms["E"]
     dici2 = E(dici2)
 # %%
-    F1= tfms["F1"]
-    dici2 = F1(dici2)
-    print(dici2['image'].meta['affine'])
-    print(dici2['bbox'][0])
-    F2 = tfms["F2"]
-# %%
-    dici2=F2(dici2)
+    Mir = tfms["Mir"]
+    dici2 = Mir(dici2)
     print(dici2['image'].meta['affine'])
     img = dici2['image']
     box = dici2['bbox']

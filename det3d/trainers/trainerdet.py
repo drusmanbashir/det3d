@@ -2,16 +2,18 @@ from ast import List
 import os
 from torch import Tensor
 from pathlib import Path
+from shlex import quote
 from nndet.core.retina import BaseRetinaNet
 import torch
 from det3d.geometry.nndet_boxes import from_nndet
 from det3d.detection.retinanet_detector2 import RetinaNetDetector2
 from fran.callback.debug_epoch_limit import DebugEpochBatchLimit
+from fran.configs.workbook import apply_finetuning
 from fran.managers.wandb.wandb import DET3D_WANDB_WORKSPACE
 from fran.preprocessing.helpers import import_h5py
 from fran.trainers.trainer import Trainer
 from lightning.fabric import Fabric
-from lightning.pytorch.callbacks import StochasticWeightAveraging
+from lightning.pytorch.callbacks import ModelCheckpoint
 from utilz.imageviewers import ImageMaskBboxViewer, ImageMaskViewer
 from utilz.stringz import ast_literal_eval, headline
 
@@ -21,7 +23,7 @@ from det3d.callback.wandb_det_grid import (
     WandbRetinaUNetImageGridCallback,
 )
 from det3d.managers.retinaunet import RetinaUNetManager
-from det3d.configs.parser import ConfigMakerDet
+from det3d.managers.det_schedule import DetectionTail, resolve_tail_epochs
 from det3d.managers.data import DataManagerDualDet, DataManagerDualDetBTfms
 from det3d.managers.data.labels import infer_det_labels_from_data_folder
 from det3d.managers.detector_factory import resolve_detector_manager
@@ -134,6 +136,7 @@ class TrainerDet(Trainer):
         nndet = self.configs["nndet"]
         precision = nndet.get("precision")  # blank or absent in older checkpoints: bf16-mixed
         kwargs = dict(
+            gradient_clip_val=self.configs["model_params"]["grad_clip"],
             precision="bf16-mixed" if precision is None else str(precision),
             benchmark=bool(nndet["benchmark"]),
             deterministic=bool(nndet["deterministic"]),
@@ -211,6 +214,19 @@ class TrainerDet(Trainer):
         """A det resume takes the model from the checkpoint and rebuilds the datamodule from current configs."""
         if self.ckpt:
             self.N = self.load_trainer()
+            saved = self.N.configs
+            if "finetuning" in saved:
+                recipe = saved["finetuning"]
+                if "optimizer" not in recipe:
+                    raise ValueError(
+                        "Resume requires the saved optimizer recipe. Run python -m fran.run.misc.migrate_checkpoints "
+                        f"--only det-finetuning-optimizer --ckpt {quote(str(self.ckpt))}"
+                    )
+                recipe.pop("grad_clip", None)  # Older checkpoints duplicated model_params.grad_clip here.
+                saved["model_params"]["grad_clip"] = self.configs["model_params"]["grad_clip"]
+                self.configs["finetuning"] = recipe
+                apply_finetuning(self.configs)
+                self.configs["plan_train"]["swa_tail_fraction"] = saved["plan_train"]["swa_tail_fraction"]
             self.D = self.init_dm()
         else:
             self.D = self.init_dm()
@@ -242,16 +258,16 @@ class TrainerDet(Trainer):
         )
         if self.debug_tfm_keys:
             cbs = [cb for cb in cbs if not isinstance(cb, DebugEpochBatchLimit)]
-        plan = self.configs["plan_train"]
-        if bool(plan.get("use_swa", False)):
-            cbs += [
-                StochasticWeightAveraging(
-                    swa_lrs=float(self.lr),
-                    swa_epoch_start=self.max_epochs - int(
-                        plan.get("swa_epochs", ConfigMakerDet.fixed()["DET_SWA_EPOCHS"])
-                    ),
-                )
-            ]
+        fraction = self.configs["plan_train"]["swa_tail_fraction"]
+        recipe = self.configs.get("finetuning")
+        if fraction in (None, "auto") and recipe is not None and recipe["warmup_fraction"] is not None:
+            fraction = 0
+        tail_epochs = resolve_tail_epochs(fraction, self.max_epochs, 1 if self.run_through else self.val_every_n_epochs)
+        if tail_epochs:
+            for cb in cbs:
+                if isinstance(cb, ModelCheckpoint):
+                    cb.save_last = False
+            cbs.append(DetectionTail(self.max_epochs - tail_epochs))
         return cbs, logger, profiler
 
     def setup_model_for_cuda(self, device=0, precision="bf16-mixed"):
@@ -519,7 +535,7 @@ if __name__ == "__main__":
 
 # %%
     # /home/ub/code/det3d/det3d/managers/retinaunet.py  # T:block_donor|/home/ub/code/det3d/det3d/managers/retinaunet.py
-    tfms="Ld,Rtr,L2,E,Norm,BoxToWorld,ToPoints,Zoom,Flip0,Flip1,Flip2,Rand90,Rot,AffinePts,ToBoxes,BoxClip,DelMask,IntensityTfms,Dtype"
+    tfms="Ld,Rtr,L2,E,Norm,BoxToWorld,ToPoints,Zoom,Mir,Rand90,Rot,AffinePts,ToBoxes,BoxClip,DelMask,IntensityTfms,Dtype"
     tfms = tmt.transforms_dict
     from fran.managers.data.main import RandCropByFlatIndicesd
 # %%
@@ -603,13 +619,7 @@ if __name__ == "__main__":
     dici = tfms["Zoom"](dici)
     print(dici['image'].shape)
 
-    dici = tfms["Flip0"](dici)
-    print(dici['image'].shape)
-
-    dici = tfms["Flip1"](dici)
-    print(dici['image'].shape)
-
-    dici = tfms["Flip2"](dici)
+    dici = tfms["Mir"](dici)
     print(dici['image'].shape)
 
     dici = tfms["Rand90"](dici)

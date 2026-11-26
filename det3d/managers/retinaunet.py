@@ -8,7 +8,6 @@ import torch
 import yaml
 from fran.architectures.nnunet import encoder_widths
 from fran.configs.helpers import plan_encoder
-from fran.configs.workbook import apply_finetuning
 from fran.managers.project import Project
 from fran.managers.unet import LossLoggingModule
 from nndet.evaluator.seg import SegmentationEvaluator
@@ -38,13 +37,13 @@ class RetinaUNetManager(LossLoggingModule):
         legacy = configs.pop("nnfoundation", None)
         if legacy is not None and "encoder" not in configs["plan_train"]:
             configs["plan_train"]["encoder"] = "resenc"
+        if legacy is not None and "finetuning" not in configs:
+            configs["finetuning"] = {"checkpoint": legacy["checkpoint"]}
         if finetuning is not None:
             if plan_encoder(configs["plan_train"]) != "resenc":
                 raise ValueError("pretrained='nnfoundation' requires a resume checkpoint with a ResEnc-L encoder")
-            configs["finetuning"] = finetuning
-            apply_finetuning(configs)
-        elif legacy is not None:
-            configs["finetuning"] = {"checkpoint": legacy["checkpoint"]}
+            if "finetuning" not in configs:
+                raise ValueError("Cannot resume a from-scratch optimizer with pretrained='nnfoundation'.")
         if configs.get("mnemonic") is None:
             configs["mnemonic"] = self.project.global_properties["mnemonic"]
         self.save_hyperparameters("project_title", "configs", "lr")

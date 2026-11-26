@@ -7,7 +7,7 @@ from monai.data import MetaTensor
 from monai.transforms import Compose
 from monai.transforms.croppad.array import Crop
 from monai.transforms.croppad.dictionary import ResizeWithPadOrCropd
-from monai.transforms.spatial.dictionary import RandAffined, RandAxisFlipd
+from monai.transforms.spatial.dictionary import RandAffined
 from monai.utils import fall_back_tuple
 
 
@@ -93,29 +93,6 @@ class RandAffineBoxSyncd(MapTransform):
         d = dict(data)
         a0 = d[self.ref_key].meta["affine"].clone()
         d = self.rand_affine(d)
-        d = SyncMetaAffined(keys=self.keys)(d)
-        ref = d[self.ref_key]
-        return self.tracker.warp(d, voxel_map(a0, ref.meta["affine"], ref.device))
-
-
-
-class RandFlipBoxSyncd(MapTransform):
-    """RandFlip on spatial keys + synchronize box tracking in the new voxel grid."""
-
-    def __init__(self, spatial_keys, box_key, prob, tracker=None):
-        super().__init__(spatial_keys)
-        self.box_key = box_key
-        self.ref_key = spatial_keys[0]
-        self.tracker = tracker if tracker is not None else CornerTracker(box_key, image_key=self.ref_key)
-        self.rand_flip = RandAxisFlipd(
-            keys=spatial_keys,
-            prob=prob,
-        )
-
-    def __call__(self, data):
-        d = dict(data)
-        a0 = d[self.ref_key].meta["affine"].clone()
-        d = self.rand_flip(d)
         d = SyncMetaAffined(keys=self.keys)(d)
         ref = d[self.ref_key]
         return self.tracker.warp(d, voxel_map(a0, ref.meta["affine"], ref.device))
@@ -327,7 +304,7 @@ def build_train_gpu_tail_compose(
     intensity_tfms,
     affine3d,
     patch_size,
-    flip_prob,
+    mirror,
     spatial_prob=1.0,
     tracker=None,
     inst_key=None,
@@ -346,15 +323,9 @@ def build_train_gpu_tail_compose(
         affine_mode.append("nearest")
     if tracker is None:
         tracker = CornerTracker(box_key, label_key, image_key)
-    flip_p = float(flip_prob)
     return Compose(
         [
-            RandFlipBoxSyncd(
-                spatial_keys=spatial_keys,
-                box_key=box_key,
-                prob=flip_p,
-                tracker=tracker,
-            ),
+            mirror,
             RandAffineBoxSyncd(
                 spatial_keys=spatial_keys,
                 box_key=box_key,
