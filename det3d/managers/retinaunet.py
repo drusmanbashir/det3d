@@ -97,6 +97,10 @@ class RetinaUNetManager(LossLoggingModule):
             from fran.architectures.nnfoundation import load_nnfoundation_encoder, nnfoundation_checkpoint
 
             load_nnfoundation_encoder(module.model.encoder, nnfoundation_checkpoint(configs))
+        if configs["model_params"]["compiled"]:
+            # in-place compile of the conv modules only; anchors, matching and losses stay eager, state-dict keys unchanged
+            for part in (module.model.encoder, module.model.decoder, module.model.head, module.model.segmenter):
+                part.compile()
         module.seg_evaluator = SegmentationEvaluatorTorch.create()
         return module, plan
 
@@ -168,7 +172,7 @@ class RetinaUNetManager(LossLoggingModule):
         seg_key="lm",
     ):
         # AI
-        data = batch["image"]
+        data = batch["image"].as_subclass(torch.Tensor)
         n = int(data.shape[0])
         target_boxes = []
         target_classes_raw = []
