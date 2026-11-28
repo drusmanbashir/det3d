@@ -7,7 +7,7 @@ from pathlib import Path
 
 from label_analysis.totalseg import TotalSegmenterLabels
 
-from fran.configs.best_runs import canonical_mnemonic
+from fran.configs.best_runs import run_organ
 from fran.data.dataregistry import DS
 from fran.inference.helpers import load_params, tsl_label_loc
 from fran.trainers import pinned_checkpoint
@@ -47,7 +47,7 @@ def resolve_localiser_labels(args):
     localiser_plan = load_params(pinned_checkpoint(run_w))["configs"]["plan_train"]
     if args.lung_localiser:
         return list(tsl_label_loc("lung", localiser_plan))
-    mnemonic = canonical_mnemonic(load_params(pinned_checkpoint(args.run_p))["configs"]["mnemonic"])
+    mnemonic = run_organ(args.run_p, load_params(pinned_checkpoint(args.run_p))["configs"])
     if mnemonic == "bones":
         return list(tsl_label_loc("bones", localiser_plan))
     return list(TotalSegmenterLabels().label_region)
