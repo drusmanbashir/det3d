@@ -11,7 +11,6 @@ done
 
 source "${HOME}/mambaforge/etc/profile.d/conda.sh"
 conda activate dl
-export FRAN_CONF="${FRAN_CONF:-/s/fran_storage/conf}"
 export PYTHONPATH="/home/ub/code/fran:/home/ub/code/det3d:/home/ub/code/label_analysis:/home/ub/code/utilz:/home/ub/code/localiser${PYTHONPATH:+:${PYTHONPATH}}"
 
 modern=0

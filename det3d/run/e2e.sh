@@ -26,7 +26,6 @@ PREPROC="${PREPROC:-1}"          # 0 skips preprocessing and planning
 OVERWRITE="${OVERWRITE:-0}"      # 1 passes --overwrite to preprocessing
 DATASOURCES="${DATASOURCES:-}"   # only to create a missing project, e.g. "lidc"
 MNEMONIC="${MNEMONIC:-}"         # only to create a missing project, e.g. "lungs"
-export FRAN_CONF="${FRAN_CONF:-/s/fran_storage/conf}"
 
 TRAIN_ARGS=()
 PLAN_FILE="${PLAN_FILE:-}"

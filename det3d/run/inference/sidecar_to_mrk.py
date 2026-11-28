@@ -7,12 +7,13 @@ from det3d.inference.markups import save_inference_markups
 from det3d.inference.visualize import list_sidecar_files
 from det3d.utils.bbox_sidecar import load_inference_sidecar
 from fran.inference.helpers import infer_project, load_params
+from fran.trainers import pinned_checkpoint
 
 
 def predictions_dir(args):
     if args.dir is not None:
         return Path(args.dir)
-    params = load_params(args.run_p)
+    params = load_params(pinned_checkpoint(args.run_p))
     project = infer_project(params)
     return project.predictions_folder / args.run_p
 

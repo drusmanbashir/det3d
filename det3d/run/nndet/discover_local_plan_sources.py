@@ -7,8 +7,9 @@ import json
 from pathlib import Path
 
 import yaml
+from fran.utils.common import COMMON_PATHS
 
-from stage_local_msd import load_spec, resolve_source
+from stage_local_msd import resolve_source
 
 PLACEHOLDER_SIZE = 789_064
 
@@ -35,12 +36,7 @@ def main() -> None:
     sources_yaml = Path(args.sources_yaml)
     specs = yaml.safe_load(sources_yaml.read_text())
 
-    nndet_conf = args.nndet_conf
-    if nndet_conf is None:
-        import os
-
-        fran_conf = os.environ.get("FRAN_CONF", "/s/fran_storage/conf")
-        nndet_conf = yaml.safe_load(Path(fran_conf, "config.yaml").read_text())["nndet_conf"]
+    nndet_conf = COMMON_PATHS["nndet_conf"] if args.nndet_conf is None else args.nndet_conf
 
     rows = []
     for mnemonic, spec in specs.items():

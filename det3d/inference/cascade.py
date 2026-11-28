@@ -6,13 +6,13 @@ from fran.inference import helpers
 from fran.inference.cascade import CascadeInferer as FranCascadeInferer
 from fran.transforms.inferencetransforms import SqueezeListofListsd
 from monai.data.meta_tensor import MetaTensor
-from utilz.fileio import load_yaml
 from utilz.imageviewers import ImageMaskBboxViewer
 
 
-def _finalize_postproc_keys(postproc, postproc_safe, *, safe_mode, k_largest, save):
+def _finalize_postproc_keys(postproc, postproc_safe, *, safe_mode, keep_organ, save):
+    """Mode's key chain; organ K on the packed seg map just before F (boxes-only chains have no F, so no K)."""
     chain = postproc_safe if safe_mode else postproc
-    if k_largest is not None:
+    if keep_organ:
         parts = chain.split(",")
         if "F" in parts:
             parts.insert(parts.index("F"), "K")
@@ -53,7 +53,6 @@ class DetBBoxCascadeInferer(FranCascadeInferer):
         profile=None,
         save=True,
         save_localiser=True,
-        k_largest=None,
         debug=False,
     ):
         self.pred_run_p = None
@@ -69,7 +68,6 @@ class DetBBoxCascadeInferer(FranCascadeInferer):
             save_channels=False,
             save=save,
             save_localiser=save_localiser,
-            k_largest=k_largest,
             debug=debug,
             merge_touching_labels=None,
         )
@@ -142,7 +140,7 @@ class DetBBoxCascadeInferer(FranCascadeInferer):
             self.keys_postproc,
             self.keys_postproc_safe,
             safe_mode=self.safe_mode,
-            k_largest=self.k_largest,
+            keep_organ=self.organ_keep is not None,
             save=self.save,
         )
 
@@ -151,7 +149,7 @@ class DetSegBBoxCascadeInferer(DetBBoxCascadeInferer):
     """Localiser bbox → RetinaUNet patch → full-volume seg + boxes."""
 
     PatchInfererCls = DetPatchRetinaUNet
-    keys_postproc = "SqL,MR,A,Int,W,F,R,Off,BoxR,Sav"
+    keys_postproc = "SqL,MR,Int,W,F,R,Off,BoxR,Sav"
     keys_postproc_safe = "SqL,MR,W,F,R,Off,BoxR,Sav"
     write_seg = True
 
@@ -175,7 +173,7 @@ if __name__ == "__main__":
     from utilz.helpers import pp
     from utilz.imageviewers import ImageBBoxViewer, ImageMaskViewer
 
-    from fran.utils.common import COMMON_PATHS
+    from fran.configs.best_runs import BEST_RUNS, run_entries
 
     devices = [0]
     safe_mode = True
@@ -185,8 +183,7 @@ if __name__ == "__main__":
     chunksize = 1
 
     def default_run_w():
-        fn = Path(COMMON_PATHS["cold_storage_folder"]) / "conf" / "best_runs.yaml"
-        return load_yaml(fn)["totalseg"]["whole"]["runs"][0]
+        return run_entries(BEST_RUNS["totalseg"]["whole"])[0].name
 
 
 # %%

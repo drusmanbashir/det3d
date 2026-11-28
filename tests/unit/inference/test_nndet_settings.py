@@ -77,7 +77,9 @@ def write_run(run, configs, merge=None):
 
 
 def configs(plan_extra=None, dataset_params=None, postprocess=None):
-    out = {"plan_train": {"mode": "lbd", "spacing": [0.7, 0.7, 1.8], "patch_size": [16, 16, 8], "fg_labels": [1], **(plan_extra or {})},
+    plan = {"plan_name": "p", "datasources": "lidc", "remapping_source": None, "remapping_lbd_rbd": None,
+            "remapping_train": None, "merge_imported_labels": None}  # the keys the load-time organ_label check reads
+    out = {"plan_train": {**plan, "mode": "lbd", "spacing": [0.7, 0.7, 1.8], "patch_size": [16, 16, 8], "fg_labels": [1], **(plan_extra or {})},
            "dataset_params": dataset_params or {}, "model_params": {"arch": "retinaunet", "compiled": 0}}
     if postprocess is not None:
         out["postprocess"] = postprocess
@@ -113,7 +115,8 @@ def run_case(tmp_path, code):
               "configurations_folder": str(FRAN_ROOT / "configurations"), "cache_folder": str(tmp_path / "cache"),
               "rapid_access_folder": str(tmp_path / "rapid"), "training_num_workers": 2}
     (conf / "config.yaml").write_text(yaml.safe_dump(config))
-    (conf / "datasets.yaml").write_text(yaml.safe_dump({"datasets": {}}))
+    lidc = {"ds": "lidc", "folder": str(tmp_path / "lidc"), "alias": None, "organ": "misc"}  # no declared organ: organ_label None
+    (conf / "datasets.yaml").write_text(yaml.safe_dump({"datasets": {"lidc": lidc}}))
     (conf / "best_runs.yaml").write_text(yaml.safe_dump({"yolo": {}, "pretrained": {}}))
     (conf / "organs_registry.yaml").write_text("{}\n")
     env = dict(os.environ, FRAN_CONF=str(conf), CUDA_VISIBLE_DEVICES="")

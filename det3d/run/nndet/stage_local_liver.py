@@ -4,6 +4,8 @@ import argparse
 import json
 from pathlib import Path
 
+from fran.utils.common import resolve_path
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -11,8 +13,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--lits-root",
-        default="/s/datasets/lits_segs_improved",
-        help="FRAN lits root with images/ and label subfolder",
+        default="DS.lits",
+        help="FRAN lits root with images/ and label subfolder (`DS.<dataset>`, `$key/...` or a path)",
     )
     parser.add_argument(
         "--task-raw",
@@ -26,7 +28,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    root = Path(args.lits_root)
+    root = resolve_path(args.lits_root)
     images_dir = root / "images"
     labels_dir = root / args.labels_subdir
     task_raw = Path(args.task_raw)

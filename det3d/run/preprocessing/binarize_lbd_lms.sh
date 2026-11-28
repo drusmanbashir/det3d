@@ -8,7 +8,6 @@ LBD_FOLDER="${3:-}"
 
 source "${HOME}/mambaforge/etc/profile.d/conda.sh"
 conda activate dl
-export FRAN_CONF="${FRAN_CONF:-/s/fran_storage/conf}"
 
 argv=(
   python /home/ub/code/det3d/det3d/run/preprocessing/binarize_lbd_lms.py

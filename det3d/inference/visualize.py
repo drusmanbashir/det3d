@@ -7,6 +7,7 @@ import torch
 from det3d.detection.visualize_image import normalize_image_to_uint8
 from det3d.utils.bbox_sidecar import load_inference_sidecar
 from fran.inference.helpers import infer_project, load_params
+from fran.trainers import pinned_checkpoint
 from utilz.stringz import info_from_filename, strip_extension
 
 
@@ -27,7 +28,7 @@ def sidecar_file_at_index(pred_dir, index):
 
 def resolve_sidecar_path(run_p, case, project=None):
     if project is None:
-        params = load_params(run_p)
+        params = load_params(pinned_checkpoint(run_p))
         project = infer_project(params)
     stem = strip_extension(case)
     proj_title = info_from_filename(stem, full_caseid=False)["proj_title"]
@@ -36,7 +37,7 @@ def resolve_sidecar_path(run_p, case, project=None):
 
 def list_prediction_sidecars(run_p, project=None):
     if project is None:
-        params = load_params(run_p)
+        params = load_params(pinned_checkpoint(run_p))
         project = infer_project(params)
     fldr = project.predictions_folder / run_p
     return sorted(

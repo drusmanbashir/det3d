@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Ephemeral nnDet prep: stage local data → D3V001_3d.pkl → nndet_conf/plans/{mnemonic}/, delete silo.
+# Ephemeral nnDet prep: stage local data → D3V001_3d.pkl → nndet_conf/plans/{sources key}/, delete silo.
+# Any mnemonic of an organ (kidney, kidneys, kits23) selects its local_plan_sources.yaml entry; needs FRAN_CONF.
 # No downloads. See local_plan_sources.yaml and discover_local_plan_sources.py.
 set -euo pipefail
 
 MNEMONIC="${1:?usage: generate_nndet_plan_silo.sh liver|kidneys|pancreas|colon|all [--force]}"
 FORCE="${2:-}"
 
-FRAN_CONF="${FRAN_CONF:-/s/fran_storage/conf}"
 NNDET_ROOT="${NNDET_ROOT:-/home/ub/code/nnDetection}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCES_YAML="${SCRIPT_DIR}/local_plan_sources.yaml"
@@ -15,8 +15,7 @@ PLACEHOLDER_SIZE=789064
 
 source /home/ub/mambaforge/etc/profile.d/conda.sh
 conda activate dl
-NNDET_CONF="$(python -c "import yaml; print(yaml.safe_load(open('${FRAN_CONF}/config.yaml'))['nndet_conf'])")"
-export FRAN_CONF
+NNDET_CONF="$(python -c "from fran.utils.common import COMMON_PATHS; print(COMMON_PATHS['nndet_conf'])")"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export det_num_threads="${det_num_threads:-6}"
 export MPLBACKEND=Agg
@@ -24,7 +23,15 @@ export MPLBACKEND=Agg
 log() { echo "[nndet_silo $1] $*" >&2; }
 
 run_one() {
-  local mnemonic="$1"
+  local mnemonic task layout prepare_project prepare_args
+  read -r mnemonic task layout prepare_project prepare_args < <(
+    PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" python - <<PY
+from pathlib import Path
+from stage_local_msd import load_spec
+key, spec = load_spec("$1", Path("${SOURCES_YAML}"))
+print(key, spec["task"], spec["layout"], spec.get("prepare_project", ""), spec.get("prepare_args", ""))
+PY
+  )
   local force="${2:-}"
   local silo_dir="/s/agent_rw/tmp/nndet_silo_${mnemonic}_$$"
   local out_pkl="${NNDET_CONF}/plans/${mnemonic}/D3V001_3d.pkl"
@@ -37,16 +44,6 @@ run_one() {
       return 0
     fi
   fi
-
-  local task layout prepare_project prepare_args
-  read -r task layout prepare_project prepare_args < <(
-    python - <<PY
-import yaml
-from pathlib import Path
-spec = yaml.safe_load(Path("${SOURCES_YAML}").read_text())["${mnemonic}"]
-print(spec["task"], spec["layout"], spec.get("prepare_project", ""), spec.get("prepare_args", ""))
-PY
-  )
 
   export det_data="${silo_dir}/det_data"
   export det_models="${silo_dir}/det_models"

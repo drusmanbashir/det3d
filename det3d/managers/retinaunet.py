@@ -8,6 +8,7 @@ import torch
 import yaml
 from fran.architectures.nnunet import encoder_widths
 from fran.configs.helpers import plan_encoder
+from fran.configs.mnemonics import project_mnemonic
 from fran.managers.project import Project
 from fran.managers.unet import LossLoggingModule
 from nndet.evaluator.seg import SegmentationEvaluator
@@ -45,7 +46,7 @@ class RetinaUNetManager(LossLoggingModule):
             if "finetuning" not in configs:
                 raise ValueError("Cannot resume a from-scratch optimizer with pretrained='nnfoundation'.")
         if configs.get("mnemonic") is None:
-            configs["mnemonic"] = self.project.global_properties["mnemonic"]
+            configs["mnemonic"] = project_mnemonic(self.project.global_properties["mnemonic"])
         self.save_hyperparameters("project_title", "configs", "lr")
         self.configs = configs
         self.plan = configs["plan_train"]
