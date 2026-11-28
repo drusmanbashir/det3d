@@ -8,6 +8,7 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 import SimpleITK as sitk
+from fran.utils.common import resolve_path
 
 
 def load_label(path: Path) -> tuple[np.ndarray, nib.Nifti1Image | None, sitk.Image | None]:
@@ -53,7 +54,7 @@ def resolve_source(stem: str, sources: list[Path]) -> Path | None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Remap label 3 -> 2 into a new LITS label folder.")
-    parser.add_argument("--lits-root", default="/s/datasets/lits_segs_improved")
+    parser.add_argument("--lits-root", default="DS.lits")
     parser.add_argument("--out-subdir", default="lms_3as2")
     parser.add_argument(
         "--source-subdirs",
@@ -63,7 +64,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    root = Path(args.lits_root)
+    root = resolve_path(args.lits_root)
     out_dir = root / args.out_subdir
     sources = [root / s for s in args.source_subdirs]
     images = sorted((root / "images").glob("*.nii.gz"))

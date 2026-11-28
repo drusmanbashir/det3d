@@ -10,15 +10,16 @@ from det3d.inference.visualize import (
     view_inference_sidecar,
 )
 from det3d.utils.bbox_sidecar import load_inference_sidecar
+from fran.utils.common import resolve_path
 
-DEFAULT_PREDICTIONS_DIR = Path("/s/fran_storage/predictions/lidc/LIDC-TAINT")
+DEFAULT_PREDICTIONS_DIR = resolve_path("$cold_storage_folder/predictions/lidc/LIDC-TAINT")
 
 
 def predictions_dir(args):
     if args.dir is not None:
         return Path(args.dir)
     if args.run_p is not None:
-        return Path("/s/fran_storage/predictions/lidc") / args.run_p
+        return resolve_path("$cold_storage_folder/predictions/lidc") / args.run_p
     return DEFAULT_PREDICTIONS_DIR
 
 

@@ -1,5 +1,5 @@
 # Local-only sources for nnDetection plan silos (no downloads).
-# First existing source root with matched image/label pairs wins.
+# First existing source root with matched image/label pairs wins. Roots: `DS.<dataset>` or `$cold_storage_folder/...` (fran resolve_path).
 
 liver:
   task: Task003_Liver
@@ -7,14 +7,12 @@ liver:
   prepare_project: Task001_Decathlon
   prepare_args: Task003_Liver
   sources:
-    - root: /s/datasets/lits_segs_improved
+    - root: DS.lits
       labels_subdir: lms_3as2
-    - root: /s/datasets/lits_segs_improved
+    - root: DS.lits
       labels_subdir: lms
-    - root: /s/datasets/lits_segs_improved
+    - root: DS.lits
       labels_subdir: lms_singlelesionclass
-    - root: /media/UB/datasets/lits_segs_improved
-      labels_subdir: lms_3as2
   dataset_json:
     name: Liver
     description: Local LITS / MSD liver label maps
@@ -32,8 +30,8 @@ kidneys:
   label_remap:
     3: 2  # KiTS23 cyst → nnDet KiTS tumor class
   sources:
-    - root: /media/UB/datasets/kits23
-    - root: /s/fran_storage/datasets/raw_data/kits23
+    - root: DS.kits23
+    - root: $cold_storage_folder/datasets/raw_data/kits23
   case_prefix: case_
   image_pattern: "{case_id}_0000.nii.gz"
   label_pattern: "{case_id}.nii.gz"
@@ -56,8 +54,8 @@ pancreas:
   prepare_project: Task001_Decathlon
   prepare_args: Task007_Pancreas
   sources:
-    - root: /media/UB/datasets/pancreasmsd07
-    - root: /s/fran_storage/datasets/raw_data/pancreas
+    - root: DS.pancreasmsd07
+    - root: $cold_storage_folder/datasets/raw_data/pancreas
   dataset_json:
     name: Pancreas
     description: Local MSD Task07 pancreas
@@ -74,8 +72,8 @@ colon:
   prepare_project: Task001_Decathlon
   prepare_args: Task010_Colon
   sources:
-    - root: /media/UB/datasets/colonmsd10
-    - root: /s/fran_storage/datasets/raw_data/colon
+    - root: DS.colonmsd10
+    - root: $cold_storage_folder/datasets/raw_data/colon
   dataset_json:
     name: Colon
     description: Local MSD Task10 colon

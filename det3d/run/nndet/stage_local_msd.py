@@ -9,16 +9,22 @@ import sys
 from pathlib import Path
 
 import yaml
+from fran.configs.best_runs import canonical_mnemonic
+from fran.utils.common import resolve_path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_SOURCES = SCRIPT_DIR / "local_plan_sources.yaml"
 
 
-def load_spec(mnemonic: str, sources_yaml: Path) -> dict:
+def load_spec(mnemonic: str, sources_yaml: Path) -> tuple[str, dict]:
+    """(entry key, entry) of the sources entry whose key has the canonical organ of `mnemonic`; the key names the plan dir."""
     data = yaml.safe_load(sources_yaml.read_text())
-    if mnemonic not in data:
+    keys = {canonical_mnemonic(key): key for key in data}
+    organ = canonical_mnemonic(mnemonic)
+    if organ not in keys:
         raise KeyError(f"unknown mnemonic {mnemonic!r}; known: {sorted(data)}")
-    return data[mnemonic]
+    key = keys[organ]
+    return key, data[key]
 
 
 def label_candidates(folder: Path) -> dict[str, Path]:
@@ -63,7 +69,7 @@ def pair_images_labels(
 
 def resolve_source(spec: dict) -> tuple[Path, Path, Path, list[tuple[Path, Path, str]]]:
     for src in spec["sources"]:
-        root = Path(src["root"])
+        root = resolve_path(src["root"])
         images_dir = root / src.get("images_subdir", "images")
         labels_dir = root / src.get("labels_subdir", "lms")
         if not images_dir.is_dir() or not labels_dir.is_dir():
@@ -174,7 +180,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    spec = load_spec(args.mnemonic, Path(args.sources_yaml))
+    _, spec = load_spec(args.mnemonic, Path(args.sources_yaml))
     root, _images_dir, _labels_dir, pairs = resolve_source(spec)
     task_dir = Path(args.task_dir).resolve()
     source_root = root.resolve()
