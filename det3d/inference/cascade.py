@@ -1,12 +1,14 @@
 from copy import deepcopy
+from pathlib import Path
 
 from det3d.inference.patch import DetPatchRetinaNet, DetPatchRetinaUNet
-from det3d.inference.post import BoxRd, Offd, SaveDetOutputd
+from det3d.inference.post import BoxRd, Offd, SaveDetOutputd, det_output_paths
 from fran.inference import helpers
 from fran.inference.cascade import CascadeInferer as FranCascadeInferer
 from fran.transforms.inferencetransforms import SqueezeListofListsd
 from monai.data.meta_tensor import MetaTensor
 from utilz.imageviewers import ImageMaskBboxViewer
+from utilz.listify import listify
 
 
 def _finalize_postproc_keys(postproc, postproc_safe, *, safe_mode, keep_organ, save):
@@ -46,6 +48,7 @@ class DetBBoxCascadeInferer(FranCascadeInferer):
         run_w,
         run_p,
         localiser_labels,
+        output,  # final predictions folder; stage intermediates go under output/_stages/<stage>
         project_title=None,
         devices=(0,),
         safe_mode=False,
@@ -55,11 +58,11 @@ class DetBBoxCascadeInferer(FranCascadeInferer):
         save_localiser=True,
         debug=False,
     ):
-        self.pred_run_p = None
         super().__init__(
             run_w,
             run_p,
             localiser_labels,
+            output,
             project_title=project_title,
             devices=devices,
             safe_mode=safe_mode,
@@ -72,14 +75,22 @@ class DetBBoxCascadeInferer(FranCascadeInferer):
             merge_touching_labels=None,
         )
 
-    @property
-    def output_folder(self):
-        run_name = self.pred_run_p if self.pred_run_p is not None else self.run_p
-        return self.predictions_folder / run_name
+    def final_path(self, image) -> Path:
+        """Boxes only: the detection sidecar `<output>/<proj_title>/<case>.json`."""
+        path = Path(det_output_paths(self.output_folder, image)[1])
+        return path
+
+    def maybe_filter_images(self, imgs, overwrite=False):
+        """Image files still to predict: all with overwrite, else those without their final file."""
+        imgs = [Path(img) for img in listify(imgs)]
+        if overwrite == False:
+            imgs = [img for img in imgs if not self.final_path(img).exists()]
+        return imgs
 
     def setup_patch_inferer(self):
         return self.PatchInfererCls(
             run_name=self.run_p,
+            output=helpers.stage_folder(self.output, self.run_p),
             project_title=self.project_title,
             devices=self.devices,
             patch_overlap=self.patch_overlap,
@@ -153,6 +164,9 @@ class DetSegBBoxCascadeInferer(DetBBoxCascadeInferer):
     keys_postproc_safe = "SqL,MR,W,F,R,Off,BoxR,Sav"
     write_seg = True
 
+    def final_path(self, image) -> Path:
+        return helpers.final_prediction_path(self.output_folder, image)
+
     def decollate_case(self, batch):
         return {self.run_p: helpers.channel_first(batch["pred"].detach().cpu())}
 
@@ -208,6 +222,7 @@ if __name__ == "__main__":
     En = DetSegBBoxCascadeInferer(
         run_w=run_w,
         run_p=run_p,
+        output=Path("/s/agent_rw/tmp/runs") / run_p,
         project_title=project_title,
 
         devices=devices,

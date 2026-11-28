@@ -57,6 +57,7 @@ def main(args):
         run_p=args.run_p,
         project_title=args.project,
         localiser_labels=localiser_labels,
+        output=args.output,
         devices=args.gpus,
         patch_overlap=args.patch_overlap,
         save=args.save,
@@ -108,6 +109,8 @@ if __name__ == "__main__":
         default=None,
         help="Predictions subfolder (default: {run-p}-lbd with --lbd-folder).",
     )
+    parser.add_argument("--output", type=Path, default=None,
+                        help="Cascade input: final predictions folder; stage intermediates go under <output>/_stages/.")
     parser.add_argument("--gpus", nargs="+", type=int, default=[1])
     parser.add_argument("--chunksize", type=int, default=4)
     parser.add_argument("--patch-overlap", type=float, default=None)
@@ -117,6 +120,8 @@ if __name__ == "__main__":
     parser.add_argument("--save", action="store_true", default=True)
     parser.add_argument("--no-save", dest="save", action="store_false")
     args = parser.parse_known_args()[0]
+    if args.lbd_folder is None and args.output is None:
+        parser.error("--output is required with --folder / --dataset")
     if args.arch == "retinaunet" and args.project is None:
         args.project = "lidca"
     main(args)

@@ -92,7 +92,8 @@ def image(shape):
 
 def cascade(cls, safe):
     write_run("RUN-N", plan("pn", "nodes", mode="source"))
-    En = cls("RUN-N", "RUN-D", localiser_labels=[1], devices=[0], project_title="tproj", safe_mode=safe, save=False)
+    En = cls("RUN-N", "RUN-D", localiser_labels=[1], output=PREDS.parent / "out", devices=[0], project_title="tproj",
+             safe_mode=safe, save=False)
     En.create_and_set_postprocess_transforms()
     return En
 

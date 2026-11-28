@@ -96,11 +96,15 @@ MODEL = {
 }
 
 
-def _det_plan_maker(tmp_path, row):  #AI
-    """Supply one plans row, nested parameter sheets and a private plan-file location to setup."""
+def _det_plan_maker(tmp_path, row, monkeypatch):  #AI
+    """Supply one plans row, nested parameter sheets and a private plan-file location to setup.
+    The row names one datasource of an undeclared organ (no labels.yaml), so the organ_label setup reads gives None."""
+    monkeypatch.setattr("fran.configs.plan_keys.DS", {"tds": SimpleNamespace(organ="misc", folder=tmp_path, name="tds")})
     maker = object.__new__(parser.ConfigMakerDet)
     maker.project = SimpleNamespace(project_folder=tmp_path, project_title="test")
-    full_row = {"batch_size": "auto", "model": "auto", "val_patch_size": "auto", "encoder": None, "pretrained": None} | row
+    full_row = {"batch_size": "auto", "model": "auto", "val_patch_size": "auto", "encoder": None, "pretrained": None,
+                "datasources": "tds", "remapping_source": None, "remapping_lbd_rbd": None, "remapping_train": None,
+                "remapping_imported": None, "merge_imported_labels": False} | row
     maker.plans = pd.DataFrame([full_row], index=[1])
     maker.configs = {"dataset_params": {}, "model_params": dict(MODEL_PARAMS)}
     maker._sheet_configs = {sheet: dict(values) for sheet, values in maker.configs.items()}
@@ -119,11 +123,11 @@ def _write_resolved(maker, resolved, fits=None):  #AI
     return pkl
 
 
-def test_detection_config_loads_without_plan_file(tmp_path):  #AI
+def test_detection_config_loads_without_plan_file(tmp_path, monkeypatch):  #AI
     """Load the sheet plan while its auto values are still unresolved."""
     maker = _det_plan_maker(tmp_path, {
         "mode": "lbd", "spacing": "auto", "patch_dim0": 192, "patch_dim1": 96, "batch_size": 4,
-    })
+    }, monkeypatch)
     maker.setup(1)
     plan = maker.configs["plan_train"]
     assert plan["spacing"] == "auto"
@@ -132,9 +136,9 @@ def test_detection_config_loads_without_plan_file(tmp_path):  #AI
     assert plan["model"] == "auto"
 
 
-def test_detection_resolved_plan_keeps_fixed_workbook_patches(tmp_path):  #AI
+def test_detection_resolved_plan_keeps_fixed_workbook_patches(tmp_path, monkeypatch):  #AI
     """A saved fit cannot replace fixed training or validation patch dimensions."""
-    maker = _det_plan_maker(tmp_path, {"mode": "lbd", "spacing": [1, 1, 2], "patch_dim0": 192, "patch_dim1": 96})
+    maker = _det_plan_maker(tmp_path, {"mode": "lbd", "spacing": [1, 1, 2], "patch_dim0": 192, "patch_dim1": 96}, monkeypatch)
     intensity = {"mean": 1, "sd": 2, "percentile_00_5": -3, "percentile_99_5": 5}
     gpu_fit = {"patch_size": [160, 160, 96], "val_patch_size": [160, 160, 96], "batch_size": 4, "model": MODEL}
     _write_resolved(maker, {
@@ -161,12 +165,12 @@ def test_detection_resolved_plan_keeps_fixed_workbook_patches(tmp_path):  #AI
     assert maker.configs["model_params"] == MODEL_PARAMS
 
 
-def test_detection_reuses_saved_values_by_plan_id(tmp_path):
+def test_detection_reuses_saved_values_by_plan_id(tmp_path, monkeypatch):
     row = {"mode": "lbd", "spacing": "auto", "patch_dim0": 192, "patch_dim1": 96}
     resolved = {"spacing": [1, 1, 2], "val_patch_size": [192, 192, 96]}
-    path = _write_resolved(_det_plan_maker(tmp_path, row), resolved)
+    path = _write_resolved(_det_plan_maker(tmp_path, row, monkeypatch), resolved)
     path.write_bytes(pickle.dumps({"requested": {"legacy": True}, "plan_train": resolved}))
-    edited = _det_plan_maker(tmp_path, row | {"spacing": [2, 2, 2], "val_patch_size": [64, 64, 64]})
+    edited = _det_plan_maker(tmp_path, row | {"spacing": [2, 2, 2], "val_patch_size": [64, 64, 64]}, monkeypatch)
     edited.setup(1)
     assert edited.configs["plan_train"]["spacing"] == resolved["spacing"]
     assert edited.configs["plan_train"]["val_patch_size"] == [64, 64, 64]

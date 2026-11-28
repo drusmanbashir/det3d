@@ -38,10 +38,10 @@ Detection LBD preprocessing uses `fran/run/preproc/analyze_resample.py --pipelin
 
 ## run/nndet
 
-- `local_plan_sources.yaml` — local-only image/lm roots → nnDet task mapping (`liver|kidneys|pancreas|colon`; no downloads)
+- `local_plan_sources.yaml` — local-only image/lm roots (`DS.<dataset>` or `$cold_storage_folder/...`, fran `resolve_path`) → nnDet task mapping; keys `liver`, `kidneys`, `pancreas`, `colon`; no downloads
 - `discover_local_plan_sources.py` — report on-disk sources + plan pkl status
 - `stage_local_msd.py` — symlink local FRAN `images/` + `lms/` into nnDet task layouts (Decathlon raw or KiTS raw_splitted)
-- `generate_nndet_plan_silo.sh` — ephemeral `nndet_prep` silo → `$nndet_conf/plans/{mnemonic}/D3V001_3d.pkl`; supports `all` and `--force`
+- `generate_nndet_plan_silo.sh` — ephemeral `nndet_prep` silo → `$nndet_conf/plans/<sources key>/D3V001_3d.pkl`; any mnemonic of the organ (`kidney`, `kidneys`, `kits23`) selects its `local_plan_sources.yaml` key; supports `all` and `--force`
 - `generate_nndet_plans_local.sh` — run silo for every mnemonic in `local_plan_sources.yaml` (skips existing real pkls)
 
 ## det/architectures
@@ -88,7 +88,7 @@ Detection training and inference use FRAN's `NormaliseClipd.from_plan`. The work
 
 - `post.py` — `PackRetinaNetPredsd`, `PackRetinaUNetPredsd`, `InvPreprocessBoxd`, `Offd`, `BoxRd`, `SaveDetOutputd`
 - `patch.py` — `DetPatchRetinaNet`, `DetPatchRetinaUNet`, `DetPatchLBD`, `NNDetInferer` (whole-scan; settings None = checkpoint: `saved_tile_settings`, overlap, tile batch, `inference_tta`, whole-scan merge plan)
-- `cascade.py` — `DetBBoxCascadeInferer`, `DetSegBBoxCascadeInferer`
+- `cascade.py` — `DetBBoxCascadeInferer`, `DetSegBBoxCascadeInferer`: finals in `output/<proj_title>/` (`<case>.json` boxes only, `<case>.nii.gz` with seg), stages in `output/_stages/<run>/`; `run` returns the final path per input
 - `lbd.py` — `DetLBDRunner` (LBD `.pt` patch-only infer)
 - `lbd_pt.py` — load LBD tensors and prepare full-volume patch data
 - `patch.py` / `cascade.py` — re-exports of Det inferers
@@ -102,8 +102,8 @@ Detection training and inference use FRAN's `NormaliseClipd.from_plan`. The work
 ## run/inference
 
 - `_infer_common.py` — shared helpers for inference CLIs: `default_run_w`, `resolve_input_images`, `resolve_localiser_labels`
-- `infer_cascade.py` — RetinaUNet cascade infer (`--run-p`, `--run-w`, `--lung-localiser`, `--folder`/`--dataset`, `--project lidca`)
-- `infer_det.py` — cascade / LBD det infer (`--run-p`, `--arch`, `--run-w`, `--lbd-folder`, `--folder`/`--dataset`)
+- `infer_cascade.py` — RetinaUNet cascade infer (`--run-p`, `--run-w`, `--output`, `--lung-localiser`, `--folder`/`--dataset`, `--project lidca`)
+- `infer_det.py` — cascade / LBD det infer (`--run-p`, `--arch`, `--run-w`, `--output` with `--folder`/`--dataset`, `--lbd-folder`)
 - `infer_retinaunet_lidc2_seg.py` — RetinaUNet seg infer on N LIDC2 nifti cases
 - `view_retinaunet_seg_slicer.py` — open seg NIfTI outputs in 3D Slicer
 - `view_preds.py` — view stored sidecars only (`--dir` or `--run-p`)

@@ -4,6 +4,7 @@ Requires --run-w: stock TotalSegmentator is not integrated. Helpers live in
 _infer_common.py; fran/run/inference/infer.py also uses the cascade class.
 """
 import argparse
+from pathlib import Path
 
 from det3d.inference.cascade import DetSegBBoxCascadeInferer as CascadeInferer
 
@@ -23,6 +24,7 @@ def main(args):
         run_p=args.run_p,
         project_title=args.project,
         localiser_labels=labels,
+        output=args.output,
         devices=args.gpus,
         patch_overlap=args.patch_overlap,
         save=True,
@@ -35,6 +37,8 @@ if __name__ == "__main__":
     parser.add_argument("--run-w", default=None, help="FRAN localiser run name")
     parser.add_argument("--run-p", required=True, help="RetinaUNet det run name")
     parser.add_argument("--project", default="lidca")
+    parser.add_argument("--output", type=Path, required=True,
+                        help="Final predictions folder; stage intermediates go under <output>/_stages/.")
     parser.add_argument("--gpus", nargs="+", type=int, default=[1])
     parser.add_argument("--patch-overlap", type=float, default=None)
     parser.add_argument("--localiser-labels", nargs="*", type=int, default=None)

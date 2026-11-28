@@ -6,6 +6,7 @@ import torch
 
 from det3d.extra.infer_debug.artifacts import write_lm_nifti_artifacts
 from fran.inference.helpers import load_params
+from fran.trainers import pinned_checkpoint
 from det3d.extra.infer_debug.fixtures import load_fixture
 from det3d.extra.infer_debug.fixtures._case import InferFixtureCase
 from det3d.extra.infer_debug.fixtures.lidc_0001 import IMAGE_FN, crop_fixture as crop_lidc
@@ -58,7 +59,7 @@ def run_cascade_lm_roundtrip(
         artifact_dir = Path(out_dir) / fixture_name / run_p
         artifact_dir.mkdir(parents=True, exist_ok=True)
 
-    params = load_params(run_p)
+    params = load_params(pinned_checkpoint(run_p))
     preprocess = build_patch_preprocess(params)
     patch_post = build_patch_post_dict(preprocess)
     cascade_post = build_cascade_post_dict(run_p)
