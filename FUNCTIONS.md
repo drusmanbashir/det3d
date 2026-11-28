@@ -87,7 +87,7 @@ Detection training and inference use FRAN's `NormaliseClipd.from_plan`. The work
 ## det3d/inference
 
 - `post.py` — `PackRetinaNetPredsd`, `PackRetinaUNetPredsd`, `InvPreprocessBoxd`, `Offd`, `BoxRd`, `SaveDetOutputd`
-- `patch.py` — `DetPatchRetinaNet`, `DetPatchRetinaUNet`, `DetPatchLBD`
+- `patch.py` — `DetPatchRetinaNet`, `DetPatchRetinaUNet`, `DetPatchLBD`, `NNDetInferer` (whole-scan; settings None = checkpoint: `saved_tile_settings`, overlap, tile batch, `inference_tta`, whole-scan merge plan)
 - `cascade.py` — `DetBBoxCascadeInferer`, `DetSegBBoxCascadeInferer`
 - `lbd.py` — `DetLBDRunner` (LBD `.pt` patch-only infer)
 - `lbd_pt.py` — load LBD tensors and prepare full-volume patch data

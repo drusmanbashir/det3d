@@ -127,18 +127,14 @@ class DetPatchRetinaUNet(DetPatchInfererBase):
         self.num_tta = inference_tta(self.params["configs"])
 
     def inference_params(self):
+        """nnDetection's merge defaults with the net's top-k, detection cap and minimum box size."""
         net = self.model.net
         import nndet.compat  # noqa: F401
-        from nndet.inference.detection.model import batched_weighted_nms_model
+        from nndet.inference.ensembler.detection import BoxEnsemblerSelective
 
-        params = {
-            "model_score_thresh": 0.0,
-            "model_topk": int(net.topk_candidates),
-            "model_detections_per_image": int(net.detections_per_img),
-            "remove_small_boxes": float(net.remove_small_boxes),
-            "model_iou": 0.1,
-            "model_nms_fn": batched_weighted_nms_model,
-        }
+        params = BoxEnsemblerSelective.get_default_parameters()
+        params.update(model_topk=int(net.topk_candidates), model_detections_per_image=int(net.detections_per_img),
+                      remove_small_boxes=float(net.remove_small_boxes))
         return params
 
     @staticmethod
@@ -177,6 +173,7 @@ class DetPatchRetinaUNet(DetPatchInfererBase):
         params = self.inference_params()
         p_sorted, idx_sorted = probs.sort(descending=True)
         idx_sorted = idx_sorted[: params["model_topk"]]
+        idx_sorted = idx_sorted[p_sorted[: params["model_topk"]] > params["model_score_thresh"]]
 
         b = boxes[idx_sorted]
         p = probs[idx_sorted]
@@ -362,6 +359,17 @@ class DetPatchRetinaUNet(DetPatchInfererBase):
         return batch
 
 
+TILE_SETTING_KEYS = dict(score_thresh="score_thresh", nms_thresh="nms_thresh", detections_per_img="detections_per_img",
+                         topk_candidates="topk_candidates_per_level", remove_small_boxes="remove_small_boxes")
+
+
+def saved_tile_settings(configs):
+    """Tile box filter saved with the run: the `postprocess` sheet, or `plan_train` in runs trained before it."""
+    source = configs["postprocess"] if "postprocess" in configs else configs["plan_train"]
+    settings = {attr: source[key] for attr, key in TILE_SETTING_KEYS.items()}
+    return settings
+
+
 class NNDetInferer(DetPatchRetinaUNet):
     """Whole-scan Retina U-Net with nnDetection tile settings and replayable view slots."""
 
@@ -370,24 +378,26 @@ class NNDetInferer(DetPatchRetinaUNet):
 
     def __init__(
         self, run_name, project_title=None, devices=(0,), safe_mode=False, save=False,
-        params=None, ckpt=None, debug=False, bs=8, patch_overlap=0.5, mirror_views=8,
-        tile_score_thresh=0.0, tile_nms_thresh=0.6, topk_candidates=10000,
-        tile_min_box=0.01, detections_per_img=100, model_topk=1000,
-        model_iou=0.1, model_score_thresh=0.0, save_states=None,
+        params=None, ckpt=None, debug=False, bs=None, patch_overlap=None, mirror_views=None,
+        tile_score_thresh=None, tile_nms_thresh=None, topk_candidates=None,
+        tile_min_box=None, detections_per_img=None, model_topk=None,
+        model_iou=None, model_score_thresh=None, save_states=None,
     ):
-        """mirror_views accepts 1 (identity), 4 (two axes), or 8 (three axes)."""
-        if mirror_views not in (1, 4, 8):
-            raise ValueError(f"mirror_views={mirror_views}, expected 1, 4 or 8")
+        """Settings left None come from the checkpoint: tile filter (`saved_tile_settings`), overlap, tile batch,
+        mirror views (`inference_tta`; 0 = none, 4 = two axes, 8 = three axes) and the whole-scan merge plan."""
+        if mirror_views not in (None, 0, 1, 4, 8):
+            raise ValueError(f"mirror_views={mirror_views}, expected 0, 1, 4 or 8")
         super().__init__(run_name, project_title=project_title, devices=devices, safe_mode=safe_mode,
                          save=save, params=params, ckpt=ckpt, debug=debug, bs=bs,
                          patch_overlap=patch_overlap, save_states=save_states)
         self.source_checkpoint = Path(self.ckpt).resolve()
         self.mirror_views = mirror_views
-        self.tile_settings = dict(score_thresh=tile_score_thresh, nms_thresh=tile_nms_thresh,
-                                  topk_candidates=topk_candidates, remove_small_boxes=tile_min_box,
-                                  detections_per_img=detections_per_img)
-        self.merge_settings = dict(model_topk=model_topk, model_iou=model_iou,
-                                   model_score_thresh=model_score_thresh)
+        given = dict(score_thresh=tile_score_thresh, nms_thresh=tile_nms_thresh, topk_candidates=topk_candidates,
+                     remove_small_boxes=tile_min_box, detections_per_img=detections_per_img)
+        self.tile_settings = saved_tile_settings(self.params["configs"]) | {k: v for k, v in given.items() if v is not None}
+        given = dict(model_topk=model_topk, model_iou=model_iou, model_score_thresh=model_score_thresh)
+        self.merge_overrides = {k: v for k, v in given.items() if v is not None}
+        self.merge_settings = dict(self.merge_overrides)
 
     def create_preprocess_transforms(self):
         super().create_preprocess_transforms()
@@ -396,9 +406,13 @@ class NNDetInferer(DetPatchRetinaUNet):
 
     def setup(self):
         super().setup()
-        self.num_tta = self.mirror_views
+        if self.mirror_views is not None:
+            self.num_tta = self.mirror_views
         for key, value in self.tile_settings.items():
             setattr(self.model.net, key, value)
+        if self.winners_path("whole-scan").is_file():
+            self.load_winners("whole-scan")
+        self.merge_settings.update(self.merge_overrides)
 
     def detection_limit(self):
         return self.model.net.detections_per_img
@@ -552,6 +566,14 @@ class DetPatchRetinaNet(DetPatchInfererBase):
     arch_name = "RetinaNet"
     model_manager = RetinaNetManager
     keys_postproc = "Pack,SqL,InvPreBox"
+
+    def setup(self):
+        """The detector's own sliding window takes this inferer's overlap and tile batch."""
+        super().setup()
+        self.model.detector.set_sliding_window_inferer(
+            roi_size=self.model.val_patch_size, overlap=self.inferer.overlap,
+            sw_batch_size=self.inferer.sw_batch_size, mode="constant", device="cpu",
+        )
 
     def create_postprocess_transforms(self, preprocess_transform):
         from det3d.inference.post import InvPreprocessBoxd, PackRetinaNetPredsd
